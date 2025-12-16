@@ -1850,4 +1850,202 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       End
     End
   End
+
+  Describe "populate_pod_ip_name_list()"
+    Context "when successfully resolves all pod FQDNs to IPs"
+      get_all_shards_pod_fqdns() { %text
+        echo "falkordb-shard-0.falkordb-headless.default.svc.cluster.local,falkordb-shard-1.falkordb-headless.default.svc.cluster.local,falkordb-shard-2.falkordb-headless.default.svc.cluster.local"
+      }
+
+      getent() { %text
+        local cmd="$1"
+        local fqdn="$2"
+        if [ "$cmd" = "hosts" ]; then
+          case "$fqdn" in
+            "falkordb-shard-0.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.1 falkordb-shard-0.falkordb-headless.default.svc.cluster.local"
+              ;;
+            "falkordb-shard-1.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.2 falkordb-shard-1.falkordb-headless.default.svc.cluster.local"
+              ;;
+            "falkordb-shard-2.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.3 falkordb-shard-2.falkordb-headless.default.svc.cluster.local"
+              ;;
+          esac
+        fi
+      }
+
+      setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      Before "setup"
+
+      It "exports comma-separated lists of pod IPs and names"
+        When call populate_pod_ip_name_list
+        The status should be success
+        The variable KB_CLUSTER_POD_IP_LIST should equal "10.0.0.1,10.0.0.2,10.0.0.3"
+        The variable KB_CLUSTER_POD_NAME_LIST should equal "falkordb-shard-0,falkordb-shard-1,falkordb-shard-2"
+      End
+    End
+
+    Context "when some pod FQDNs cannot be resolved"
+      get_all_shards_pod_fqdns() { %text
+        echo "falkordb-shard-0.falkordb-headless.default.svc.cluster.local,falkordb-shard-1.falkordb-headless.default.svc.cluster.local,falkordb-shard-2.falkordb-headless.default.svc.cluster.local"
+      }
+
+      getent() { %text
+        local cmd="$1"
+        local fqdn="$2"
+        if [ "$cmd" = "hosts" ]; then
+          case "$fqdn" in
+            "falkordb-shard-0.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.1 falkordb-shard-0.falkordb-headless.default.svc.cluster.local"
+              ;;
+            "falkordb-shard-1.falkordb-headless.default.svc.cluster.local")
+              return 1
+              ;;
+            "falkordb-shard-2.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.3 falkordb-shard-2.falkordb-headless.default.svc.cluster.local"
+              ;;
+          esac
+        fi
+      }
+
+      setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      Before "setup"
+
+      It "skips unresolvable pods and exports only resolved ones"
+        When call populate_pod_ip_name_list
+        The status should be success
+        The variable KB_CLUSTER_POD_IP_LIST should equal "10.0.0.1,10.0.0.3"
+        The variable KB_CLUSTER_POD_NAME_LIST should equal "falkordb-shard-0,falkordb-shard-2"
+        The stderr should include "Warning: Failed to resolve IP for pod FQDN"
+      End
+    End
+
+    Context "when get_all_shards_pod_fqdns fails"
+      get_all_shards_pod_fqdns() { %text
+        return 1
+      }
+
+      setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      Before "setup"
+
+      It "returns error status when unable to get FQDNs"
+        When call populate_pod_ip_name_list
+        The status should be failure
+        The stderr should include "Error: Failed to get all shard pod FQDNs"
+      End
+    End
+
+    Context "when no pod FQDNs are returned"
+      get_all_shards_pod_fqdns() { %text
+        echo ""
+      }
+
+      setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      Before "setup"
+
+      It "returns error status when FQDN list is empty"
+        When call populate_pod_ip_name_list
+        The status should be failure
+        The stderr should include "Error: Failed to get all shard pod FQDNs"
+      End
+    End
+
+    Context "when getent returns empty address"
+      get_all_shards_pod_fqdns() { %text
+        echo "falkordb-shard-0.falkordb-headless.default.svc.cluster.local,falkordb-shard-1.falkordb-headless.default.svc.cluster.local"
+      }
+
+      getent() { %text
+        local cmd="$1"
+        local fqdn="$2"
+        if [ "$cmd" = "hosts" ]; then
+          case "$fqdn" in
+            "falkordb-shard-0.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.1 falkordb-shard-0.falkordb-headless.default.svc.cluster.local"
+              ;;
+            "falkordb-shard-1.falkordb-headless.default.svc.cluster.local")
+              echo ""
+              ;;
+          esac
+        fi
+      }
+
+      setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      Before "setup"
+
+      It "skips pods with empty address and exports only valid IPs"
+        When call populate_pod_ip_name_list
+        The status should be success
+        The variable KB_CLUSTER_POD_IP_LIST should equal "10.0.0.1"
+        The variable KB_CLUSTER_POD_NAME_LIST should equal "falkordb-shard-0"
+        The stderr should include "Warning: Failed to resolve IP for pod FQDN"
+      End
+    End
+
+    Context "when CURRENT_SHARD_COMPONENT_NAME is set"
+      get_all_shards_pod_fqdns() { %text
+        echo "falkordb-shard-0.falkordb-headless.default.svc.cluster.local,falkordb-shard-1.falkordb-headless.default.svc.cluster.local,falkordb-shard-98x-0.falkordb-shard-98x-headless.default.svc.cluster.local,falkordb-shard-98x-1.falkordb-shard-98x-headless.default.svc.cluster.local"
+      }
+
+      getent() { %text
+        local cmd="$1"
+        local fqdn="$2"
+        if [ "$cmd" = "hosts" ]; then
+          case "$fqdn" in
+            "falkordb-shard-0.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.1 falkordb-shard-0.falkordb-headless.default.svc.cluster.local"
+              ;;
+            "falkordb-shard-1.falkordb-headless.default.svc.cluster.local")
+              echo "10.0.0.2 falkordb-shard-1.falkordb-headless.default.svc.cluster.local"
+              ;;
+            "falkordb-shard-98x-0.falkordb-shard-98x-headless.default.svc.cluster.local")
+              echo "10.0.0.3 falkordb-shard-98x-0.falkordb-shard-98x-headless.default.svc.cluster.local"
+              ;;
+            "falkordb-shard-98x-1.falkordb-shard-98x-headless.default.svc.cluster.local")
+              echo "10.0.0.4 falkordb-shard-98x-1.falkordb-shard-98x-headless.default.svc.cluster.local"
+              ;;
+          esac
+        fi
+      }
+
+      setup() {
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+        unset KB_CLUSTER_COMPONENT_POD_NAME_LIST
+        unset KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST
+      }
+      Before "setup"
+
+      cleanup() {
+        unset CURRENT_SHARD_COMPONENT_NAME
+      }
+      After "cleanup"
+
+      It "exports component-specific pod lists when CURRENT_SHARD_COMPONENT_NAME is set"
+        When call populate_pod_ip_name_list
+        The status should be success
+        The variable KB_CLUSTER_POD_IP_LIST should equal "10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4"
+        The variable KB_CLUSTER_POD_NAME_LIST should equal "falkordb-shard-0,falkordb-shard-1,falkordb-shard-98x-0,falkordb-shard-98x-1"
+        The variable KB_CLUSTER_COMPONENT_POD_NAME_LIST should equal "falkordb-shard-98x-0,falkordb-shard-98x-1"
+        The variable KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST should equal "10.0.0.3,10.0.0.4"
+      End
+    End
+  End
 End

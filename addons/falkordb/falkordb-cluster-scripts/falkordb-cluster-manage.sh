@@ -655,7 +655,84 @@ gen_initialize_redis_cluster_secondary_nodes() {
   gen_initialize_redis_cluster_node "false"
 }
 
-initialize_redis_cluster() {
+populate_pod_ip_name_list() {
+  # This function populates KB_CLUSTER_POD_IP_LIST and KB_CLUSTER_POD_NAME_LIST
+  # by retrieving all shard pod FQDNs and resolving them to IPs via getent hosts
+  # 
+  # It exports:
+  #   KB_CLUSTER_POD_IP_LIST - comma-separated list of all pod IPs
+  #   KB_CLUSTER_POD_NAME_LIST - comma-separated list of all pod names
+  #   KB_CLUSTER_POD_HOST_IP_LIST - comma-separated list of all pod IPs (aligned with pod names)
+  #   KB_CLUSTER_COMPONENT_POD_NAME_LIST - comma-separated list of current component pod names
+  #   KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST - comma-separated list of current component pod IPs
+  #
+  # Returns:
+  #   0 if successful (even with partial failures)
+  #   1 if unable to get pod FQDNs
+
+  local pod_fqdns
+  local pod_ips=()
+  local pod_names=()
+  local component_pod_names=()
+  local component_pod_ips=()
+  local pod_name
+  local pod_ip
+
+  # Get all shard pod FQDNs
+  if ! pod_fqdns=$(get_all_shards_pod_fqdns); then
+    echo "Error: Failed to get all shard pod FQDNs" >&2
+    return 1
+  fi
+
+  # Handle empty FQDN list
+  if [[ -z "$pod_fqdns" ]]; then
+    echo "Error: Failed to get all shard pod FQDNs" >&2
+    return 1
+  fi
+
+  # Resolve each FQDN to IP
+  while IFS=',' read -r pod_fqdn; do
+    # Extract pod name from FQDN (first part before the dot)
+    pod_name="${pod_fqdn%%.*}"
+
+    # Resolve FQDN to IP via getent hosts, get the first IP (IPv4)
+    local getent_output
+    getent_output=$(getent hosts "$pod_fqdn" 2>&1)
+    pod_ip=$(echo "$getent_output" | awk '{print $1; exit}')
+
+    # Skip pods that cannot be resolved
+    if [[ -z "$pod_ip" ]]; then
+      echo "Warning: Failed to resolve IP for pod FQDN: $pod_fqdn (getent output: $getent_output)" >&2
+      continue
+    fi
+
+    pod_ips+=("$pod_ip")
+    pod_names+=("$pod_name")
+
+    # Collect component-specific pods if CURRENT_SHARD_COMPONENT_NAME is set
+    if [[ -n "$CURRENT_SHARD_COMPONENT_NAME" && "$pod_name" =~ ^"$CURRENT_SHARD_COMPONENT_NAME"- ]]; then
+      component_pod_names+=("$pod_name")
+      component_pod_ips+=("$pod_ip")
+    fi
+  done <<< "$(echo "$pod_fqdns" | tr ',' '\n')"
+
+  # Export all pods as comma-separated values
+  export KB_CLUSTER_POD_IP_LIST=$(IFS=,; echo "${pod_ips[*]}")
+  export KB_CLUSTER_POD_NAME_LIST=$(IFS=,; echo "${pod_names[*]}")
+  # Keep host IP list aligned with resolved pod IPs for downstream consumers
+  export KB_CLUSTER_POD_HOST_IP_LIST="$KB_CLUSTER_POD_IP_LIST"
+
+  # Export component-specific pods
+  if [[ ${#component_pod_names[@]} -gt 0 ]]; then
+    export KB_CLUSTER_COMPONENT_POD_NAME_LIST=$(IFS=,; echo "${component_pod_names[*]}")
+    export KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST=$(IFS=,; echo "${component_pod_ips[*]}")
+  fi
+
+  return 0
+}
+
+initialize_redis_cluster() {  
+
   if is_empty "$KB_CLUSTER_POD_NAME_LIST" || is_empty "$KB_CLUSTER_POD_HOST_IP_LIST"; then
     echo "Error: Required environment variable KB_CLUSTER_POD_NAME_LIST and KB_CLUSTER_POD_HOST_IP_LIST are not set when initializing redis cluster" >&2
     return 1
@@ -955,6 +1032,8 @@ scale_in_redis_cluster_shard() {
 initialize_or_scale_out_redis_cluster() {
   # TODO: remove random sleep, it's a workaround for the multi components initialization parallelism issue
   sleep_random_second_when_ut_mode_false 10 1
+
+  populate_pod_ip_name_list
 
   if is_empty "$KB_CLUSTER_POD_IP_LIST" || is_empty "$KB_CLUSTER_POD_NAME_LIST"; then
     echo "Error: Required environment variable KB_CLUSTER_POD_IP_LIST and KB_CLUSTER_POD_NAME_LIST and SERVICE_PORT is not set." >&2
