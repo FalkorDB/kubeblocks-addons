@@ -555,8 +555,18 @@ build_announce_ip_and_port() {
   fi
 }
 
+get_target_pod_cluster_announce_hostname() {
+  local target_pod_fqdn="$1"
+  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
+    return
+  fi
+  echo "$target_pod_fqdn"
+}
+
 build_cluster_announce_info() {
   current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$CURRENT_SHARD_POD_FQDN_LIST" "$CURRENT_POD_NAME")
+  cluster_announce_hostname_value=$(get_target_pod_cluster_announce_hostname $current_pod_fqdn)
   if is_empty "$current_pod_fqdn"; then
     echo "Error: Failed to get current pod: $CURRENT_POD_NAME fqdn from current shard pod fqdn list: $CURRENT_SHARD_POD_FQDN_LIST. Exiting."
     exit 1
@@ -568,21 +578,21 @@ build_cluster_announce_info() {
       echo "cluster-announce-ip $redis_announce_host_value"
       echo "cluster-announce-port $redis_announce_port_value"
       echo "cluster-announce-bus-port $redis_announce_bus_port_value"
-      echo "cluster-announce-hostname $current_pod_fqdn"
+      echo "cluster-announce-hostname $cluster_announce_hostname_value"
       echo "cluster-preferred-endpoint-type ip"
     } >> $redis_real_conf
   elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
     echo "redis cluster use fixed pod ip: $CURRENT_POD_IP to announce"
     {
       echo "cluster-announce-ip $CURRENT_POD_IP"
-      echo "cluster-announce-hostname $current_pod_fqdn"
+      echo "cluster-announce-hostname $cluster_announce_hostname_value"
       echo "cluster-preferred-endpoint-type ip"
     } >> $redis_real_conf
   else
-    echo "redis cluster use pod fqdn $current_pod_fqdn to announce"
+    echo "redis cluster use pod $cluster_announce_hostname_value to announce"
     {
       echo "cluster-announce-ip $CURRENT_POD_IP"
-      echo "cluster-announce-hostname $current_pod_fqdn"
+      echo "cluster-announce-hostname $cluster_announce_hostname_value"
       echo "cluster-preferred-endpoint-type hostname"
     } >> $redis_real_conf
   fi
