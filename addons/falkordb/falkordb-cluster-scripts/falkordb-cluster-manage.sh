@@ -720,16 +720,17 @@ populate_pod_ip_name_list() {
   export KB_CLUSTER_POD_HOST_IP_LIST="$KB_CLUSTER_POD_IP_LIST"
 
   # Export component-specific pods if CURRENT_SHARD_COMPONENT_NAME is set
-  # Use the component-specific FQDN environment variable (e.g., ALL_SHARDS_POD_FQDN_LIST_SHARD_98X)
-  if [[ -n "$CURRENT_SHARD_COMPONENT_NAME" ]]; then
-    # Extract the short shard name (everything after "shard-" in component name)
-    # For "falkordb-shard-98x", extract "98x"
-    local short_shard_name
-    short_shard_name="${CURRENT_SHARD_COMPONENT_NAME##*shard-}"
+  # Use the component-specific FQDN environment variable via CURRENT_SHARD_COMPONENT_SHORT_NAME
+  # e.g., for CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-gds", use ALL_SHARDS_POD_FQDN_LIST_SHARD_GDS
+  if [[ -n "$CURRENT_SHARD_COMPONENT_NAME" ]] && [[ -n "$CURRENT_SHARD_COMPONENT_SHORT_NAME" ]]; then
+    # Extract the suffix after "shard-" from the short name
+    # For "shard-gds", extract "gds"
+    local shard_suffix
+    shard_suffix="${CURRENT_SHARD_COMPONENT_SHORT_NAME##*shard-}"
     
     # Convert to uppercase for env var name
     local component_var_suffix
-    component_var_suffix=$(echo "$short_shard_name" | tr '[:lower:]' '[:upper:]')
+    component_var_suffix=$(echo "$shard_suffix" | tr '[:lower:]' '[:upper:]')
     
     local component_fqdn_var_name="ALL_SHARDS_POD_FQDN_LIST_SHARD_${component_var_suffix}"
     local component_pod_fqdns="${!component_fqdn_var_name}"
