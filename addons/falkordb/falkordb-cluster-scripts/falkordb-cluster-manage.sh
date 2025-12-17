@@ -659,12 +659,15 @@ populate_pod_ip_name_list() {
   # This function populates KB_CLUSTER_POD_IP_LIST and KB_CLUSTER_POD_NAME_LIST
   # by retrieving all shard pod FQDNs and resolving them to IPs via getent hosts
   # 
+  # Additionally, it populates KB_CLUSTER_COMPONENT_POD_NAME_LIST and KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST
+  # by resolving all pods in the current component (via the component-specific FQDN environment variable).
+  #
   # It exports:
-  #   KB_CLUSTER_POD_IP_LIST - comma-separated list of all pod IPs
-  #   KB_CLUSTER_POD_NAME_LIST - comma-separated list of all pod names
-  #   KB_CLUSTER_POD_HOST_IP_LIST - comma-separated list of all pod IPs (aligned with pod names)
-  #   KB_CLUSTER_COMPONENT_POD_NAME_LIST - comma-separated list of current component pod names
-  #   KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST - comma-separated list of current component pod IPs
+  #   KB_CLUSTER_POD_IP_LIST - comma-separated list of ALL pod IPs (all components/shards in cluster)
+  #   KB_CLUSTER_POD_NAME_LIST - comma-separated list of ALL pod names (all components/shards in cluster)
+  #   KB_CLUSTER_POD_HOST_IP_LIST - comma-separated list of ALL pod IPs (aligned with KB_CLUSTER_POD_NAME_LIST)
+  #   KB_CLUSTER_COMPONENT_POD_NAME_LIST - comma-separated list of ALL pods in current component
+  #   KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST - comma-separated list of ALL pod IPs in current component
   #
   # Returns:
   #   0 if successful (even with partial failures)
@@ -708,24 +711,56 @@ populate_pod_ip_name_list() {
 
     pod_ips+=("$pod_ip")
     pod_names+=("$pod_name")
-
-    # Collect component-specific pods if CURRENT_SHARD_COMPONENT_NAME is set
-    if [[ -n "$CURRENT_SHARD_COMPONENT_NAME" && "$pod_name" =~ ^"$CURRENT_SHARD_COMPONENT_NAME"- ]]; then
-      component_pod_names+=("$pod_name")
-      component_pod_ips+=("$pod_ip")
-    fi
   done <<< "$(echo "$pod_fqdns" | tr ',' '\n')"
 
-  # Export all pods as comma-separated values
+  # Export all pods (across all components/shards in cluster) as comma-separated values
   export KB_CLUSTER_POD_IP_LIST=$(IFS=,; echo "${pod_ips[*]}")
   export KB_CLUSTER_POD_NAME_LIST=$(IFS=,; echo "${pod_names[*]}")
   # Keep host IP list aligned with resolved pod IPs for downstream consumers
   export KB_CLUSTER_POD_HOST_IP_LIST="$KB_CLUSTER_POD_IP_LIST"
 
-  # Export component-specific pods
-  if [[ ${#component_pod_names[@]} -gt 0 ]]; then
-    export KB_CLUSTER_COMPONENT_POD_NAME_LIST=$(IFS=,; echo "${component_pod_names[*]}")
-    export KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST=$(IFS=,; echo "${component_pod_ips[*]}")
+  # Export component-specific pods if CURRENT_SHARD_COMPONENT_NAME is set
+  # Use the component-specific FQDN environment variable (e.g., ALL_SHARDS_POD_FQDN_LIST_SHARD_98X)
+  if [[ -n "$CURRENT_SHARD_COMPONENT_NAME" ]]; then
+    # Extract the short shard name (everything after "shard-" in component name)
+    # For "falkordb-shard-98x", extract "98x"
+    local short_shard_name
+    short_shard_name="${CURRENT_SHARD_COMPONENT_NAME##*shard-}"
+    
+    # Convert to uppercase for env var name
+    local component_var_suffix
+    component_var_suffix=$(echo "$short_shard_name" | tr '[:lower:]' '[:upper:]')
+    
+    local component_fqdn_var_name="ALL_SHARDS_POD_FQDN_LIST_SHARD_${component_var_suffix}"
+    local component_pod_fqdns="${!component_fqdn_var_name}"
+
+    if [[ -n "$component_pod_fqdns" ]]; then
+      # Resolve component pod FQDNs to IPs
+      while IFS=',' read -r pod_fqdn; do
+        # Extract pod name from FQDN (first part before the dot)
+        pod_name="${pod_fqdn%%.*}"
+
+        # Resolve FQDN to IP via getent hosts, get the first IP (IPv4)
+        local getent_output
+        getent_output=$(getent hosts "$pod_fqdn" 2>&1)
+        pod_ip=$(echo "$getent_output" | awk '{print $1; exit}')
+
+        # Skip pods that cannot be resolved
+        if [[ -z "$pod_ip" ]]; then
+          echo "Warning: Failed to resolve IP for component pod FQDN: $pod_fqdn (getent output: $getent_output)" >&2
+          continue
+        fi
+
+        component_pod_names+=("$pod_name")
+        component_pod_ips+=("$pod_ip")
+      done <<< "$(echo "$component_pod_fqdns" | tr ',' '\n')"
+
+      # Export component-specific pods if any were found
+      if [[ ${#component_pod_names[@]} -gt 0 ]]; then
+        export KB_CLUSTER_COMPONENT_POD_NAME_LIST=$(IFS=,; echo "${component_pod_names[*]}")
+        export KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST=$(IFS=,; echo "${component_pod_ips[*]}")
+      fi
+    fi
   fi
 
   return 0

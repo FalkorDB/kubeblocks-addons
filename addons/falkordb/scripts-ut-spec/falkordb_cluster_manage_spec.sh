@@ -1738,7 +1738,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       get_all_shards_pod_fqdns() {
         echo "falkordb-shard-98x-0.namespace.svc.cluster.local,falkordb-shard-98x-1.namespace.svc.cluster.local,falkordb-shard-7hy-0.namespace.svc.cluster.local,falkordb-shard-7hy-1.namespace.svc.cluster.local,falkordb-shard-jwl-0.namespace.svc.cluster.local,falkordb-shard-jwl-1.namespace.svc.cluster.local"
       }
-      
+
       check_cluster_initialized() {
         return 1
       }
@@ -2034,6 +2034,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
       setup() {
         export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        export ALL_SHARDS_POD_FQDN_LIST_SHARD_98X="falkordb-shard-98x-0.falkordb-shard-98x-headless.default.svc.cluster.local,falkordb-shard-98x-1.falkordb-shard-98x-headless.default.svc.cluster.local"
         unset KB_CLUSTER_POD_IP_LIST
         unset KB_CLUSTER_POD_NAME_LIST
         unset KB_CLUSTER_COMPONENT_POD_NAME_LIST
@@ -2043,6 +2044,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
       cleanup() {
         unset CURRENT_SHARD_COMPONENT_NAME
+        unset ALL_SHARDS_POD_FQDN_LIST_SHARD_98X
       }
       After "cleanup"
 
