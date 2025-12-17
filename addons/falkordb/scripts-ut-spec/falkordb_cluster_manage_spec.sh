@@ -1735,6 +1735,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
     End
 
     Context "when FalkorDB Cluster is not initialized"
+      get_all_shards_pod_fqdns() {
+        echo "falkordb-shard-98x-0.namespace.svc.cluster.local,falkordb-shard-98x-1.namespace.svc.cluster.local,falkordb-shard-7hy-0.namespace.svc.cluster.local,falkordb-shard-7hy-1.namespace.svc.cluster.local,falkordb-shard-jwl-0.namespace.svc.cluster.local,falkordb-shard-jwl-1.namespace.svc.cluster.local"
+      }
+      
       check_cluster_initialized() {
         return 1
       }
@@ -1764,6 +1768,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
     End
 
     Context "when FalkorDB Cluster is already initialized"
+      get_all_shards_pod_fqdns() {
+        echo "falkordb-shard-98x-0.namespace.svc.cluster.local,falkordb-shard-98x-1.namespace.svc.cluster.local,falkordb-shard-7hy-0.namespace.svc.cluster.local,falkordb-shard-7hy-1.namespace.svc.cluster.local,falkordb-shard-jwl-0.namespace.svc.cluster.local,falkordb-shard-jwl-1.namespace.svc.cluster.local"
+      }
+
       check_cluster_initialized() {
         return 0
       }
