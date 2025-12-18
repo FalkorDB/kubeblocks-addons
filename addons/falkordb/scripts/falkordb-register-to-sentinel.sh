@@ -41,6 +41,20 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+get_announce_hostname_override_or_default() {
+  local default_value="$1"
+  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    local override_value="$ANNOUNCE_HOSTNAME_OVERRIDE"
+    # Expand $(POD_NAME) when present (pod name available in action context)
+    if [[ "$override_value" == *'$(POD_NAME)'* ]] && ! is_empty "$POD_NAME"; then
+      override_value="${override_value//\$(POD_NAME)/$POD_NAME}"
+    fi
+    echo "$override_value"
+    return
+  fi
+  echo "$default_value"
+}
+
 init_redis_service_port() {
   if env_exist SERVICE_PORT; then
     redis_default_service_port=$SERVICE_PORT
@@ -249,30 +263,36 @@ function register_to_sentinel_for_redis5() {
     exit 1
   fi
   if ! is_empty "$redis_announce_host_value" && ! is_empty "$redis_announce_port_value"; then
-    echo "register to sentinel:$sentinel_pod_fqdn with announce addr: redis_announce_host_value=$redis_announce_host_value, redis_announce_port_value=$redis_announce_port_value"
-    register_to_sentinel "$sentinel_pod_ip" "$master_name" "$redis_announce_host_value" "$redis_announce_port_value"
+    redis_primary_host=$(get_announce_hostname_override_or_default "$redis_announce_host_value")
+    echo "register to sentinel:$sentinel_pod_fqdn with announce addr: redis_primary_host=$redis_primary_host, redis_announce_port_value=$redis_announce_port_value"
+    register_to_sentinel "$sentinel_pod_ip" "$master_name" "$redis_primary_host" "$redis_announce_port_value"
   elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
     # the post provision action is executed in the primary pod, so we can get the primary pod ip from the env defined in the action context.
-    echo "register to sentinel:$sentinel_pod_fqdn with fixed primary pod ip: fixed_pod_ip=$CURRENT_POD_IP, redis_default_service_port=$redis_default_service_port"
-    register_to_sentinel "$sentinel_pod_ip" "$master_name" "$CURRENT_POD_IP" "$redis_default_service_port"
+    redis_primary_host=$(get_announce_hostname_override_or_default "$CURRENT_POD_IP")
+    echo "register to sentinel:$sentinel_pod_fqdn with fixed primary host: redis_primary_host=$redis_primary_host, redis_default_service_port=$redis_default_service_port"
+    register_to_sentinel "$sentinel_pod_ip" "$master_name" "$redis_primary_host" "$redis_default_service_port"
   else
-    echo "register to sentinel:$sentinel_pod_fqdn with pod fqdn: redis_default_primary_pod_fqdn=$redis_default_primary_pod_fqdn, redis_default_service_port=$redis_default_service_port"
-    register_to_sentinel "$sentinel_pod_ip" "$master_name" "$redis_default_primary_pod_fqdn" "$redis_default_service_port"
+    redis_primary_host=$(get_announce_hostname_override_or_default "$redis_default_primary_pod_fqdn")
+    echo "register to sentinel:$sentinel_pod_fqdn with pod host: redis_primary_host=$redis_primary_host, redis_default_service_port=$redis_default_service_port"
+    register_to_sentinel "$sentinel_pod_ip" "$master_name" "$redis_primary_host" "$redis_default_service_port"
   fi
 }
 
 function register_to_sentinel_for_redis() {
   local sentinel_pod_fqdn=${1:? "Error: Required argument sentinel_pod_fqdn is not set."}
   if ! is_empty "$redis_announce_host_value" && ! is_empty "$redis_announce_port_value"; then
-    echo "register to sentinel:$sentinel_pod_fqdn with announce addr: redis_announce_host_value=$redis_announce_host_value, redis_announce_port_value=$redis_announce_port_value"
-    register_to_sentinel "$sentinel_pod_fqdn" "$master_name" "$redis_announce_host_value" "$redis_announce_port_value"
+    redis_primary_host=$(get_announce_hostname_override_or_default "$redis_announce_host_value")
+    echo "register to sentinel:$sentinel_pod_fqdn with announce addr: redis_primary_host=$redis_primary_host, redis_announce_port_value=$redis_announce_port_value"
+    register_to_sentinel "$sentinel_pod_fqdn" "$master_name" "$redis_primary_host" "$redis_announce_port_value"
   elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
     # the post provision action is executed in the primary pod, so we can get the primary pod ip from the env defined in the action context.
-    echo "register to sentinel:$sentinel_pod_fqdn with fixed primary pod ip: fixed_pod_ip=$CURRENT_POD_IP, redis_default_service_port=$redis_default_service_port"
-    register_to_sentinel "$sentinel_pod_fqdn" "$master_name" "$CURRENT_POD_IP" "$redis_default_service_port"
+    redis_primary_host=$(get_announce_hostname_override_or_default "$CURRENT_POD_IP")
+    echo "register to sentinel:$sentinel_pod_fqdn with fixed primary host: redis_primary_host=$redis_primary_host, redis_default_service_port=$redis_default_service_port"
+    register_to_sentinel "$sentinel_pod_fqdn" "$master_name" "$redis_primary_host" "$redis_default_service_port"
   else
-    echo "register to sentinel:$sentinel_pod_fqdn with pod fqdn: redis_default_primary_pod_fqdn=$redis_default_primary_pod_fqdn, redis_default_service_port=$redis_default_service_port"
-    register_to_sentinel "$sentinel_pod_fqdn" "$master_name" "$redis_default_primary_pod_fqdn" "$redis_default_service_port"
+    redis_primary_host=$(get_announce_hostname_override_or_default "$redis_default_primary_pod_fqdn")
+    echo "register to sentinel:$sentinel_pod_fqdn with pod host: redis_primary_host=$redis_primary_host, redis_default_service_port=$redis_default_service_port"
+    register_to_sentinel "$sentinel_pod_fqdn" "$master_name" "$redis_primary_host" "$redis_default_service_port"
   fi
 }
 
