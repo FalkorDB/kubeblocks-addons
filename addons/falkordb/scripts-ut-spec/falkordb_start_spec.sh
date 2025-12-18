@@ -43,6 +43,10 @@ Describe "FalkorDB Start Bash Script Tests"
   }
   AfterAll 'cleanup'
 
+  clear_announce_override() {
+    unset ANNOUNCE_HOSTNAME_OVERRIDE
+  }
+
   Describe "extract_obj_ordinal()"
     It "extracts ordinal from object name correctly"
       When call extract_obj_ordinal "pod-name-2"
@@ -145,6 +149,7 @@ Describe "FalkorDB Start Bash Script Tests"
   End
 
   Describe "build_announce_ip_and_port()"
+    After "clear_announce_override"
     It "builds announce ip and port correctly when advertised svc is enabled"
       redis_announce_host_value="172.0.0.1"
       redis_announce_port_value="31000"
@@ -162,6 +167,17 @@ Describe "FalkorDB Start Bash Script Tests"
       When call build_announce_ip_and_port
       The contents of file "$redis_real_conf" should include "replica-announce-ip redis-redis-0.redis-redis.default.svc.cluster.local"
       The stdout should include "redis use kb pod fqdn redis-redis-0.redis-redis.default.svc.cluster.local to announce"
+    End
+
+    It "uses override hostname for replica announce when provided"
+      unset redis_announce_host_value
+      unset redis_announce_port_value
+      export CURRENT_POD_NAME="redis-redis-0"
+      export REDIS_POD_FQDN_LIST="redis-redis-0.redis-redis.default.svc.cluster.local,redis-redis-1.redis-redis.default.svc.cluster.local"
+      export ANNOUNCE_HOSTNAME_OVERRIDE="external.redis.example.com"
+      When call build_announce_ip_and_port
+      The contents of file "$redis_real_conf" should include "replica-announce-ip $ANNOUNCE_HOSTNAME_OVERRIDE"
+      The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for replica announce"
     End
 
     It "exits with error when failed to get current pod fqdn"

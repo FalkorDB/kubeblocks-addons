@@ -33,7 +33,12 @@ Describe "FalkorDB Start Sentinel Bash Script Tests"
   }
   AfterAll 'cleanup'
 
+  clear_announce_override() {
+    unset ANNOUNCE_HOSTNAME_OVERRIDE
+  }
+
   Describe "build_redis_sentinel_conf()"
+    After "clear_announce_override"
     setup() {
         echo "" > $redis_sentinel_real_conf
         echo "" > $redis_sentinel_extra_conf
@@ -64,6 +69,17 @@ Describe "FalkorDB Start Sentinel Bash Script Tests"
       The contents of file "$redis_sentinel_real_conf" should include "announce-hostnames yes"
       The contents of file "$redis_sentinel_real_conf" should include "sentinel sentinel-user $SENTINEL_USER"
       The contents of file "$redis_sentinel_real_conf" should include "sentinel sentinel-pass $SENTINEL_PASSWORD"
+    End
+
+    It "uses override hostname for sentinel announce when provided"
+      export ANNOUNCE_HOSTNAME_OVERRIDE="external.sentinel.example.com"
+      When call build_redis_sentinel_conf
+      The status should be success
+      The contents of file "$redis_sentinel_real_conf" should include "sentinel announce-ip $ANNOUNCE_HOSTNAME_OVERRIDE"
+      The contents of file "$redis_sentinel_real_conf" should include "sentinel announce-port $sentinel_port"
+      The contents of file "$redis_sentinel_real_conf" should include "announce-hostnames yes"
+      The contents of file "$redis_sentinel_real_conf" should include "resolve-hostnames yes"
+      The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for sentinel announce"
     End
   End
 End

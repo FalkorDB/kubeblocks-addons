@@ -59,6 +59,15 @@ extract_lb_host_by_svc_name() {
   done
 }
 
+get_announce_hostname_override_or_default() {
+  local default_value="$1"
+  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
+    return
+  fi
+  echo "$default_value"
+}
+
 build_redis_default_accounts() {
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$REDIS_REPL_PASSWORD"; then
@@ -81,17 +90,17 @@ build_redis_default_accounts() {
 }
 
 build_announce_ip_and_port() {
+  local announce_host_value=""
+  local announce_port_value=""
   # build announce ip and port according to whether the announce addr is exist
   if ! is_empty "$redis_announce_host_value" && ! is_empty "$redis_announce_port_value"; then
     echo "redis use nodeport $redis_announce_host_value:$redis_announce_port_value to announce"
-    {
-      echo "replica-announce-port $redis_announce_port_value"
-      echo "replica-announce-ip $redis_announce_host_value"
-    } >> $redis_real_conf
+    announce_host_value="$redis_announce_host_value"
+    announce_port_value="$redis_announce_port_value"
   elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
       echo "" > /data/.fixed_pod_ip_enabled
       echo "redis use immutable pod ip $CURRENT_POD_IP to announce"
-      echo "replica-announce-ip $CURRENT_POD_IP" >> /etc/redis/redis.conf
+      announce_host_value="$CURRENT_POD_IP"
   else
     current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$REDIS_POD_FQDN_LIST" "$CURRENT_POD_NAME")
     if is_empty "$current_pod_fqdn"; then
@@ -99,8 +108,20 @@ build_announce_ip_and_port() {
       exit 1
     fi
     echo "redis use kb pod fqdn $current_pod_fqdn to announce"
-    echo "replica-announce-ip $current_pod_fqdn" >> $redis_real_conf
+    announce_host_value="$current_pod_fqdn"
   fi
+
+  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value")
+  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "announce hostname override is set, using $announce_host_value for replica announce"
+  fi
+
+  {
+    if ! is_empty "$announce_port_value"; then
+      echo "replica-announce-port $announce_port_value"
+    fi
+    echo "replica-announce-ip $announce_host_value"
+  } >> $redis_real_conf
 }
 
 build_redis_service_port() {

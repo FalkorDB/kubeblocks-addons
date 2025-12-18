@@ -40,6 +40,10 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
   }
   AfterAll 'cleanup'
 
+  clear_announce_override() {
+    unset ANNOUNCE_HOSTNAME_OVERRIDE
+  }
+
   Describe "load_redis_template_conf()"
     setup() {
       echo "" > $redis_extra_conf
@@ -124,6 +128,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
   End
 
   Describe "build_announce_ip_and_port()"
+    After "clear_announce_override"
     It "builds announce ip and port correctly when advertised svc is enabled"
       redis_announce_host_value="172.0.0.1"
       redis_announce_port_value="31000"
@@ -143,6 +148,17 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The stdout should include "redis use kb pod fqdn redis-redis-0.redis-redis.default.svc.cluster.local to announce"
     End
 
+    It "uses override hostname for replica announce when provided"
+      unset redis_announce_host_value
+      unset redis_announce_port_value
+      export CURRENT_POD_NAME="redis-redis-0"
+      export CURRENT_SHARD_POD_FQDN_LIST="redis-redis-0.redis-redis.default.svc.cluster.local,redis-redis-1.redis-redis.default.svc.cluster.local"
+      export ANNOUNCE_HOSTNAME_OVERRIDE="external.redis.example.com"
+      When call build_announce_ip_and_port
+      The contents of file "$redis_real_conf" should include "replica-announce-ip $ANNOUNCE_HOSTNAME_OVERRIDE"
+      The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for replica announce"
+    End
+
     It "exits with error when failed to get current pod fqdn"
       unset redis_announce_host_value
       unset redis_announce_port_value
@@ -155,6 +171,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
   End
 
   Describe "build_cluster_announce_info()"
+    After "clear_announce_override"
     It "builds cluster announce info correctly when advertised svc is enabled"
       redis_announce_host_value="172.0.0.1"
       redis_announce_port_value="31000"
@@ -183,6 +200,20 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The contents of file "$redis_real_conf" should include "cluster-announce-hostname redis-redis-0.redis-redis.default.svc.cluster.local"
       The contents of file "$redis_real_conf" should include "cluster-preferred-endpoint-type hostname"
       The stdout should include "redis cluster use pod fqdn redis-redis-0.redis-redis.default.svc.cluster.local to announce"
+    End
+
+    It "uses override hostname for cluster announce when provided"
+      unset redis_announce_host_value
+      unset redis_announce_port_value
+      unset redis_announce_bus_port_value
+      export CURRENT_POD_IP="172.0.0.6"
+      export CURRENT_POD_NAME="redis-redis-0"
+      export CURRENT_SHARD_POD_FQDN_LIST="redis-redis-0.redis-redis.default.svc.cluster.local,redis-redis-1.redis-redis.default.svc.cluster.local"
+      export ANNOUNCE_HOSTNAME_OVERRIDE="external.redis.cluster.example.com"
+      When call build_cluster_announce_info
+      The contents of file "$redis_real_conf" should include "cluster-announce-hostname $ANNOUNCE_HOSTNAME_OVERRIDE"
+      The contents of file "$redis_real_conf" should include "cluster-announce-ip $CURRENT_POD_IP"
+      The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for cluster announce"
     End
   End
 

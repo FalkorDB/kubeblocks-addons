@@ -47,6 +47,15 @@ extract_lb_host_by_svc_name() {
   done
 }
 
+get_announce_hostname_override_or_default() {
+  local default_value="$1"
+  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
+    return
+  fi
+  echo "$default_value"
+}
+
 # TODO: if instanceTemplate is specified, the pod service could not be parsed from the pod ordinal.
 parse_redis_sentinel_announce_addr() {
   if is_empty "$REDIS_SENTINEL_ADVERTISED_PORT"; then
@@ -154,21 +163,18 @@ build_redis_sentinel_conf() {
     echo "include $redis_sentinel_extra_conf" >> "$redis_sentinel_real_conf"
   fi
 
+  local announce_host_value=""
+  local announce_port_value="$sentinel_port"
+  local enable_hostname_resolution=false
+
   # build announce ip and port according to whether the announce addr is enabled
   if ! is_empty "$redis_sentinel_announce_host_value" && ! is_empty "$redis_sentinel_announce_port_value"; then
     echo "redis sentinel use nodeport $redis_sentinel_announce_host_value:$redis_sentinel_announce_port_value to announce"
-    {
-      echo "port $sentinel_port"
-      echo "sentinel announce-ip $redis_sentinel_announce_host_value"
-      echo "sentinel announce-port $redis_sentinel_announce_port_value"
-    } >> $redis_sentinel_real_conf
+    announce_host_value="$redis_sentinel_announce_host_value"
+    announce_port_value="$redis_sentinel_announce_port_value"
   elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
     echo "redis sentinel use the fixed pod ip $CURRENT_POD_IP:$sentinel_port to announce"
-    {
-      echo "port $sentinel_port"
-      echo "sentinel announce-ip $CURRENT_POD_IP"
-      echo "sentinel announce-port $sentinel_port"
-    } >> $redis_sentinel_real_conf
+    announce_host_value="$CURRENT_POD_IP"
   else
     # shellcheck disable=SC2153
     current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$SENTINEL_POD_FQDN_LIST" "$CURRENT_POD_NAME")
@@ -177,13 +183,25 @@ build_redis_sentinel_conf() {
       exit 1
     fi
     echo "redis sentinel use current pod fqdn: $current_pod_fqdn to announce"
-    {
-      echo "port $sentinel_port"
-      echo "sentinel announce-ip $current_pod_fqdn"
+    announce_host_value="$current_pod_fqdn"
+    enable_hostname_resolution=true
+  fi
+
+  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value")
+  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "announce hostname override is set, using $announce_host_value for sentinel announce"
+    enable_hostname_resolution=true
+  fi
+
+  {
+    echo "port $sentinel_port"
+    echo "sentinel announce-ip $announce_host_value"
+    echo "sentinel announce-port $announce_port_value"
+    if $enable_hostname_resolution; then
       echo "sentinel resolve-hostnames yes"
       echo "sentinel announce-hostnames yes"
-    } >> $redis_sentinel_real_conf
-  fi
+    fi
+  } >> $redis_sentinel_real_conf
   unset_xtrace_when_ut_mode_false
   if [ -n "$SENTINEL_PASSWORD" ]; then
     {
