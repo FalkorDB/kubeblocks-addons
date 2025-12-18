@@ -107,7 +107,7 @@ function get_cluster_host_list() {
         grep -v "fail" |
         grep -v "noaddr" |
         awk '{print $2}' |
-        cut -d ',' -f2 |
+        cut -d ':' -f1 |
         paste -sd,)
     if [ -z "$host_list" ]; then
         echo "GET CLUSTER HOST LIST FAILED, SKIP ACL OPERATION"
