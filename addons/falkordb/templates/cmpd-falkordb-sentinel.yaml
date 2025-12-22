@@ -242,17 +242,10 @@ spec:
         - |
           set -e
           /scripts/{{ $falkordbSentinelStartScripts }}
-{{- if eq .major "6" }}
-      lifecycle:
-        postStart:
-          exec:
-            command: [ "/scripts/falkordb6-sentinel-post-start.sh" ]
-{{- else if ge .major "7" }}
       lifecycle:
         postStart:
           exec:
             command: [ "/scripts/falkordb-sent-post-start.sh" ]
-{{- end }}
       livenessProbe:
         initialDelaySeconds: 10
         periodSeconds: 5
