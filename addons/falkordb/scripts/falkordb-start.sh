@@ -89,6 +89,25 @@ build_redis_default_accounts() {
   echo "build default accounts succeeded!"
 }
 
+add_extra_falkordb_user_account() {
+  if is_empty "$FALKORDB_EXTRA_USER_USERNAME" || is_empty "$FALKORDB_EXTRA_USER_PASSWORD"; then
+    echo "No extra FalkorDB user configured, skipping."
+    return
+  fi
+
+  local acl_rules="$FALKORDB_EXTRA_USER_ACL"
+  if is_empty "$acl_rules"; then
+    acl_rules="~* +@all"
+  fi
+
+  echo "Adding extra FalkorDB user $FALKORDB_EXTRA_USER_USERNAME to ACL file."
+  # Remove any existing entry for this user to prevent duplicates
+  if [ -f $redis_acl_file ]; then
+    sed "/user $FALKORDB_EXTRA_USER_USERNAME on/d" $redis_acl_file > $redis_acl_file_bak && mv $redis_acl_file_bak $redis_acl_file
+  fi
+  echo "user $FALKORDB_EXTRA_USER_USERNAME on >$FALKORDB_EXTRA_USER_PASSWORD $acl_rules" >> $redis_acl_file
+}
+
 build_announce_ip_and_port() {
   local announce_host_value=""
   local announce_port_value=""
@@ -372,6 +391,7 @@ build_redis_conf() {
   build_replicaof_config
   rebuild_redis_acl_file
   build_redis_default_accounts
+  add_extra_falkordb_user_account
 }
 
 # This is magic for shellspec ut framework.

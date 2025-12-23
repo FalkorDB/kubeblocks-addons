@@ -112,6 +112,21 @@ rebuild_redis_sentinel_acl_file() {
   fi
 }
 
+add_extra_sentinel_user_account() {
+  if is_empty "$FALKORDB_SENT_EXTRA_USER_USERNAME" || is_empty "$FALKORDB_SENT_EXTRA_USER_PASSWORD"; then
+    echo "No extra sentinel user configured, skipping."
+    return
+  fi
+
+  local acl_rules="$FALKORDB_SENT_EXTRA_USER_ACL"
+  if is_empty "$acl_rules"; then
+    acl_rules="~* +@all"
+  fi
+
+  echo "Adding extra Sentinel user $FALKORDB_SENT_EXTRA_USER_USERNAME to ACL file."
+  echo "user $FALKORDB_SENT_EXTRA_USER_USERNAME on >$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules" >> /data/users.acl
+}
+
 reset_redis_sentinel_conf() {
   echo "reset redis sentinel conf"
   sentinel_port=26379
@@ -232,6 +247,7 @@ ${__SOURCED__:+false} : || return 0
 load_common_library
 parse_redis_sentinel_announce_addr "$CURRENT_POD_NAME"
 rebuild_redis_sentinel_acl_file
+add_extra_sentinel_user_account
 reset_redis_sentinel_conf
 build_redis_sentinel_conf
 start_redis_sentinel_server

@@ -345,6 +345,92 @@ Describe "FalkorDB Start Bash Script Tests"
     End
   End
 
+  Describe "add_extra_falkordb_user_account()"
+    Context 'when both username and password are provided'
+      setup() {
+        echo "" > $redis_acl_file
+        export FALKORDB_EXTRA_USER_USERNAME="extra_user"
+        export FALKORDB_EXTRA_USER_PASSWORD="extra_password"
+        export FALKORDB_EXTRA_USER_ACL="~* +@all"
+      }
+      Before 'setup'
+
+      un_setup() {
+        unset FALKORDB_EXTRA_USER_USERNAME
+        unset FALKORDB_EXTRA_USER_PASSWORD
+        unset FALKORDB_EXTRA_USER_ACL
+      }
+      After 'un_setup'
+
+      It "adds extra user to acl file with custom ACL rules"
+        When call add_extra_falkordb_user_account
+        The status should be success
+        The stdout should include "Adding extra FalkorDB user extra_user to ACL file."
+        The contents of file "$redis_acl_file" should include "user extra_user on >extra_password ~* +@all"
+      End
+    End
+
+    Context 'when username and password are provided but ACL is not'
+      setup() {
+        echo "" > $redis_acl_file
+        export FALKORDB_EXTRA_USER_USERNAME="extra_user"
+        export FALKORDB_EXTRA_USER_PASSWORD="extra_password"
+        unset FALKORDB_EXTRA_USER_ACL
+      }
+      Before 'setup'
+
+      un_setup() {
+        unset FALKORDB_EXTRA_USER_USERNAME
+        unset FALKORDB_EXTRA_USER_PASSWORD
+      }
+      After 'un_setup'
+
+      It "adds extra user with default ACL rules when ACL env is not set"
+        When call add_extra_falkordb_user_account
+        The status should be success
+        The stdout should include "Adding extra FalkorDB user extra_user to ACL file."
+        The contents of file "$redis_acl_file" should include "user extra_user on >extra_password ~* +@all"
+      End
+    End
+
+    Context 'when username or password is not provided'
+      setup() {
+        echo "" > $redis_acl_file
+        unset FALKORDB_EXTRA_USER_USERNAME
+        unset FALKORDB_EXTRA_USER_PASSWORD
+      }
+      Before 'setup'
+
+      It "skips adding extra user when username is missing"
+        When call add_extra_falkordb_user_account
+        The status should be success
+        The stdout should include "No extra FalkorDB user configured, skipping."
+        The contents of file "$redis_acl_file" should eq ""
+      End
+    End
+
+    Context 'when password is missing but username is provided'
+      setup() {
+        echo "" > $redis_acl_file
+        export FALKORDB_EXTRA_USER_USERNAME="extra_user"
+        unset FALKORDB_EXTRA_USER_PASSWORD
+      }
+      Before 'setup'
+
+      un_setup() {
+        unset FALKORDB_EXTRA_USER_USERNAME
+      }
+      After 'un_setup'
+
+      It "skips adding extra user when password is missing"
+        When call add_extra_falkordb_user_account
+        The status should be success
+        The stdout should include "No extra FalkorDB user configured, skipping."
+        The contents of file "$redis_acl_file" should eq ""
+      End
+    End
+  End
+
   Describe "build_sentinel_get_master_addr_by_name_command()"
     It "builds sentinel get-master-addr-by-name command correctly"
       export REDIS_COMPONENT_NAME="redis-redis"

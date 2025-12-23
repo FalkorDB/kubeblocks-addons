@@ -36,6 +36,21 @@ acl_set_user_for_redis_sentinel() {
   fi
 }
 
+acl_set_extra_user_for_redis_sentinel() {
+  if [ -z "$FALKORDB_SENT_EXTRA_USER_USERNAME" ] || [ -z "$FALKORDB_SENT_EXTRA_USER_PASSWORD" ]; then
+    echo "No extra sentinel user configured, skipping."
+    return
+  fi
+
+  local acl_rules
+  acl_rules=${FALKORDB_SENT_EXTRA_USER_ACL:-"~* +@all"}
+
+  until redis-cli -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ping; do sleep 1; done
+  redis-cli -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SETUSER $FALKORDB_SENT_EXTRA_USER_USERNAME ON \>$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules
+  redis-cli -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SAVE
+  echo "extra sentinel user $FALKORDB_SENT_EXTRA_USER_USERNAME set successfully."
+}
+
 # This is magic for shellspec ut framework.
 # Sometime, functions are defined in a single shell script.
 # You will want to test it. but you do not want to run the script.
@@ -46,3 +61,4 @@ ${__SOURCED__:+false} : || return 0
 # main
 load_common_library
 acl_set_user_for_redis_sentinel
+acl_set_extra_user_for_redis_sentinel
