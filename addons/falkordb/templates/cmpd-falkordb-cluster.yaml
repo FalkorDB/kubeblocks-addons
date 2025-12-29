@@ -91,6 +91,12 @@ spec:
         numSymbols: 0
         letterCase: MixedCases
         seed: 5wM4uhmKV1Ohy087
+  tls:
+    volumeName: tls
+    mountPath: /etc/pki/tls
+    caFile: ca.crt
+    certFile: tls.crt
+    keyFile: tls.key
   hostNetwork:
     containerPorts:
       - container: falkordb-cluster

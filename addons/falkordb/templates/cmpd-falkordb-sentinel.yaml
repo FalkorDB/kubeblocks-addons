@@ -69,6 +69,12 @@ spec:
         numDigits: 5
         numSymbols: 0
         letterCase: MixedCases
+  tls:
+    volumeName: tls
+    mountPath: /etc/pki/tls
+    caFile: ca.crt
+    certFile: tls.crt
+    keyFile: tls.key
   hostNetwork:
     containerPorts:
       - container: falkordb-sent
