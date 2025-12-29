@@ -10,16 +10,6 @@ set_backup_config_env
 
 export_logs_start_time_env
 
-function handle_restore_exit() {
-  exit_code=$?
-  if [ $exit_code -ne 0 ]; then
-    print_pbm_tail_logs
-
-    echo "failed with exit code $exit_code"
-    exit 1
-  fi
-}
-
 trap handle_restore_exit EXIT
 
 wait_for_other_operations
@@ -27,7 +17,6 @@ wait_for_other_operations
 sync_pbm_storage_config
 
 sync_pbm_config_from_storage
-
 
 process_restore_start_signal
 
@@ -43,7 +32,9 @@ echo "INFO: Starting restore..."
 
 wait_for_other_operations
 
-pbm restore --time="$recovery_target_time" --mongodb-uri "$PBM_MONGODB_URI" --replset-remapping "$mappings" --wait
+restore_name=$(pbm restore --time="$recovery_target_time" --mongodb-uri "$PBM_MONGODB_URI" --replset-remapping "$mappings" -o json | jq -r '.name')
+
+wait_for_restoring
 
 process_restore_end_signal
 

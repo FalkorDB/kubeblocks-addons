@@ -21,7 +21,6 @@ spec:
   {{- $major := .major }}
     {{- range .minors }}
     - name: {{ .version }}
-      changes: ""
       serviceVersion: {{ .version }}
       images:
         pg-init-container: {{ include "postgresql.initImage" $ }}
