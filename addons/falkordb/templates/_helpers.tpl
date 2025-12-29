@@ -106,7 +106,7 @@ falkordb-cluster-scripts-template-{{ .Chart.Version }}
 {{- end -}}
 
 {{- define "falkordb4.image" -}}
-{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}:{{ .Values.image.tag.major4.minor12 }}
+{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}:{{ .Values.image.tag.major4.minor14 }}
 {{- end }}
 
 {{- define "busybox.image" -}}
