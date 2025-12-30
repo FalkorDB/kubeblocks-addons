@@ -209,7 +209,12 @@ build_redis_sentinel_conf() {
   fi
 
   {
-    echo "port $sentinel_port"
+    if env_exist TLS_ENABLED && [ "$TLS_ENABLED" = "true" ]; then
+      echo "tls-port $service_port"
+      echo "port 0"
+    else
+      echo "port $sentinel_port"
+    fi
     echo "sentinel announce-ip $announce_host_value"
     echo "sentinel announce-port $announce_port_value"
     if $enable_hostname_resolution; then

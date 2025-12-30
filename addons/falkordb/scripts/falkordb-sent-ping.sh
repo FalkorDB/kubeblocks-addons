@@ -26,12 +26,19 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "--tls"
+  fi
+}
+
 check_redis_sentinel_ok() {
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$SENTINEL_PASSWORD"; then
-    cmd="redis-cli -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ping"
+    cmd="redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ping"
   else
-    cmd="redis-cli -h localhost -p $SENTINEL_SERVICE_PORT ping"
+    cmd="redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT ping"
   fi
   response=$($cmd)
   status=$?

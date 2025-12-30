@@ -37,6 +37,13 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "--tls"
+  fi
+}
+
 load_redis_template_conf() {
   echo "include $redis_template_conf" >> $redis_real_conf
   # if the file redis_extra_conf exists, include it too
@@ -147,8 +154,17 @@ build_redis_service_port() {
   service_port=6379
   if env_exist SERVICE_PORT; then
     service_port=$SERVICE_PORT
+  else
+    echo "false, SERVICE_PORT does not exist"
   fi
-  echo "port $service_port" >> $redis_real_conf
+
+  # Only write config, do not print anything about TLS_ENABLED
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "tls-port $service_port" >> $redis_real_conf
+    echo "port 0" >> $redis_real_conf
+  else
+    echo "port $service_port" >> $redis_real_conf
+  fi
 }
 
 build_replicaof_config() {
@@ -240,10 +256,20 @@ build_sentinel_get_master_addr_by_name_command() {
   local sentinel_pod_fqdn="$1"
   local timeout_value=5
   # TODO: replace $SENTINEL_SERVICE_PORT with each sentinel pod's port when sentinel service port is not the same, for example in HostNetwork mode
+  local tls_flag
+  tls_flag=$(redis_cli_tls_flag)
   if is_empty "$SENTINEL_PASSWORD"; then
-    echo "timeout $timeout_value redis-cli -h $sentinel_pod_fqdn -p $SENTINEL_SERVICE_PORT sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+    if [ -n "$tls_flag" ]; then
+      echo "timeout $timeout_value redis-cli $tls_flag -h $sentinel_pod_fqdn -p $SENTINEL_SERVICE_PORT sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+    else
+      echo "timeout $timeout_value redis-cli -h $sentinel_pod_fqdn -p $SENTINEL_SERVICE_PORT sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+    fi
   else
-    echo "timeout $timeout_value redis-cli -h $sentinel_pod_fqdn -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+    if [ -n "$tls_flag" ]; then
+      echo "timeout $timeout_value redis-cli $tls_flag -h $sentinel_pod_fqdn -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+    else
+      echo "timeout $timeout_value redis-cli -h $sentinel_pod_fqdn -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+    fi
   fi
 }
 

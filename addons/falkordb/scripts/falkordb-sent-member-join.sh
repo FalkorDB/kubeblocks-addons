@@ -26,6 +26,13 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "--tls"
+  fi
+}
+
 redis_sentinel_conf_dir="/data/sentinel"
 redis_sentinel_real_conf="/data/sentinel/redis-sentinel.conf"
 redis_sentinel_real_conf_bak="/data/sentinel/redis-sentinel.conf.bak"
@@ -66,9 +73,9 @@ redis_sentinel_get_masters() {
   local host=$1
   local port=$2
   if [ -n "$SENTINEL_PASSWORD" ]; then
-    temp_output=$(redis-cli -h "$host" -p "$port" -a "$SENTINEL_PASSWORD" sentinel masters 2>/dev/null || true)
+    temp_output=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" -a "$SENTINEL_PASSWORD" sentinel masters 2>/dev/null || true)
   else
-    temp_output=$(redis-cli -h "$host" -p "$port" sentinel masters 2>/dev/null || true)
+    temp_output=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" sentinel masters 2>/dev/null || true)
   fi
 }
 

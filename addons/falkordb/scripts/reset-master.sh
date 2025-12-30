@@ -1,11 +1,19 @@
 #!/bin/bash
+
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "--tls"
+  fi
+}
+
 if [ -z "${SENTINEL_POD_NAME_LIST}" ]; then
    exit 0
 fi
 for sentinel_pod in $(echo ${SENTINEL_POD_NAME_LIST} | tr ',' '\n'); do
     echo "reset master in sentinel ${pod}..."
     fqdn="$sentinel_pod.$SENTINEL_HEADLESS_SERVICE_NAME.$CLUSTER_NAMESPACE.svc.cluster.local"
-    redis-cli -h $fqdn -p 26379 -a ${SENTINEL_PASSWORD} sentinel reset ${REDIS_COMPONENT_NAME}
+    redis-cli $(redis_cli_tls_flag) -h $fqdn -p 26379 -a ${SENTINEL_PASSWORD} sentinel reset ${REDIS_COMPONENT_NAME}
     if [ $? -eq 0 ]; then
         echo "reset master in sentinel ${pod} succeeded"
         exit 0

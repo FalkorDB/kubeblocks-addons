@@ -207,6 +207,10 @@ spec:
     - name: SERVICE_PORT
       value: "6379"
       expression: {{ `{{if index . "REDIS_HOST_NETWORK_PORT"}}{{.REDIS_HOST_NETWORK_PORT}}{{else}}{{.SERVICE_PORT}}{{end}}` | toYaml }}
+    - name: TLS_ENABLED
+      valueFrom:
+        tlsVarRef:
+          enabled: Optional
     ## the env of falkordb server port for dbctl to connect to falkordb server
     - name: DBCTL_REDIS_SERVICE_PORT
       value: $(SERVICE_PORT)
@@ -308,8 +312,6 @@ spec:
         container: falkordb
         command:
           - /tools/dbctl
-          - --config-path
-          - /tools/config/dbctl/components
           - redis
           - getrole
     postProvision:

@@ -26,12 +26,19 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "--tls"
+  fi
+}
+
 acl_save_before_stop() {
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    acl_save_command="redis-cli -h localhost -p $SERVICE_PORT -a $REDIS_DEFAULT_PASSWORD acl save"
+    acl_save_command="redis-cli $(redis_cli_tls_flag) -h localhost -p $SERVICE_PORT -a $REDIS_DEFAULT_PASSWORD acl save"
     logging_mask_acl_save_command="${acl_save_command/$REDIS_DEFAULT_PASSWORD/********}"
   else
-    acl_save_command="redis-cli -h localhost -p $SERVICE_PORT acl save"
+    acl_save_command="redis-cli $(redis_cli_tls_flag) -h localhost -p $SERVICE_PORT acl save"
     logging_mask_acl_save_command="$acl_save_command"
   fi
   echo "acl save command: $logging_mask_acl_save_command"

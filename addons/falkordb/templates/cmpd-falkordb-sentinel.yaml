@@ -160,6 +160,10 @@ spec:
     - name: SENTINEL_SERVICE_PORT
       value: "26379"
       expression: {{ `{{if index . "REDIS_SENTINEL_HOST_NETWORK_PORT"}}{{.REDIS_SENTINEL_HOST_NETWORK_PORT}}{{else}}{{.SENTINEL_SERVICE_PORT}}{{end}}` | toYaml }}
+    - name: TLS_ENABLED
+      valueFrom:
+        tlsVarRef:
+          enabled: Optional
     ## the env of falkordb sentinel server port for dbctl to connect to falkordb cluster server
     - name: DBCTL_REDIS_SENTINEL_SERVICE_PORT
       value: $(SENTINEL_SERVICE_PORT)

@@ -29,6 +29,13 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "--tls"
+  fi
+}
+
 check_environment_exist() {
   local required_vars=(
     "SENTINEL_POD_FQDN_LIST"
@@ -59,9 +66,9 @@ check_redis_role() {
   unset_xtrace_when_ut_mode_false
   local role_info
   if [[ -z "$REDIS_DEFAULT_PASSWORD" ]]; then
-    role_info=$(redis-cli -h "$host" -p "$port" info replication)
+    role_info=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" info replication)
   else
-    role_info=$(redis-cli -h "$host" -p "$port" -a "$REDIS_DEFAULT_PASSWORD" info replication)
+    role_info=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" -a "$REDIS_DEFAULT_PASSWORD" info replication)
   fi
   status=$?
   set_xtrace_when_ut_mode_false
@@ -153,9 +160,9 @@ check_connectivity() {
   local result
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    result=$(redis-cli -h "$host" -p "$port" -a "$password" PING)
+    result=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" -a "$password" PING)
   else
-    result=$(redis-cli -h "$host" -p "$port" PING)
+    result=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" PING)
   fi
   set_xtrace_when_ut_mode_false
   if [[ "$result" == "PONG" ]]; then
@@ -176,9 +183,9 @@ execute_sub_command() {
   local output
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    output=$(redis-cli -h "$host" -p "$port" -a "$password" $command)
+    output=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" -a "$password" $command)
   else
-    output=$(redis-cli -h "$host" -p "$port" $command)
+    output=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" $command)
   fi
   local status=$?
   set_xtrace_when_ut_mode_false
@@ -200,10 +207,10 @@ redis_config_get() {
 
   local output
   unset_xtrace_when_ut_mode_false
-  if ! is_empty "$password"; then
-    output=$(redis-cli -h "$host" -p "$port" -a "$password" $command)
+  if ! is_empty "$password" ]; then
+    output=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" -a "$password" $command)
   else
-    output=$(redis-cli -h "$host" -p "$port" $command)
+    output=$(redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" $command)
   fi
   local status=$?
   set_xtrace_when_ut_mode_false

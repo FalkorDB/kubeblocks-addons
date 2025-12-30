@@ -2,6 +2,13 @@
 
 set -e
 
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+    if [ "${TLS_ENABLED}" = "true" ]; then
+        echo "--tls"
+    fi
+}
+
 function do_acl_command() {
     local hosts=$1
     IFS=',' read -ra HOSTS <<<"$hosts"
@@ -15,7 +22,7 @@ function do_acl_command() {
         # in case of fixed ip mode, the host is like this: 10.96.180.100:6379@1 10.96.180.100:6379@2
         # we need to remove the @1 or @2 and remove the port
         host=$(echo "$host" | sed 's/@[0-9]*//g' | sed 's/:[0-9]*/ /g')
-        cmd="redis-cli -h $host -p $service_port --user $user -a $password"
+        cmd="redis-cli $(redis_cli_tls_flag) -h $host -p $service_port --user $user -a $password"
         if [ -n "$ACL_COMMAND" ]; then
             echo "DO ACL COMMAND FOR HOST: $host"
             $cmd $ACL_COMMAND
@@ -99,7 +106,7 @@ function create_post_check() {
 }
 
 function get_cluster_host_list() {
-    host_list=$(redis-cli -c -h "$CURRENT_POD_NAME.$CURRENT_SHARD_COMPONENT_NAME-headless.$CLUSTER_NAMESPACE.svc.$CLUSTER_DOMAIN" \
+    host_list=$(redis-cli $(redis_cli_tls_flag) -c -h "$CURRENT_POD_NAME.$CURRENT_SHARD_COMPONENT_NAME-headless.$CLUSTER_NAMESPACE.svc.$CLUSTER_DOMAIN" \
         -p $SERVICE_PORT \
         --user $REDIS_DEFAULT_USER \
         -a $REDIS_DEFAULT_PASSWORD \

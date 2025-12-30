@@ -41,6 +41,13 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+# Helper: add --tls if TLS_ENABLED is true
+redis_cli_tls_flag() {
+  if [ "${TLS_ENABLED}" = "true" ]; then
+    echo "--tls"
+  fi
+}
+
 get_announce_hostname_override_or_default() {
   local default_value="$1"
   if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
@@ -164,7 +171,7 @@ check_connectivity() {
   local port=$2
   local password=$3
   echo "Checking connectivity to $host on port $port using redis-cli..."
-  if redis-cli -h "$host" -p "$port" -a "$password" PING | grep -q "PONG"; then
+  if redis-cli $(redis_cli_tls_flag) -h "$host" -p "$port" -a "$password" PING | grep -q "PONG"; then
     echo "$host is reachable on port $port."
     return 0
   else
@@ -180,7 +187,7 @@ execute_sentinel_sub_command() {
   local command=$3
 
   local output
-  output=$(redis-cli -h "$sentinel_host" -p "$sentinel_port" -a "$SENTINEL_PASSWORD" $command)
+  output=$(redis-cli $(redis_cli_tls_flag) -h "$sentinel_host" -p "$sentinel_port" -a "$SENTINEL_PASSWORD" $command)
   local status=$?
   echo "$output"
 
@@ -198,7 +205,7 @@ get_master_addr_by_name(){
   local sentinel_port=$2
   local command=$3
   local output
-  output=$(redis-cli -h "$sentinel_host" -p "$sentinel_port" -a "$SENTINEL_PASSWORD" $command)
+  output=$(redis-cli $(redis_cli_tls_flag) -h "$sentinel_host" -p "$sentinel_port" -a "$SENTINEL_PASSWORD" $command)
   local status=$?
   if [ $status -ne 0 ]; then
     echo "Command failed with status $status." >&2
