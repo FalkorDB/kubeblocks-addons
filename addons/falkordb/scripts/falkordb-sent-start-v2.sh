@@ -209,7 +209,7 @@ build_redis_sentinel_conf() {
   fi
 
   {
-    if env_exist TLS_ENABLED && [ "$TLS_ENABLED" = "true" ]; then
+    if [ "$TLS_ENABLED" = "true" ]; then
       echo "tls-port $service_port"
       echo "port 0"
     else

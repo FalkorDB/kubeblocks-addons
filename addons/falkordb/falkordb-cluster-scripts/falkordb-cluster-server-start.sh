@@ -649,7 +649,7 @@ build_redis_cluster_service_port() {
     cluster_bus_port=$CLUSTER_BUS_PORT
   fi
   {
-    if env_exist TLS_ENABLED && [ "$TLS_ENABLED" = "true" ]; then
+    if [ "$TLS_ENABLED" = "true" ]; then
       echo "tls-port $service_port"
       echo "port 0"
     else
