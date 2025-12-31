@@ -19,4 +19,5 @@ spec:
         format: redis
       reRenderResourceTypes:
         - vscale
+        - tls
 {{- end }}
