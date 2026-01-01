@@ -19,15 +19,6 @@ falkordbVersions:
     mirrorVersions:
       - version: "4.14.10"
         imageTag: "v4.14.10"
-  - major: "4"
-    componentDef: "falkordb-4"
-    clusterComponentDef: "falkordb-cluster-4"
-    sentinelComponentDef: "falkordb-sent-4"
-    serviceVersion: "4.12.5"
-    defaultImageTag: "v4.12.5"
-    mirrorVersions:
-      - version: "4.12.5"
-        imageTag: "v4.12.5"
 
 image:
   # refer: https://redis.io/docs/stack/
