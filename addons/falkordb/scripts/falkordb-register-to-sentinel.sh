@@ -26,7 +26,7 @@ test || __() {
 
 redis_announce_host_value=""
 redis_announce_port_value=""
-redis_default_service_port=6379
+redis_default_service_port=${SERVICE_PORT:-6379}
 if [ -f /data/.fixed_pod_ip_enabled ]; then
   # if the file /data/.fixed_pod_ip_enabled exists, it means that the redis pod is running in fixed pod ip mode.
   FIXED_POD_IP_ENABLED=true
@@ -119,7 +119,7 @@ parse_redis_primary_announce_addr() {
       if [ -n "$lb_host" ]; then
         echo "Found load balancer host for svcName '$svc_name', value is '$lb_host'."
         redis_announce_host_value="$lb_host"
-        redis_announce_port_value="6379"
+        redis_announce_port_value="${SERVICE_PORT:-6379}"
       else
         redis_announce_host_value="$CURRENT_POD_HOST_IP"
       fi

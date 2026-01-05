@@ -21,7 +21,7 @@ test || __() {
   set -ex;
 }
 
-service_port=6379
+service_port=${SERVICE_PORT:-6379}
 cluster_bus_port=16379
 redis_template_conf="/etc/conf/redis.conf"
 redis_real_conf="/etc/redis/redis.conf"
@@ -696,7 +696,7 @@ parse_redis_cluster_shard_announce_addr() {
   if [ -n "$lb_host" ]; then
     echo "Found load balancer host for svcName '$svc_name', value is '$lb_host'."
     redis_announce_host_value="$lb_host"
-    redis_announce_port_value="6379"
+    redis_announce_port_value="${SERVICE_PORT:-6379}"
     redis_announce_bus_port_value="16379"
   else
     redis_announce_host_value="$CURRENT_POD_HOST_IP"

@@ -202,7 +202,6 @@ Describe "FalkorDB Start Bash Script Tests"
       unset SERVICE_PORT
       When call build_redis_service_port
       The contents of file "$redis_real_conf" should include "port 6379"
-      The stdout should include "false, SERVICE_PORT does not exist"
     End
   End
 

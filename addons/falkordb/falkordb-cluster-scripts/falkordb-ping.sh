@@ -1,9 +1,3 @@
-# Helper: add --tls if TLS_ENABLED is true
-redis_cli_tls_flag() {
-  if [ "${TLS_ENABLED}" = "true" ]; then
-    echo "--tls"
-  fi
-}
 #!/bin/bash
 
 # This is magic for shellspec ut framework. "test" is a `test [expression]` well known as a shell command.

@@ -90,7 +90,7 @@ parse_redis_sentinel_announce_addr() {
       if [ -n "$lb_host" ]; then
         echo "Found load balancer host for svcName '$svc_name', value is '$lb_host'."
         redis_sentinel_announce_host_value="$lb_host"
-        redis_sentinel_announce_port_value="26379"
+        redis_sentinel_announce_port_value="${SENTINEL_SERVICE_PORT:-26379}"
       else
         redis_sentinel_announce_host_value="$CURRENT_POD_HOST_IP"
       fi
@@ -129,10 +129,7 @@ add_extra_sentinel_user_account() {
 
 reset_redis_sentinel_conf() {
   echo "reset redis sentinel conf"
-  sentinel_port=26379
-  if env_exist SENTINEL_SERVICE_PORT; then
-    sentinel_port=$SENTINEL_SERVICE_PORT
-  fi
+  sentinel_port=${SENTINEL_SERVICE_PORT:-26379}
   mkdir -p $redis_sentinel_conf_dir
   if [ -f $redis_sentinel_real_conf ]; then
     sed "/sentinel announce-ip/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf

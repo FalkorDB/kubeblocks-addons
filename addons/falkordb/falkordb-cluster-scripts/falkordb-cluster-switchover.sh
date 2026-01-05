@@ -54,10 +54,7 @@ check_environment_exist() {
 }
 
 init_redis_cluster_service_port() {
-  service_port=6379
-  if [ -n "$SERVICE_PORT" ]; then
-    service_port=$SERVICE_PORT
-  fi
+  service_port=${SERVICE_PORT:-6379}
 }
 
 get_current_shard_primary() {

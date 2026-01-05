@@ -21,7 +21,7 @@ test || __() {
 }
 
 primary=""
-primary_port="6379"
+primary_port="${SERVICE_PORT:-6379}"
 redis_template_conf="/etc/conf/redis.conf"
 redis_real_conf="/etc/redis/redis.conf"
 redis_extra_conf="/etc/conf/extra/redis.conf"
@@ -151,12 +151,7 @@ build_announce_ip_and_port() {
 }
 
 build_redis_service_port() {
-  service_port=6379
-  if env_exist SERVICE_PORT; then
-    service_port=$SERVICE_PORT
-  else
-    echo "false, SERVICE_PORT does not exist"
-  fi
+  service_port=${SERVICE_PORT:-6379}
 
   # Only write config, do not print anything about TLS_ENABLED
   if [ "${TLS_ENABLED}" = "true" ]; then
@@ -394,7 +389,7 @@ parse_redis_announce_addr() {
       if [ -n "$lb_host" ]; then
         echo "Found load balancer host for svcName '$svc_name', value is '$lb_host'."
         redis_announce_host_value="$lb_host"
-        redis_announce_port_value="6379"
+        redis_announce_port_value="${SERVICE_PORT:-6379}"
       else
         redis_announce_host_value="$CURRENT_POD_HOST_IP"
       fi

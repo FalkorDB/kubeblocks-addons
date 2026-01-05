@@ -347,7 +347,7 @@ init_current_comp_default_nodes_for_scale_out() {
         if ! is_empty "$lb_host"; then
             echo "Found load balancer host for svcName '$advertised_svc', value is '$lb_host'."
             pod_host_ip="$lb_host"
-            advertised_port="6379"
+            advertised_port="${SERVICE_PORT:-6379}"
         else
             pod_host_ip=$(parse_host_ip_from_built_in_envs "$pod_name" "$KB_CLUSTER_COMPONENT_POD_NAME_LIST" "$KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST")
         fi
@@ -536,7 +536,7 @@ gen_initialize_redis_cluster_node() {
           if [ -n "$lb_host" ]; then
             echo "Found load balancer host for svcName '$shard_advertised_svc', value is '$lb_host'."
             pod_host_ip="$lb_host"
-            shard_advertised_port="6379"
+            shard_advertised_port="${SERVICE_PORT:-6379}"
           fi
           categorize_node_maps "$pod_name" "$pod_host_ip" "$shard_advertised_port" "$is_primary"
           return 0
