@@ -249,21 +249,19 @@ Describe "Redis Cluster Common Bash Script Tests"
 
     Context "returns 1 when cluster_node_list or cluster_pod_name_list is empty"
       setup() {
-        export KB_CLUSTER_POD_IP_LIST=""
-        export KB_CLUSTER_POD_NAME_LIST=""
+        export KB_CLUSTER_POD_FQDN_LIST=""
       }
       Before "setup"
 
       un_setup() {
-        unset KB_CLUSTER_POD_IP_LIST
-        unset KB_CLUSTER_POD_NAME_LIST
+        unset KB_CLUSTER_POD_FQDN_LIST
       }
       After "un_setup"
 
       It "returns 1 when cluster_node_list or cluster_pod_name_list is empty"
-        When run check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"
+        When run check_cluster_initialized "$KB_CLUSTER_POD_FQDN_LIST"
         The status should be failure
-        The stderr should include "Error: Required environment variable cluster_pod_ip_list or cluster_pod_name_list is not set."
+        The stderr should include "Error: Required environment variable cluster_pod_fqdn_list is not set."
       End
     End
   End
@@ -274,8 +272,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         primary_nodes="172.0.0.1:6379 172.0.0.2:6379"
 
         When call build_redis_cluster_create_command "$primary_nodes"
-        The output should eq "redis-cli --cluster create 172.0.0.1:6379 172.0.0.2:6379 --cluster-yes"
-        The stderr should include "initialize cluster command: redis-cli --cluster create 172.0.0.1:6379 172.0.0.2:6379 --cluster-yes"
+        The output should eq "redis-cli  --cluster create 172.0.0.1:6379 172.0.0.2:6379 --cluster-yes"
+        The stderr should include "initialize cluster command: redis-cli  --cluster create 172.0.0.1:6379 172.0.0.2:6379 --cluster-yes"
       End
     End
 
@@ -294,8 +292,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         primary_nodes="172.0.0.1:6379 172.0.0.2:6379"
 
         When call build_redis_cluster_create_command "$primary_nodes"
-        The output should eq "redis-cli --cluster create 172.0.0.1:6379 172.0.0.2:6379 -a password --cluster-yes"
-        The stderr should include "initialize cluster command: redis-cli --cluster create 172.0.0.1:6379 172.0.0.2:6379 -a ******** --cluster-yes"
+        The output should eq "redis-cli  --cluster create 172.0.0.1:6379 172.0.0.2:6379 -a password --cluster-yes"
+        The stderr should include "initialize cluster command: redis-cli  --cluster create 172.0.0.1:6379 172.0.0.2:6379 -a ******** --cluster-yes"
       End
     End
   End
@@ -308,8 +306,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         mapping_primary_cluster_id="node1"
 
         When call build_secondary_replicated_command "$secondary_endpoint_with_port" "$mapping_primary_endpoint_with_port" "$mapping_primary_cluster_id"
-        The output should eq "redis-cli --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1"
-        The stderr should include "initialize cluster secondary add-node command: redis-cli --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1"
+        The output should eq "redis-cli  --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1"
+        The stderr should include "initialize cluster secondary add-node command: redis-cli  --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1"
       End
     End
 
@@ -330,8 +328,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         mapping_primary_cluster_id="node1"
 
         When call build_secondary_replicated_command "$secondary_endpoint_with_port" "$mapping_primary_endpoint_with_port" "$mapping_primary_cluster_id"
-        The output should eq "redis-cli --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1 -a password"
-        The stderr should include "initialize cluster secondary add-node command: redis-cli --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1 -a ********"
+        The output should eq "redis-cli  --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1 -a password"
+        The stderr should include "initialize cluster secondary add-node command: redis-cli  --cluster add-node 172.0.0.3:6379 172.0.0.1:6379 --cluster-slave --cluster-master-id node1 -a ********"
       End
     End
   End
@@ -343,8 +341,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         exist_available_node="172.0.0.2:6379"
 
         When call build_scale_out_shard_primary_join_command "$scale_out_shard_default_primary_endpoint_with_port" "$exist_available_node"
-        The output should eq "redis-cli --cluster add-node 172.0.0.4:6379 172.0.0.2:6379"
-        The stderr should include "scale out shard primary add-node command: redis-cli --cluster add-node 172.0.0.4:6379 172.0.0.2:6379"
+        The output should eq "redis-cli  --cluster add-node 172.0.0.4:6379 172.0.0.2:6379"
+        The stderr should include "scale out shard primary add-node command: redis-cli  --cluster add-node 172.0.0.4:6379 172.0.0.2:6379"
       End
     End
 
@@ -364,8 +362,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         exist_available_node="172.0.0.2:6379"
 
         When call build_scale_out_shard_primary_join_command "$scale_out_shard_default_primary_endpoint_with_port" "$exist_available_node"
-        The output should eq "redis-cli --cluster add-node 172.0.0.4:6379 172.0.0.2:6379 -a password"
-        The stderr should include "scale out shard primary add-node command: redis-cli --cluster add-node 172.0.0.4:6379 172.0.0.2:6379 -a ********"
+        The output should eq "redis-cli  --cluster add-node 172.0.0.4:6379 172.0.0.2:6379 -a password"
+        The stderr should include "scale out shard primary add-node command: redis-cli  --cluster add-node 172.0.0.4:6379 172.0.0.2:6379 -a ********"
       End
     End
   End
@@ -378,8 +376,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         slots_per_shard="5461"
 
         When call build_reshard_command "$primary_node_with_port" "$mapping_primary_cluster_id" "$slots_per_shard"
-        The output should eq "redis-cli --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 --cluster-yes"
-        The stderr should include "scale out shard reshard command: redis-cli --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 --cluster-yes"
+        The output should eq "redis-cli  --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 --cluster-yes"
+        The stderr should include "scale out shard reshard command: redis-cli  --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 --cluster-yes"
       End
     End
 
@@ -400,8 +398,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         slots_per_shard="5461"
 
         When call build_reshard_command "$primary_node_with_port" "$mapping_primary_cluster_id" "$slots_per_shard"
-        The output should eq "redis-cli --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 -a password --cluster-yes"
-        The stderr should include "scale out shard reshard command: redis-cli --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 -a ******** --cluster-yes"
+        The output should eq "redis-cli  --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 -a password --cluster-yes"
+        The stderr should include "scale out shard reshard command: redis-cli  --cluster reshard 172.0.0.1:6379 --cluster-from all --cluster-to node1 --cluster-slots 5461 -a ******** --cluster-yes"
       End
     End
   End
@@ -413,8 +411,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         node_cluster_id="node1"
 
         When call build_rebalance_to_zero_command "$node_with_port" "$node_cluster_id"
-        The output should eq "redis-cli --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes "
-        The stderr should include "set current component slot to 0 by rebalance command: redis-cli --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes"
+        The output should eq "redis-cli  --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes "
+        The stderr should include "set current component slot to 0 by rebalance command: redis-cli  --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes"
       End
     End
 
@@ -434,8 +432,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         node_cluster_id="node1"
 
         When call build_rebalance_to_zero_command "$node_with_port" "$node_cluster_id"
-        The output should eq "redis-cli --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes -a password"
-        The stderr should include "set current component slot to 0 by rebalance command: redis-cli --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes -a ********"
+        The output should eq "redis-cli  --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes -a password"
+        The stderr should include "set current component slot to 0 by rebalance command: redis-cli  --cluster rebalance 172.0.0.1:6379 --cluster-weight node1=0 --cluster-yes -a ********"
       End
     End
   End
@@ -457,8 +455,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         node_to_del_cluster_id="node1"
 
         When call build_del_node_command "$available_node" "$node_to_del_cluster_id"
-        The output should eq "redis-cli --cluster del-node 172.0.0.2:6379 node1 -p 6379"
-        The stderr should include "del node command: redis-cli --cluster del-node 172.0.0.2:6379 node1 -p 6379"
+        The output should eq "redis-cli  --cluster del-node 172.0.0.2:6379 node1 -p 6379"
+        The stderr should include "del node command: redis-cli  --cluster del-node 172.0.0.2:6379 node1 -p 6379"
       End
     End
 
@@ -480,8 +478,8 @@ Describe "Redis Cluster Common Bash Script Tests"
         node_to_del_cluster_id="node1"
 
         When call build_del_node_command "$available_node" "$node_to_del_cluster_id"
-        The output should eq "redis-cli --cluster del-node 172.0.0.2:6379 node1 -p 6379 -a password"
-        The stderr should include "del node command: redis-cli --cluster del-node 172.0.0.2:6379 node1 -p 6379 -a ********"
+        The output should eq "redis-cli  --cluster del-node 172.0.0.2:6379 node1 -p 6379 -a password"
+        The stderr should include "del node command: redis-cli  --cluster del-node 172.0.0.2:6379 node1 -p 6379 -a ********"
       End
     End
   End
@@ -498,8 +496,8 @@ Describe "Redis Cluster Common Bash Script Tests"
       }
       It "builds acl save command without password"
         When call build_acl_save_command $SERVICE_PORT
-        The output should eq "redis-cli -h localhost -p 1000 acl save"
-        The stderr should include "acl save command: redis-cli -h localhost -p 1000 acl save"
+        The output should eq "redis-cli  -h localhost -p 1000 acl save"
+        The stderr should include "acl save command: redis-cli  -h localhost -p 1000 acl save"
       End
     End
 
@@ -518,8 +516,8 @@ Describe "Redis Cluster Common Bash Script Tests"
 
       It "builds acl save command with password"
         When call build_acl_save_command $SERVICE_PORT
-        The output should eq "redis-cli -h localhost -p 1000 -a password acl save"
-        The stderr should include "acl save command: redis-cli -h localhost -p 1000 -a ******** acl save"
+        The output should eq "redis-cli  -h localhost -p 1000 -a password acl save"
+        The stderr should include "acl save command: redis-cli  -h localhost -p 1000 -a ******** acl save"
       End
     End
   End

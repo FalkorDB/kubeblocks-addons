@@ -9,9 +9,13 @@ postgres_walg_dir="/home/postgres/pgdata/wal-g"
 
 build_real_postgres_conf() {
   mkdir -p "$postgres_conf_dir"
-  chmod -R 777 "$postgres_conf_dir"
+
+  # Copy the template config file first
   cp "$postgres_template_conf_file" "$postgres_conf_dir"
-  chmod 777 "$postgres_conf_file"
+
+  # Set permissions
+  chmod 755 "$postgres_conf_dir"
+  chmod 664 "$postgres_conf_file"
 }
 
 init_postgres_log() {

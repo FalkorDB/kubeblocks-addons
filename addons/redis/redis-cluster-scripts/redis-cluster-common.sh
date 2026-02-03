@@ -35,42 +35,6 @@ sleep_random_second_when_ut_mode_false() {
   fi
 }
 
-# usage: parse_host_ip_from_built_in_envs <pod_name>
-# $KB_CLUSTER_COMPONENT_POD_NAME_LIST and $KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST are built-in envs in KubeBlocks postProvision lifecycle action.
-# TODO: the built-in envs will be removed in the future.
-parse_host_ip_from_built_in_envs() {
-  local given_pod_name="$1"
-  local all_pod_name_list="$2"
-  local all_pod_host_ip_list="$3"
-
-  if is_empty "$all_pod_name_list" || is_empty "$all_pod_host_ip_list"; then
-    echo "Error: Required environment variables all_pod_name_list or all_pod_host_ip_list are not set." >&2
-    return 1
-  fi
-
-  pod_name_list=($(split "$all_pod_name_list" ","))
-  pod_ip_list=($(split "$all_pod_host_ip_list" ","))
-  while [ -n "${pod_name_list[0]}" ]; do
-    pod_name="${pod_name_list[0]}"
-    host_ip="${pod_ip_list[0]}"
-    if equals "$pod_name" "$given_pod_name"; then
-      echo "$host_ip"
-      return 0
-    fi
-
-    if equals "${pod_name_list[-1]}" "$pod_name"; then
-      pod_name_list=()
-      pod_ip_list=()
-    else
-      pod_name_list=("${pod_name_list[@]:1}")
-      pod_ip_list=("${pod_ip_list[@]:1}")
-    fi
-  done
-
-  echo "parse_host_ip_from_built_in_envs the given pod name $given_pod_name not found." >&2
-  return 1
-}
-
 ## the component names of all shard
 ## the value format of ALL_SHARDS_COMPONENT_SHORT_NAMES is like "shard-98x:shard-98x,shard-cq7:shard-cq7,shard-hy7:shard-hy7"
 ## return the component names of all shards with the format "shard-98x,shard-cq7,shard-hy7"
@@ -141,9 +105,9 @@ shutdown_redis_server() {
   local service_port="$1"
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    redis-cli -h 127.0.0.1 -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" shutdown
+    redis-cli $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" shutdown
   else
-    redis-cli -h 127.0.0.1 -p "$service_port" shutdown
+    redis-cli $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" shutdown
   fi
   set_xtrace_when_ut_mode_false
   echo "shutdown redis server succeeded!"
@@ -155,9 +119,9 @@ check_redis_server_ready() {
   local port="$2"
   local max_retry=10
   local retry_interval=5
-  check_ready_cmd="redis-cli -h $host -p $port ping"
+  check_ready_cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port ping"
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    check_ready_cmd="redis-cli -h $host -p $port -a $REDIS_DEFAULT_PASSWORD ping"
+    check_ready_cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port -a $REDIS_DEFAULT_PASSWORD ping"
   fi
   output=$($check_ready_cmd)
   set_xtrace_when_ut_mode_false
@@ -227,10 +191,10 @@ send_cluster_meet() {
 
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    meet_command="redis-cli -h $primary_endpoint -p $primary_port cluster meet $announce_ip $announce_port $announce_bus_port"
+    meet_command="redis-cli $REDIS_CLI_TLS_CMD -h $primary_endpoint -p $primary_port cluster meet $announce_ip $announce_port $announce_bus_port"
     logging_mask_meet_command="$meet_command"
   else
-    meet_command="redis-cli -h $primary_endpoint -p $primary_port -a $REDIS_DEFAULT_PASSWORD cluster meet $announce_ip $announce_port $announce_bus_port"
+    meet_command="redis-cli $REDIS_CLI_TLS_CMD -h $primary_endpoint -p $primary_port -a $REDIS_DEFAULT_PASSWORD cluster meet $announce_ip $announce_port $announce_bus_port"
     logging_mask_meet_command="${meet_command/$REDIS_DEFAULT_PASSWORD/********}"
   fi
   echo "check and correct other primary nodes meet command: $logging_mask_meet_command"
@@ -249,9 +213,9 @@ get_cluster_info() {
   local cluster_node="$1"
   local cluster_node_port="$2"
   unset_xtrace_when_ut_mode_false
-  local command="redis-cli -h $cluster_node -p $cluster_node_port cluster info"
+  local command="redis-cli $REDIS_CLI_TLS_CMD -h $cluster_node -p $cluster_node_port cluster info"
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    command="redis-cli -h $cluster_node -p $cluster_node_port -a $REDIS_DEFAULT_PASSWORD cluster info"
+    command="redis-cli $REDIS_CLI_TLS_CMD -h $cluster_node -p $cluster_node_port -a $REDIS_DEFAULT_PASSWORD cluster info"
   fi
   cluster_info=$($command)
   set_xtrace_when_ut_mode_false
@@ -268,9 +232,9 @@ get_cluster_nodes_info() {
   local cluster_node="$1"
   local cluster_node_port="$2"
   unset_xtrace_when_ut_mode_false
-  local command="redis-cli -h $cluster_node -p $cluster_node_port cluster nodes"
+  local command="redis-cli $REDIS_CLI_TLS_CMD -h $cluster_node -p $cluster_node_port cluster nodes"
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    command="redis-cli -h $cluster_node -p $cluster_node_port -a $REDIS_DEFAULT_PASSWORD cluster nodes"
+    command="redis-cli $REDIS_CLI_TLS_CMD -h $cluster_node -p $cluster_node_port -a $REDIS_DEFAULT_PASSWORD cluster nodes"
   fi
   cluster_nodes_info=$($command)
   set_xtrace_when_ut_mode_false
@@ -440,9 +404,9 @@ check_slots_covered() {
   local cluster_service_port="$2"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    check=$(redis-cli --cluster check "$node_endpoint_wth_port" -p "$cluster_service_port")
+    check=$(redis-cli $REDIS_CLI_TLS_CMD --cluster check "$node_endpoint_wth_port" -p "$cluster_service_port")
   else
-    check=$(redis-cli --cluster check "$node_endpoint_wth_port" -p "$cluster_service_port" -a "$REDIS_DEFAULT_PASSWORD" )
+    check=$(redis-cli $REDIS_CLI_TLS_CMD --cluster check "$node_endpoint_wth_port" -p "$cluster_service_port" -a "$REDIS_DEFAULT_PASSWORD")
   fi
   set_xtrace_when_ut_mode_false
   if contains "$check" "All 16384 slots covered"; then
@@ -454,24 +418,17 @@ check_slots_covered() {
 
 # check if the cluster has been initialized
 check_cluster_initialized() {
-  local cluster_pod_ip_list="$1"
-  local cluster_pod_name_list="$2"
-  if is_empty "$cluster_pod_ip_list" || is_empty "$cluster_pod_name_list"; then
-    echo "Error: Required environment variable cluster_pod_ip_list or cluster_pod_name_list is not set." >&2
+  local cluster_pod_fqdn_list="$1"
+  if is_empty "$cluster_pod_fqdn_list"; then
+    echo "Error: Required environment variable cluster_pod_fqdn_list is not set." >&2
     return 1
   fi
 
-  local pod_ip
   local service_port
-  for pod_name in $(echo "$cluster_pod_name_list" | tr ',' ' '); do
-    pod_ip=$(parse_host_ip_from_built_in_envs "$pod_name" "$cluster_pod_name_list" "$cluster_pod_ip_list")
-    if is_empty "$pod_ip"; then
-      echo "Failed to get the host ip of the pod $pod_name in check_cluster_initialized"
-      continue
-    fi
-
+  for pod_fqdn in $(echo "$cluster_pod_fqdn_list" | tr ',' ' '); do
+    pod_name=${pod_fqdn%%.*}
     service_port=$(get_pod_service_port_by_network_mode "${pod_name}")
-    cluster_info=$(get_cluster_info_with_retry "$pod_ip" "$service_port")
+    cluster_info=$(get_cluster_info_with_retry "$pod_fqdn" "$service_port")
     status=$?
     if [ $status -ne 0 ]; then
       echo "Failed to get cluster info in check_cluster_initialized" >&2
@@ -491,10 +448,10 @@ build_redis_cluster_create_command() {
   local primary_nodes="$1"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    initialize_command="redis-cli --cluster create $primary_nodes --cluster-yes"
+    initialize_command="redis-cli $REDIS_CLI_TLS_CMD --cluster create $primary_nodes --cluster-yes"
     logging_mask_initialize_command="$initialize_command"
   else
-    initialize_command="redis-cli --cluster create $primary_nodes -a $REDIS_DEFAULT_PASSWORD --cluster-yes"
+    initialize_command="redis-cli $REDIS_CLI_TLS_CMD --cluster create $primary_nodes -a $REDIS_DEFAULT_PASSWORD --cluster-yes"
     logging_mask_initialize_command="${initialize_command/$REDIS_DEFAULT_PASSWORD/********}"
   fi
   echo "initialize cluster command: $logging_mask_initialize_command" >&2
@@ -508,10 +465,10 @@ build_secondary_replicated_command() {
   local mapping_primary_cluster_id="$3"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    replicated_command="redis-cli --cluster add-node $secondary_endpoint_with_port $mapping_primary_endpoint_with_port --cluster-slave --cluster-master-id $mapping_primary_cluster_id"
+    replicated_command="redis-cli $REDIS_CLI_TLS_CMD --cluster add-node $secondary_endpoint_with_port $mapping_primary_endpoint_with_port --cluster-slave --cluster-master-id $mapping_primary_cluster_id"
     logging_mask_replicated_command="$replicated_command"
   else
-    replicated_command="redis-cli --cluster add-node $secondary_endpoint_with_port $mapping_primary_endpoint_with_port --cluster-slave --cluster-master-id $mapping_primary_cluster_id -a $REDIS_DEFAULT_PASSWORD"
+    replicated_command="redis-cli $REDIS_CLI_TLS_CMD --cluster add-node $secondary_endpoint_with_port $mapping_primary_endpoint_with_port --cluster-slave --cluster-master-id $mapping_primary_cluster_id -a $REDIS_DEFAULT_PASSWORD"
     logging_mask_replicated_command="${replicated_command/$REDIS_DEFAULT_PASSWORD/********}"
   fi
   echo "initialize cluster secondary add-node command: $logging_mask_replicated_command" >&2
@@ -524,10 +481,10 @@ build_scale_out_shard_primary_join_command() {
   local exist_available_node="$2"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    add_node_command="redis-cli --cluster add-node $scale_out_shard_default_primary_endpoint_with_port $exist_available_node"
+    add_node_command="redis-cli $REDIS_CLI_TLS_CMD --cluster add-node $scale_out_shard_default_primary_endpoint_with_port $exist_available_node"
     logging_mask_add_node_command="$add_node_command"
   else
-    add_node_command="redis-cli --cluster add-node $scale_out_shard_default_primary_endpoint_with_port $exist_available_node -a $REDIS_DEFAULT_PASSWORD"
+    add_node_command="redis-cli $REDIS_CLI_TLS_CMD --cluster add-node $scale_out_shard_default_primary_endpoint_with_port $exist_available_node -a $REDIS_DEFAULT_PASSWORD"
     logging_mask_add_node_command="${add_node_command/$REDIS_DEFAULT_PASSWORD/********}"
   fi
   echo "scale out shard primary add-node command: $logging_mask_add_node_command" >&2
@@ -541,10 +498,10 @@ build_reshard_command() {
   local slots_per_shard="$3"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    reshard_command="redis-cli --cluster reshard $primary_node_with_port --cluster-from all --cluster-to $mapping_primary_cluster_id --cluster-slots $slots_per_shard --cluster-yes"
+    reshard_command="redis-cli $REDIS_CLI_TLS_CMD --cluster reshard $primary_node_with_port --cluster-from all --cluster-to $mapping_primary_cluster_id --cluster-slots $slots_per_shard --cluster-yes"
     logging_mask_reshard_command="$reshard_command"
   else
-    reshard_command="redis-cli --cluster reshard $primary_node_with_port --cluster-from all --cluster-to $mapping_primary_cluster_id --cluster-slots $slots_per_shard -a $REDIS_DEFAULT_PASSWORD --cluster-yes"
+    reshard_command="redis-cli $REDIS_CLI_TLS_CMD --cluster reshard $primary_node_with_port --cluster-from all --cluster-to $mapping_primary_cluster_id --cluster-slots $slots_per_shard -a $REDIS_DEFAULT_PASSWORD --cluster-yes"
     logging_mask_reshard_command="${reshard_command/$REDIS_DEFAULT_PASSWORD/********}"
   fi
   echo "scale out shard reshard command: $logging_mask_reshard_command" >&2
@@ -557,10 +514,10 @@ build_rebalance_to_zero_command() {
   local node_cluster_id="$2"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    rebalance_command="redis-cli --cluster rebalance $node_with_port --cluster-weight $node_cluster_id=0 --cluster-yes "
+    rebalance_command="redis-cli $REDIS_CLI_TLS_CMD --cluster rebalance $node_with_port --cluster-weight $node_cluster_id=0 --cluster-yes "
     logging_mask_rebalance_command="$rebalance_command"
   else
-    rebalance_command="redis-cli --cluster rebalance $node_with_port --cluster-weight $node_cluster_id=0 --cluster-yes -a $REDIS_DEFAULT_PASSWORD"
+    rebalance_command="redis-cli $REDIS_CLI_TLS_CMD --cluster rebalance $node_with_port --cluster-weight $node_cluster_id=0 --cluster-yes -a $REDIS_DEFAULT_PASSWORD"
     logging_mask_rebalance_command="${rebalance_command/$REDIS_DEFAULT_PASSWORD/********}"
   fi
   echo "set current component slot to 0 by rebalance command: $logging_mask_rebalance_command" >&2
@@ -574,15 +531,15 @@ build_del_node_command() {
   local do_forget_node="$3"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    del_node_command="redis-cli --cluster del-node $available_node $node_to_del_cluster_id -p $SERVICE_PORT"
+    del_node_command="redis-cli $REDIS_CLI_TLS_CMD --cluster del-node $available_node $node_to_del_cluster_id -p $SERVICE_PORT"
     if [[ "$do_forget_node" == "true" ]]; then
-      del_node_command="redis-cli -p $SERVICE_PORT --cluster call $available_node cluster forget $node_to_del_cluster_id"
+      del_node_command="redis-cli $REDIS_CLI_TLS_CMD -p $SERVICE_PORT --cluster call $available_node cluster forget $node_to_del_cluster_id"
     fi
     logging_mask_del_node_command="$del_node_command"
   else
-    del_node_command="redis-cli --cluster del-node $available_node $node_to_del_cluster_id -p $SERVICE_PORT -a $REDIS_DEFAULT_PASSWORD"
+    del_node_command="redis-cli $REDIS_CLI_TLS_CMD --cluster del-node $available_node $node_to_del_cluster_id -p $SERVICE_PORT -a $REDIS_DEFAULT_PASSWORD"
     if [[ "$do_forget_node" == "true" ]]; then
-      del_node_command="redis-cli -p $SERVICE_PORT --cluster call $available_node cluster forget $node_to_del_cluster_id -a $REDIS_DEFAULT_PASSWORD"
+      del_node_command="redis-cli $REDIS_CLI_TLS_CMD -p $SERVICE_PORT --cluster call $available_node cluster forget $node_to_del_cluster_id -a $REDIS_DEFAULT_PASSWORD"
     fi
     logging_mask_del_node_command="${del_node_command/$REDIS_DEFAULT_PASSWORD/********}"
   fi
@@ -595,10 +552,10 @@ build_acl_save_command() {
   local service_port="$1"
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    acl_save_command="redis-cli -h localhost -p $service_port -a $REDIS_DEFAULT_PASSWORD acl save"
+    acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port -a $REDIS_DEFAULT_PASSWORD acl save"
     logging_mask_acl_save_command="${acl_save_command/$REDIS_DEFAULT_PASSWORD/********}"
   else
-    acl_save_command="redis-cli -h localhost -p $service_port acl save"
+    acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port acl save"
     logging_mask_acl_save_command="$acl_save_command"
   fi
   echo "acl save command: $logging_mask_acl_save_command" >&2
@@ -727,9 +684,9 @@ check_redis_role() {
   local port=$2
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    role_info=$(redis-cli -h $host -p $port info replication)
+    role_info=$(redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port info replication)
   else
-    role_info=$(redis-cli -h $host -p $port -a "$REDIS_DEFAULT_PASSWORD" info replication)
+    role_info=$(redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port -a "$REDIS_DEFAULT_PASSWORD" info replication)
   fi
   set_xtrace_when_ut_mode_false
 
@@ -740,4 +697,60 @@ check_redis_role() {
   else
     echo "unknown"
   fi
+}
+
+redis_config_get() {
+  local host=$1
+  local port=$2
+  local password=$3
+  local command=$4
+
+  local output
+  unset_xtrace_when_ut_mode_false
+  if ! is_empty "$password"; then
+    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
+  else
+    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
+  fi
+  local status=$?
+  set_xtrace_when_ut_mode_false
+
+  if [[ $status -ne 0 ]]; then
+    echo "Command failed with status $status." >&2
+    return 1
+  fi
+
+  if [[ -z "$output" ]]; then
+    echo "Command returned no output." >&2
+    return 1
+  fi
+
+  echo "$output"
+  return 0
+}
+
+forget_fail_node_when_cluster_is_ok() {
+  local host=$1
+  local port=$2
+  unset_xtrace_when_ut_mode_false
+  cluster_info=$(get_cluster_info_with_retry "$host" "$port")
+  cluster_state=$(echo "$cluster_info" | awk -F: '/cluster_state/{print $2}' | tr -d '[:space:]')
+  if [[ "$cluster_state" != "ok" ]]; then
+    echo "Cluster state is not ok, skip forget fail node"
+    set_xtrace_when_ut_mode_false
+    return 0
+  fi
+  cluster_nodes_info=$(get_cluster_nodes_info "$host" "$port")
+  while read -r line; do
+    node_id=$(echo "$line" | awk '{print $1}')
+    node_role=$(echo "$line" | awk '{print $3}')
+    if [[ "$node_role" == "fail" ]]; then
+      if [ -z ${REDIS_DEFAULT_PASSWORD} ]; then
+        redis-cli -h $host -p $port --cluster call $host:$port cluster forget ${node_id}
+      else
+        redis-cli -h $host -p $port --cluster call $host:$port cluster forget ${node_id} -a ${REDIS_DEFAULT_PASSWORD}
+      fi
+    fi
+  done <<< "$cluster_nodes_info"
+  set_xtrace_when_ut_mode_false
 }
