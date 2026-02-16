@@ -46,9 +46,9 @@ acl_set_extra_user_for_redis_sentinel() {
   local acl_rules
   acl_rules=${FALKORDB_SENT_EXTRA_USER_ACL:-"~* +@all"}
 
-  until redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ping; do sleep 1; done
-  redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SETUSER $FALKORDB_SENT_EXTRA_USER_USERNAME ON \>$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules
-  redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SAVE
+  until redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ping; do sleep 1; done
+  redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SETUSER $FALKORDB_SENT_EXTRA_USER_USERNAME ON \>$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules
+  redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SAVE
   echo "extra sentinel user $FALKORDB_SENT_EXTRA_USER_USERNAME set successfully."
 }
 
