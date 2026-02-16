@@ -203,6 +203,7 @@ build_redis_sentinel_conf() {
   fi
 
   announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value")
+  announce_port_value="$sentinel_port"
   if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
     echo "announce hostname override is set, using $announce_host_value for sentinel announce"
     enable_hostname_resolution=true

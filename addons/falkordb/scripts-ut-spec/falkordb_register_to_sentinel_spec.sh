@@ -90,8 +90,8 @@ Describe 'register_to_sentinel.sh'
 
       When call register_to_sentinel_wrapper
       The status should be success
-      The stdout should include "register to sentinel:redis-redis-sentinel-0.redis-redis-sentinel-headless.default.svc.cluster.local with pod fqdn: redis_default_primary_pod_fqdn=redis-redis-0.redis-redis.default.svc.cluster.local, redis_default_service_port=6379"
-      The stdout should include "register to sentinel:redis-redis-sentinel-1.redis-redis-sentinel-headless.default.svc.cluster.local with pod fqdn: redis_default_primary_pod_fqdn=redis-redis-0.redis-redis.default.svc.cluster.local, redis_default_service_port=6379"
+      The stdout should include "register to sentinel:redis-redis-sentinel-0.redis-redis-sentinel-headless.default.svc.cluster.local with pod host: redis_primary_host=redis-redis-0.redis-redis.default.svc.cluster.local, redis_default_service_port=6379"
+      The stdout should include "register to sentinel:redis-redis-sentinel-1.redis-redis-sentinel-headless.default.svc.cluster.local with pod host: redis_primary_host=redis-redis-0.redis-redis.default.svc.cluster.local, redis_default_service_port=6379"
     End
 
     It 'registers with advertised service when REDIS_ADVERTISED_PORT is set'
@@ -103,8 +103,8 @@ Describe 'register_to_sentinel.sh'
 
       When call register_to_sentinel_wrapper
       The status should be success
-      The stdout should include "register to sentinel:redis-redis-sentinel-0.redis-redis-sentinel-headless.default.svc.cluster.local with announce addr: redis_announce_host_value=10.0.0.1, redis_announce_port_value=31001"
-      The stdout should include "register to sentinel:redis-redis-sentinel-1.redis-redis-sentinel-headless.default.svc.cluster.local with announce addr: redis_announce_host_value=10.0.0.1, redis_announce_port_value=31001"
+      The stdout should include "register to sentinel:redis-redis-sentinel-0.redis-redis-sentinel-headless.default.svc.cluster.local with announce addr: redis_primary_host=10.0.0.1, redis_announce_port_value=31001"
+      The stdout should include "register to sentinel:redis-redis-sentinel-1.redis-redis-sentinel-headless.default.svc.cluster.local with announce addr: redis_primary_host=10.0.0.1, redis_announce_port_value=31001"
     End
 
     It 'fails if required env vars SENTINEL_POD_FQDN_LIST are not set'
