@@ -26,19 +26,13 @@ load_common_library() {
   source "${common_library_file}"
 }
 
-# Helper: add --tls if TLS_ENABLED is true
-redis_cli_tls_flag() {
-  if [ "${TLS_ENABLED}" = "true" ]; then
-    echo "--tls"
-  fi
-}
-
 acl_set_user_for_redis_sentinel() {
   # set default user password and replication user password
   if [ -n "$SENTINEL_PASSWORD" ]; then
-    until redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ping; do sleep 1; done
-    redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SETUSER $SENTINEL_USER ON \>$SENTINEL_PASSWORD allchannels +@all
-    redis-cli $(redis_cli_tls_flag) -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SAVE
+    sentinel_service_port=${SENTINEL_SERVICE_PORT:-26379}
+    until redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $sentinel_service_port -a $SENTINEL_PASSWORD ping; do sleep 1; done
+    redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $sentinel_service_port -a $SENTINEL_PASSWORD ACL SETUSER $SENTINEL_USER ON \>$SENTINEL_PASSWORD allchannels +@all
+    redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $sentinel_service_port -a $SENTINEL_PASSWORD ACL SAVE
     echo "redis sentinel user and password set successfully."
   fi
 }

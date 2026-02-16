@@ -63,9 +63,9 @@ get_current_shard_primary() {
   local master_info
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    master_info=$(redis-cli $(redis_cli_tls_flag) -h $host -p $port info replication)
+    master_info=$(redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port info replication)
   else
-    master_info=$(redis-cli $(redis_cli_tls_flag) -h $host -p $port -a "$REDIS_DEFAULT_PASSWORD" info replication)
+    master_info=$(redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port -a "$REDIS_DEFAULT_PASSWORD" info replication)
   fi
   set_xtrace_when_ut_mode_false
 
@@ -88,13 +88,13 @@ get_all_shards_master() {
   local cluster_nodes_info
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    cluster_nodes_info=$(redis-cli $(redis_cli_tls_flag) -h $host -p $port cluster nodes)
+    cluster_nodes_info=$(redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port cluster nodes)
   else
-    cluster_nodes_info=$(redis-cli $(redis_cli_tls_flag) -h $host -p $port -a "$REDIS_DEFAULT_PASSWORD" cluster nodes)
+    cluster_nodes_info=$(redis-cli $REDIS_CLI_TLS_CMD -h $host -p $port -a "$REDIS_DEFAULT_PASSWORD" cluster nodes)
   fi
   set_xtrace_when_ut_mode_false
 
-  echo "$cluster_nodes_info" | grep "master" | while read -r line; do
+  echo "$cluster_nodes_info" | grep "master" | grep -v "fail" | while read -r line; do
     node_addr=$(echo "$line" | cut -d' ' -f2 | cut -d'@' -f1)
     echo "$node_addr"
   done
@@ -150,9 +150,9 @@ do_switchover() {
   echo "Starting switchover to $candidate_pod"
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    result=$(redis-cli $(redis_cli_tls_flag) -h "$candidate_pod_fqdn" -p $service_port cluster failover)
+    result=$(redis-cli $REDIS_CLI_TLS_CMD -h "$candidate_pod_fqdn" -p $service_port cluster failover)
   else
-    result=$(redis-cli $(redis_cli_tls_flag) -h "$candidate_pod_fqdn" -p $service_port -a "$REDIS_DEFAULT_PASSWORD" cluster failover)
+    result=$(redis-cli $REDIS_CLI_TLS_CMD -h "$candidate_pod_fqdn" -p $service_port -a "$REDIS_DEFAULT_PASSWORD" cluster failover)
   fi
   if [ "$need_check" != "true" ]; then
     return 0

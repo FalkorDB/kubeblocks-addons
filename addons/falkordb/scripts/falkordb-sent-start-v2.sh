@@ -31,7 +31,6 @@ load_common_library() {
 redis_sentinel_conf_dir="/data/sentinel"
 redis_sentinel_real_conf="/data/sentinel/redis-sentinel.conf"
 redis_sentinel_extra_conf="/etc/conf/redis-sentinel-extra.conf"
-redis_sentinel_real_conf_bak="/data/sentinel/redis-sentinel.conf.bak"
 
 extract_lb_host_by_svc_name() {
   local svc_name="$1"
@@ -129,23 +128,25 @@ add_extra_sentinel_user_account() {
 
 reset_redis_sentinel_conf() {
   echo "reset redis sentinel conf"
-  sentinel_port=${SENTINEL_SERVICE_PORT:-26379}
   mkdir -p $redis_sentinel_conf_dir
   if [ -f $redis_sentinel_real_conf ]; then
-    sed "/sentinel announce-ip/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
-    sed "/sentinel announce-port/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
-    sed "/sentinel resolve-hostnames/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
-    sed "/sentinel announce-hostnames/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
+    sed -i -e "/sentinel announce-ip/d" \
+    -e "/sentinel announce-port/d" \
+    -e "/sentinel resolve-hostnames/d" \
+    -e "/sentinel announce-hostnames/d" \
+    -e "/port /d" \
+    -e "/user default on/d" \
+    -e "/tls-cert-file /d" \
+    -e "/tls-key-file /d" \
+    -e "/tls-ca-cert-file /d" \
+    -e "/tls-port /d" \
+    -e "/tls-auth-clients no/d" \
+    -e "/aclfile \/data\/users.acl/d" $redis_sentinel_real_conf
     unset_xtrace_when_ut_mode_false
     if [ -n "$SENTINEL_PASSWORD" ]; then
-      sed "/sentinel sentinel-user/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
-      sed "/sentinel sentinel-pass/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
+      sed -i -e "/sentinel sentinel-user/d" \
+      -e "/sentinel sentinel-pass/d" $redis_sentinel_real_conf
     fi
-    set_xtrace_when_ut_mode_false
-    sed "/port $sentinel_port/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
-    sed "/aclfile \/data\/users.acl/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
-    # backward compatible for previous versions without ACL
-    sed "/user default on/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
   fi
 
   # hack for redis sentinel when nodeport is enabled, remove known-replica line which has the same nodeport port with master
@@ -156,8 +157,8 @@ reset_redis_sentinel_conf() {
       if [[ $line =~ ^sentinel[[:space:]]+monitor[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+) ]]; then
         master_name="${BASH_REMATCH[1]}"
         master_port="${BASH_REMATCH[2]}"
-        sed "/^sentinel known-replica ${master_name} .* ${master_port}$/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
-        sed "/^sentinel known-sentinel ${master_name}/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
+        sed -i -e "/^sentinel known-replica ${master_name} .* ${master_port}$/d" \
+        -e "/^sentinel known-sentinel ${master_name}/d" $redis_sentinel_real_conf
       fi
     done < "$temp_file"
     rm -f "$temp_file"
@@ -175,18 +176,20 @@ build_redis_sentinel_conf() {
     echo "include $redis_sentinel_extra_conf" >> "$redis_sentinel_real_conf"
   fi
 
-  local announce_host_value=""
-  local announce_port_value="$sentinel_port"
-  local enable_hostname_resolution=false
-
+  sentinel_port=${SENTINEL_SERVICE_PORT:-26379}
   # build announce ip and port according to whether the announce addr is enabled
   if ! is_empty "$redis_sentinel_announce_host_value" && ! is_empty "$redis_sentinel_announce_port_value"; then
     echo "redis sentinel use nodeport $redis_sentinel_announce_host_value:$redis_sentinel_announce_port_value to announce"
-    announce_host_value="$redis_sentinel_announce_host_value"
-    announce_port_value="$redis_sentinel_announce_port_value"
+    {
+      echo "sentinel announce-ip $redis_sentinel_announce_host_value"
+      echo "sentinel announce-port $redis_sentinel_announce_port_value"
+    } >> $redis_sentinel_real_conf
   elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
     echo "redis sentinel use the fixed pod ip $CURRENT_POD_IP:$sentinel_port to announce"
-    announce_host_value="$CURRENT_POD_IP"
+    {
+      echo "sentinel announce-ip $CURRENT_POD_IP"
+      echo "sentinel announce-port $sentinel_port"
+    } >> $redis_sentinel_real_conf
   else
     # shellcheck disable=SC2153
     current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$SENTINEL_POD_FQDN_LIST" "$CURRENT_POD_NAME")
@@ -206,12 +209,6 @@ build_redis_sentinel_conf() {
   fi
 
   {
-    if [ "$TLS_ENABLED" = "true" ]; then
-      echo "tls-port $service_port"
-      echo "port 0"
-    else
-      echo "port $sentinel_port"
-    fi
     echo "sentinel announce-ip $announce_host_value"
     echo "sentinel announce-port $announce_port_value"
     if $enable_hostname_resolution; then
@@ -229,6 +226,19 @@ build_redis_sentinel_conf() {
   set_xtrace_when_ut_mode_false
   echo "aclfile /data/users.acl">> $redis_sentinel_real_conf
   echo "ignore-warnings ARM64-COW-BUG" >> $redis_sentinel_real_conf
+  if [ "$TLS_ENABLED" == "true" ]; then
+    {
+      echo "tls-cert-file ${TLS_MOUNT_PATH}/tls.crt"
+      echo "tls-key-file ${TLS_MOUNT_PATH}/tls.key"
+      echo "tls-ca-cert-file ${TLS_MOUNT_PATH}/ca.crt"
+      echo "port 0"
+      echo "tls-port $sentinel_port"
+      echo "tls-auth-clients no"
+      echo "tls-replication yes"
+    } >> $redis_sentinel_real_conf
+  else
+    echo "port $sentinel_port" >> $redis_sentinel_real_conf
+  fi
   echo "build redis sentinel conf succeeded!"
 }
 
