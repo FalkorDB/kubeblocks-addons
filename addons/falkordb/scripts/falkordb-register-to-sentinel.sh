@@ -220,7 +220,7 @@ get_master_addr_by_name(){
     return 1
   fi
   local ip_addr=$(echo "$output" | head -n1)
-  if is_empty "$ip_addr" || echo "$ip_addr" | grep -E '^([a-zA-Z0-9-]+\.[a-zA-Z0-9-]+\.default\.svc|([0-9]{1,3}\.){3}[0-9]{1,3})$' > /dev/null; then
+  if is_empty "$ip_addr" || echo "$ip_addr" | grep -E '^([a-zA-Z0-9-]+\.[a-zA-Z0-9-]+\.default\.svc(\.[a-zA-Z0-9.-]+)?|([0-9]{1,3}\.){3}[0-9]{1,3})$' > /dev/null; then
     echo "$output" 
     return 0
   else
