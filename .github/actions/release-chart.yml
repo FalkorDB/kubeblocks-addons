@@ -1,18 +1,6 @@
 name: Release FalkorDB Chart
 
 on:
-  workflow_dispatch:
-    inputs:
-      VERSION:
-        description: "Chart version to release (e.g. 0.1.0). Defaults to version in Chart.yaml."
-        required: false
-        default: ""
-        type: string
-      DRY_RUN:
-        description: "Skip push/release steps (for testing)"
-        required: false
-        default: false
-        type: boolean
   workflow_call:
     inputs:
       VERSION:
@@ -20,21 +8,23 @@ on:
         type: string
         required: false
         default: ""
+      CHART_DIR:
+        description: "Chart directory (default: addons/falkordb)"
+        type: string
+        required: false
+        default: "addons/falkordb"
       DRY_RUN:
         description: "Skip push/release steps (for testing)"
         type: boolean
         required: false
         default: false
-
-run-name: Release FalkorDB Chart ${{ inputs.VERSION || '(auto)' }}
-
 env:
   HELM_VERSION: "v3.16.3"
-  CHART_DIR: "addons/falkordb"
+  CHART_DIR: ${{ inputs.CHART_DIR || 'addons/falkordb' }}
 
 jobs:
   release-falkordb-chart:
-    name: Release addons/falkordb
+    name: Release ${{ inputs.CHART_DIR || 'addons/falkordb' }}
     permissions:
       contents: write
       packages: write
@@ -55,6 +45,7 @@ jobs:
         shell: bash
         run: |
           version="${{ inputs.VERSION }}"
+          # Strip leading 'v' if present
           version="${version#v}"
           if [[ -z "$version" ]]; then
             version=$(grep '^version:' ${{ env.CHART_DIR }}/Chart.yaml | awk '{print $2}')
@@ -92,6 +83,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="falkordb-${{ steps.version.outputs.version }}"
+          # Create or update the release
           if gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
             echo "Release ${TAG} already exists, uploading assets only."
             gh release upload "${TAG}" \
@@ -99,10 +91,9 @@ jobs:
               --repo "${{ github.repository }}" \
               --clobber
           else
-            NOTES="## FalkorDB Helm Chart ${{ steps.version.outputs.version }}"$'\n\n'"Install via OCI:"$'\n'"helm install falkordb oci://ghcr.io/${{ github.repository }}/falkordb --version ${{ steps.version.outputs.version }}"
             gh release create "${TAG}" \
               .cr-release-packages/*.tgz \
               --repo "${{ github.repository }}" \
               --title "FalkorDB Chart ${{ steps.version.outputs.version }}" \
-              --notes "${NOTES}"
+              --notes "## FalkorDB Helm Chart ${{ steps.version.outputs.version }}\n\nInstall via OCI:\n\`\`\`bash\nhelm install falkordb oci://ghcr.io/${{ github.repository }}/falkordb --version ${{ steps.version.outputs.version }}\n\`\`\`"
           fi

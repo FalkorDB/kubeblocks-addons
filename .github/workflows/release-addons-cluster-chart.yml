@@ -1,124 +1,27 @@
-name: Release Addons Cluster Chart
+name: Release FalkorDB Cluster Chart
 
 on:
   workflow_dispatch:
     inputs:
-      chart_dir:
-        description: 'release specify chart dir or empty to release all'
-        required: false
-        default: ''
-        type: choice
-        options:
-          - ""
-          - apecloud-mysql
-          - apecloud-postgresql
-          - clickhouse
-          - elasticsearch
-          - etcd
-          - falkordb
-          - greptimedb
-          - influxdb
-          - kafka
-          - llm
-          - loki
-          - mariadb
-          - milvus
-          - minio
-          - mogdb
-          - mongodb
-          - mysql
-          - nebula
-          - neo4j
-          - neon
-          - oceanbase-ce
-          - vanilla-postgresql
-          - opensearch
-          - orchestrator
-          - orioledb
-          - polardbx
-          - postgresql
-          - pulsar
-          - qdrant
-          - rabbitmq
-          - redis
-          - risingwave
-          - rocketmq
-          - starrocks-ce
-          - tidb
-          - victoria-metrics
-          - weaviate
-          - xinference
-          - yashandb
-          - zookeeper
-      custom_chart_dir:
-        description: 'release specify custom chart dir when chart_dir is empty'
+      VERSION:
+        description: 'Chart version to release (e.g. 0.1.0). Defaults to version in Chart.yaml.'
         required: false
         default: ''
         type: string
+      DRY_RUN:
+        description: 'Skip push/release steps (for testing)'
+        required: false
+        default: false
+        type: boolean
 
-env:
-  GH_TOKEN: ${{ github.token }}
-
-run-name: Release Chart ${{ inputs.chart_dir || inputs.custom_chart_dir }}
+run-name: Release FalkorDB Cluster Chart ${{ inputs.VERSION || '(auto)' }}
 
 jobs:
   release-chart:
-    if: ${{ inputs.chart_dir != '' || inputs.custom_chart_dir != '' }}
-    uses: apecloud/apecloud-cd/.github/workflows/release-charts.yml@v0.1.96
+    uses: ./.github/workflows/release-chart.yml
     with:
-      VERSION: ""
-      CHART_DIR: "addons-cluster"
-      SPECIFY_CHART: "${{ inputs.chart_dir || inputs.custom_chart_dir }}"
-      APECD_REF: "v0.1.96"
-      PROJECT_ID: "150246"
-    secrets: inherit
-
-  release-chart-all:
-    if: ${{ inputs.chart_dir == '' && inputs.custom_chart_dir == '' }}
-    uses: apecloud/apecloud-cd/.github/workflows/release-charts.yml@v0.1.96
-    with:
-      VERSION: ""
-      CHART_DIR: "addons-cluster"
-      SPECIFY_CHART: ""
-      APECD_REF: "v0.1.96"
-      ENABLE_JIHU: false
-      PROJECT_ID: "150246"
-    secrets: inherit
-
-  get-addons-chart-dir:
-    if: ${{ inputs.chart_dir == '' && inputs.custom_chart_dir == '' }}
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.get_addons_chart_dir.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: get addons chart dir
-        id: get_addons_chart_dir
-        run: |
-          addons_list=$(ls addons-cluster)
-          ADDONS_DIR=""
-          for addons_name in $( echo "$addons_list" ); do
-              if [[ -z "$ADDONS_DIR" ]]; then
-                  ADDONS_DIR="{\"addon-name\":\"$addons_name\"}"
-              else
-                  ADDONS_DIR="$ADDONS_DIR,{\"addon-name\":\"$addons_name\"}"
-              fi
-          done
-          echo "$ADDONS_DIR"
-          echo "matrix={\"include\":[$ADDONS_DIR]}" >> $GITHUB_OUTPUT
-
-
-  release-addons-chart-jihu:
-    needs: [ get-addons-chart-dir ]
-    if: ${{ inputs.chart_dir == '' && inputs.custom_chart_dir == '' }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.get-addons-chart-dir.outputs.matrix) }}
-    uses: apecloud/apecloud-cd/.github/workflows/release-charts-jihu.yml@v0.1.96
-    with:
-      VERSION: ""
-      CHART_DIR: "addons-cluster"
-      SPECIFY_CHART: "${{ matrix.addon-name }}"
-      APECD_REF: "v0.1.96"
-      PROJECT_ID: "150246"
-    secrets: inherit
+      VERSION: "${{ inputs.VERSION }}"
+      DRY_RUN: ${{ inputs.DRY_RUN || false }}
+    permissions:
+      contents: write
+      packages: write
