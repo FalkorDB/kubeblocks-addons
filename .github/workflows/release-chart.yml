@@ -85,9 +85,10 @@ jobs:
       - name: Push chart to GHCR (OCI)
         if: ${{ !inputs.DRY_RUN }}
         run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           helm push \
             .cr-release-packages/falkordb-${{ steps.version.outputs.version }}.tgz \
-            oci://ghcr.io/${{ github.repository }}
+            oci://ghcr.io/${REPO}
 
       - name: Create GitHub Release and upload chart artifact
         if: ${{ !inputs.DRY_RUN }}
