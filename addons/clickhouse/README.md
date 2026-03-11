@@ -84,6 +84,7 @@ spec:
     - name: clickhouse
       shards: 1
       template:
+        name: clickhouse
         replicas: 1
         systemAccounts:
           - name: admin
@@ -711,7 +712,7 @@ spec:
     scaleOut:
       # Specifies the replica changes for the component.
       # add one more replica to current component
-      replicaChanges: 2 
+      replicaChanges: 2
 ```
 
 ```bash
@@ -741,7 +742,7 @@ spec:
     scaleIn:
       # Specifies the replica changes for the component.
       # add one more replica to current component
-      replicaChanges: 2 
+      replicaChanges: 2
 ```
 
 ```bash
