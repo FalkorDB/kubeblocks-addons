@@ -1747,6 +1747,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         return 0
       }
 
+      populate_pod_ip_name_list() {
+        return 0
+      }
+
       setup() {
         export KB_CLUSTER_POD_IP_LIST="172.42.0.1,172.42.0.2,172.42.0.3,172.42.0.4,172.42.0.5,172.42.0.6"
         export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
@@ -1781,6 +1785,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       sync_acl_for_redis_cluster_shard() {
+        return 0
+      }
+
+      populate_pod_ip_name_list() {
         return 0
       }
 
