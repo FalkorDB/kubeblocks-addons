@@ -62,6 +62,9 @@ jobs:
           echo "version=${version}" >> $GITHUB_OUTPUT
           echo "Chart version: ${version}"
 
+      - name: Helm Dependency
+        run: helm dependency build ${{ env.CHART_DIR }}
+
       - name: Helm lint
         run: helm lint ${{ env.CHART_DIR }}
 
