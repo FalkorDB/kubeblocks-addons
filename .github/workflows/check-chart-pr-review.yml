@@ -21,6 +21,9 @@ jobs:
       CHART_DIR: "addons"
       APECD_REF: "v0.1.68"
       SET_REGISTRY: "${{ matrix.registry }}"
+      SPECIFY_CHART: "falkordb"
+      CHART_NAME: "falkordb"
+      CHECK_ENABLE: false
     secrets: inherit
 
   check-addons-cluster-helm-pr:
@@ -30,4 +33,7 @@ jobs:
     with:
       CHART_DIR: "addons-cluster"
       APECD_REF: "v0.1.68"
+      SPECIFY_CHART: "falkordb"
+      CHART_NAME: "falkordb"
+      CHECK_ENABLE: false
     secrets: inherit
