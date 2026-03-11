@@ -21,15 +21,14 @@ jobs:
       fail-fast: false
       matrix:
         registry: [ "", "dockerhub" ]
+    secrets: inherit
     uses: apecloud/apecloud-cd/.github/workflows/release-charts-check.yml@v0.1.68
     with:
       CHART_DIR: "addons/falkordb"
       APECD_REF: "v0.1.68"
       SET_REGISTRY: "${{ matrix.registry }}"
       SPECIFY_CHART: "falkordb"
-      CHART_NAME: "falkordb"
       CHECK_ENABLE: false
-    secrets: inherit
 
   check-addons-cluster-helm:
     uses: apecloud/apecloud-cd/.github/workflows/release-charts-check.yml@v0.1.68
@@ -37,7 +36,6 @@ jobs:
       CHART_DIR: "addons-cluster"
       APECD_REF: "v0.1.68"
       SPECIFY_CHART: "falkordb"
-      CHART_NAME: "falkordb"
       CHECK_ENABLE: false
     secrets: inherit
 
