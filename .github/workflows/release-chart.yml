@@ -95,6 +95,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           TAG="falkordb-${{ steps.version.outputs.version }}"
           if gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
             echo "Release ${TAG} already exists, uploading assets only."
@@ -103,7 +104,7 @@ jobs:
               --repo "${{ github.repository }}" \
               --clobber
           else
-            NOTES="## FalkorDB Helm Chart ${{ steps.version.outputs.version }}"$'\n\n'"Install via OCI:"$'\n'"helm install falkordb oci://ghcr.io/${{ github.repository }}/falkordb --version ${{ steps.version.outputs.version }}"
+            NOTES="## FalkorDB Helm Chart ${{ steps.version.outputs.version }}"$'\n\n'"Install via OCI:"$'\n'"helm install falkordb oci://ghcr.io/${REPO}/falkordb --version ${{ steps.version.outputs.version }}"
             gh release create "${TAG}" \
               .cr-release-packages/*.tgz \
               --repo "${{ github.repository }}" \
