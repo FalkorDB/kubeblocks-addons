@@ -27,7 +27,7 @@ test || __() {
 _map_get() { awk -F'\t' -v k="$2" '$1==k{print $2; exit}' "$1"; }
 _map_keys() { awk -F'\t' 'NF>0{print $1}' "$1"; }
 _map_append() { printf '%s\t%s\n' "$2" "$3" >> "$1"; }
-_map_size() { grep -c '' "$1" 2>/dev/null || printf '0'; }
+_map_size() { [ -s "$1" ] && grep -c '' "$1" || printf '0'; }
 
 # Temp files for associative maps (initialized in init_cluster_map_files)
 _initialize_redis_cluster_primary_nodes=""
@@ -160,12 +160,12 @@ init_other_components_and_pods_info() {
   done < "$_tmp_paste"
   rm -f "$_tmp_paste"
 
-  echo "other_components: ${other_components}"
-  echo "other_deleting_components: ${other_deleting_components}"
-  echo "other_undeleted_components: ${other_undeleted_components}"
-  echo "other_undeleted_component_pod_ips: ${other_undeleted_component_pod_ips}"
-  echo "other_undeleted_component_pod_names: ${other_undeleted_component_pod_names}"
-  echo "other_undeleted_component_nodes: ${other_undeleted_component_nodes}"
+  echo "other_components: $(printf '%s' "${other_components}" | tr '|' ' ')"
+  echo "other_deleting_components: $(printf '%s' "${other_deleting_components}" | tr '|' ' ')"
+  echo "other_undeleted_components: $(printf '%s' "${other_undeleted_components}" | tr '|' ' ')"
+  echo "other_undeleted_component_pod_ips: $(printf '%s' "${other_undeleted_component_pod_ips}" | tr '|' ' ')"
+  echo "other_undeleted_component_pod_names: $(printf '%s' "${other_undeleted_component_pod_names}" | tr '|' ' ')"
+  echo "other_undeleted_component_nodes: $(printf '%s' "${other_undeleted_component_nodes}" | tr '|' ' ')"
 }
 
 find_exist_available_node() {

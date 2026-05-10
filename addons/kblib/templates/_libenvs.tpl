@@ -21,8 +21,9 @@ Example:
 {{- define "kblib.envs.env_exist" }}
 env_exist() {
   local env_name="$1"
-
-  if [[ -z "${!env_name}" ]]; then
+  local env_value=""
+  eval "env_value=\${$env_name-}"
+  if [ -z "$env_value" ]; then
     echo "false, $env_name does not exist"
     return 1
   fi
@@ -47,19 +48,23 @@ Example:
 */}}
 {{- define "kblib.envs.env_exists" }}
 env_exists() {
-  local env_list=("$@")
-  local missing_envs=()
-
-  for env in "${env_list[@]}"; do
-    if [[ -z "${!env}" ]]; then
-      missing_envs+=("$env")
+  local missing_envs=""
+  local env_value=""
+  for env in "$@"; do
+    eval "env_value=\${$env-}"
+    if [ -z "$env_value" ]; then
+      if [ -z "$missing_envs" ]; then
+        missing_envs="$env"
+      else
+        missing_envs="$missing_envs $env"
+      fi
     fi
   done
 
-  if [[ ${#missing_envs[@]} -eq 0 ]]; then
+  if [ -z "$missing_envs" ]; then
     return 0
   else
-    echo "false, the following environment variables do not exist: ${missing_envs[*]}"
+    echo "false, the following environment variables do not exist: $missing_envs"
     return 1
   fi
 }

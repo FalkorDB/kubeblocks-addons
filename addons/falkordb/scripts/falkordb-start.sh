@@ -264,7 +264,7 @@ get_master_addr_by_name_from_sentinel() {
 
   if [ $exit_code -eq 0 ]; then
     REDIS_SENTINEL_PRIMARY_HOST=$(printf '%s\n' "$output" | head -n1)
-    REDIS_SENTINEL_PRIMARY_PORT=$(printf '%s\n' "$output" | tail -n1)
+    REDIS_SENTINEL_PRIMARY_PORT=$(printf '%s\n' "$output" | sed -n '2p')
     if [ -n "$REDIS_SENTINEL_PRIMARY_HOST" ] && [ -n "$REDIS_SENTINEL_PRIMARY_PORT" ]; then
       echo "Successfully retrieved primary info from sentinel"
       return 0

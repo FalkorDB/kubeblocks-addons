@@ -187,6 +187,7 @@ parse_advertised_svc_and_port() {
 
     svc_name_ordinal=$(extract_obj_ordinal "$svc_name")
     if [ "$svc_name_ordinal" = "$pod_name_ordinal" ]; then
+      if is_empty "$port"; then return 1; fi
       if [ "${svc_and_port}" = "true" ]; then
          echo "$svc_name:$port"
       else

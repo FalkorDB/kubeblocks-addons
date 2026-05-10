@@ -32,7 +32,7 @@ call_func_with_retry() {
       return 0
     else
       retries=$((retries + 1))
-      if [[ $retries -eq $max_retries ]]; then
+      if [ "$retries" -eq "$max_retries" ]; then
         echo "Function '$function_name' failed after $max_retries retries." >&2
         return 1
       fi
