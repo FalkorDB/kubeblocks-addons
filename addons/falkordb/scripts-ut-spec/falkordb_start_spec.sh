@@ -472,10 +472,9 @@ Describe "FalkorDB Start Bash Script Tests"
 
     It "retrieves primary info from sentinel successfully"
       # Mock the command to get redis master addr info from sentinel
+      # Real sentinel returns host and port on separate lines
       build_sentinel_get_master_addr_by_name_command() {
-        mock_output="172.18.0.3 31081"
-        # shellcheck disable=SC2028
-        echo "echo '$mock_output'"
+        echo "printf '172.18.0.3\\n31081\\n'"
       }
       When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
       The status should be success
@@ -640,9 +639,8 @@ Describe "FalkorDB Start Bash Script Tests"
       It "retrieves primary info from multiple sentinels and selects the one with max count"
         Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
         build_sentinel_get_master_addr_by_name_command() {
-          mock_output="172.18.0.3 31081"
-          # shellcheck disable=SC2028
-          echo "echo '$mock_output'"
+          # Real sentinel returns host and port on separate lines
+          echo "printf '172.18.0.3\\n31081\\n'"
         }
         When call init_or_get_primary_from_redis_sentinel
         The status should be success

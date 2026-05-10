@@ -181,8 +181,19 @@ parse_advertised_svc_and_port() {
 
   pod_name_ordinal=$(extract_obj_ordinal "$pod_name")
   for entry in $(printf '%s\n' "$advertised_ports" | tr ',' ' '); do
-    svc_name=$(printf '%s' "$entry" | cut -d: -f1)
-    port=$(printf '%s' "$entry" | cut -d: -f2)
+    # Use case to reliably detect whether entry has a colon, since
+    # 'cut -d: -f2' returns the full string (not empty) on some platforms
+    # (both GNU and BSD cut) when no delimiter is present.
+    case "$entry" in
+      *:*)
+        svc_name=$(printf '%s' "$entry" | cut -d: -f1)
+        port=$(printf '%s' "$entry" | cut -d: -f2)
+        ;;
+      *)
+        svc_name="$entry"
+        port=""
+        ;;
+    esac
     local svc_name_ordinal
 
     svc_name_ordinal=$(extract_obj_ordinal "$svc_name")
