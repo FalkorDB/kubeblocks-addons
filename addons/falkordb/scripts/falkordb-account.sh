@@ -1,16 +1,15 @@
-#!/bin/bash
+#!/bin/sh
 
 set -e
 service_port=${SERVICE_PORT:-6379}
 
-function do_acl_command() {
+do_acl_command() {
     local hosts=$1
-    IFS=',' read -ra HOSTS <<<"$hosts"
     local user=$2
     local password=$3
     local success_count=0
 
-    for host in "${HOSTS[@]}"; do
+    for host in $(printf '%s\n' "$hosts" | tr ',' ' '); do
         # in case, the host is like this: apple-7bff57f594-shard-b8p-1.apple-7bff57f594-shard-b8p-headless.kubeblocks-cloud-ns.svc.cluster.local,apple-7bff57f594-shard-9x9-0.apple-7bff57f594-shard-9x9-headless.kubeblocks-cloud-ns.svc.cluster.local,apple-7bff57f594-shard-8bf-1.apple-7bff57f594-shard-8bf-headless.kubeblocks-cloud-ns.svc.cluster.local
         # in case of fixed ip mode, the host is like this: 10.96.180.100:6379@1 10.96.180.100:6379@2
         # we need to remove the @1 or @2 and remove the port
@@ -41,7 +40,7 @@ function do_acl_command() {
     create_post_check "$success_count"
 }
 
-function env_pre_check() {
+env_pre_check() {
     if [ -z "$ACL_COMMAND" ]; then
         echo "ACL_COMMAND is empty, skip ACL operation"
         exit 1
@@ -58,29 +57,29 @@ function env_pre_check() {
         exit 0
     fi
 
-    if [ "$SHARD_MODE" == "TRUE" ] && [ -z "$CURRENT_POD_NAME" ]; then
+    if [ "$SHARD_MODE" = "TRUE" ] && [ -z "$CURRENT_POD_NAME" ]; then
         echo "CURRENT_POD_NAME is empty, skip ACL operation"
         exit 0
     fi
 
-    if [ "$SHARD_MODE" == "TRUE" ] && [ -z "$CURRENT_SHARD_COMPONENT_NAME" ]; then
+    if [ "$SHARD_MODE" = "TRUE" ] && [ -z "$CURRENT_SHARD_COMPONENT_NAME" ]; then
         echo "CURRENT_SHARD_COMPONENT_NAME is empty, skip ACL operation"
         exit 0
     fi
 
-    if [ "$SHARD_MODE" == "TRUE" ] && [ -z "$CLUSTER_NAMESPACE" ]; then
+    if [ "$SHARD_MODE" = "TRUE" ] && [ -z "$CLUSTER_NAMESPACE" ]; then
         echo "CLUSTER_NAMESPACE is empty, skip ACL operation"
         exit 0
     fi
 
-    if [ "$SHARD_MODE" == "TRUE" ] && [ -z "$CLUSTER_DOMAIN" ]; then
+    if [ "$SHARD_MODE" = "TRUE" ] && [ -z "$CLUSTER_DOMAIN" ]; then
         echo "CLUSTER_DOMAIN is empty, skip ACL operation"
         exit 0
     fi
 
 }
 
-function create_post_check() {
+create_post_check() {
     local success_count=$1
     if [ "$success_count" -eq $REPLICAS ]; then
         echo "DO ACL COMMAND FOR ALL HOSTS SUCCESS"
@@ -91,7 +90,7 @@ function create_post_check() {
     fi
 }
 
-function get_cluster_host_list() {
+get_cluster_host_list() {
     passwd_cmd="-a $REDIS_DEFAULT_PASSWORD"
     if [ -z "$REDIS_DEFAULT_PASSWORD" ]; then
         passwd_cmd=""
@@ -111,7 +110,7 @@ function get_cluster_host_list() {
     fi
 }
 
-function main() {
+main() {
     env_pre_check
 
     if [ "$SHARD_MODE" = "TRUE" ]; then

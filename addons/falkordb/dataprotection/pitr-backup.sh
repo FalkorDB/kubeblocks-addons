@@ -1,4 +1,4 @@
-# shellcheck shell=bash
+#!/bin/sh
 export PATH="$PATH:$DP_DATASAFED_BIN_PATH"
 export DATASAFED_BACKEND_BASE_PATH="$DP_BACKUP_BASE_PATH"
 
@@ -14,12 +14,12 @@ global_old_size=0
 AOF_DIR=$(${connect_url} CONFIG GET appenddirname | awk 'NR==2')
 APPEND_FILE_NAME=$(${connect_url} CONFIG GET appendfilename | awk 'NR==2')
 AOF_FILE_PREFIX="${DATA_DIR}/${AOF_DIR}/${APPEND_FILE_NAME}"
-BASE_FILE_SUFFIX="base.$([ "$($connect_url CONFIG GET aof-use-rdb-preamble | awk 'NR==2')" == "no" ] && echo "aof" || echo "rdb")"
+BASE_FILE_SUFFIX="base.$( [ "$($connect_url CONFIG GET aof-use-rdb-preamble | awk 'NR==2')" = "no" ] && echo "aof" || echo "rdb")"
 AOF_MANIFEST_FILE="${AOF_FILE_PREFIX}.manifest"
 
 mkdir -p "${AOF_DIR}"
 
-function get_base_file_ctime() {
+get_base_file_ctime() {
   local base_file=${1}
   if [ "$BASE_FILE_SUFFIX" = "base.rdb" ]; then
     # use the creation time of the base file as the start time
@@ -29,7 +29,7 @@ function get_base_file_ctime() {
 
   # for aof base file
   # extract the timestamp from the first line of base_file
-  timestamp=$(head -n 1 "$base_file" | grep -oP '(?<=#TS:)\d+')
+  timestamp=$(head -n 1 "$base_file" | sed -n 's/.*#TS:\([0-9][0-9]*\).*/\1/p')
 
   # ff no timestamp is found, get the file creation time
   if [ -z "$timestamp" ]; then
@@ -38,25 +38,28 @@ function get_base_file_ctime() {
   echo "$timestamp"
 }
 
-function aof_incr_file() {
+aof_incr_file() {
   local seq=$1
   # absolute path
   echo "${AOF_FILE_PREFIX}.${seq}.incr.aof"
 }
 
-function aof_base_file() {
+aof_base_file() {
   local seq=$1
   # absolute path
   echo "${AOF_FILE_PREFIX}.${seq}.${BASE_FILE_SUFFIX}"
 }
 
-function get_backup_seq() {
+get_backup_seq() {
   local remote_aof_dir=$(datasafed list -d / | sort -Vr | head -n 1)
   local remote_aof_seq=$(echo "$remote_aof_dir" | awk -F '.' '{print $2}')
-  if [[ -z "$remote_aof_seq" ]] || ! [[ "$remote_aof_seq" =~ ^[0-9]+$ ]]; then
+  if [ -z "$remote_aof_seq" ]; then
     echo 1
     return
   fi
+  case "$remote_aof_seq" in
+    ''|*[!0-9]*) echo 1; return ;;
+  esac
 
   local remote_base_file_ctime=$(echo "$remote_aof_dir" | awk -F '.' '{print $1}')
   local local_aof_seq=$(awk '/type i/ { print $4 }' "${AOF_MANIFEST_FILE}")
@@ -74,13 +77,13 @@ function get_backup_seq() {
 
 global_backup_seq=$(get_backup_seq)
 
-function get_backup_files_prefix() {
+get_backup_files_prefix() {
   local base_file=${1}
   echo "$(get_base_file_ctime "$base_file")"."$global_backup_seq"
 }
 
 # generate backup manifest file for remote backup
-function generate_backup_manifest() {
+generate_backup_manifest() {
   local backup_manifest="$APPEND_FILE_NAME.manifest"
   local backup_incr_file=$(basename "$(aof_incr_file "$global_backup_seq")")
   local backup_base_file=$(basename "$(aof_base_file "$global_backup_seq")")
@@ -91,7 +94,7 @@ function generate_backup_manifest() {
 }
 
 # archive aof and rdb file after aof rewrite
-function archive_pair_files() {
+archive_pair_files() {
   local incr_file=$(aof_incr_file "$global_backup_seq")
   local base_file=$(aof_base_file "$global_backup_seq")
   local backup_files_prefix=$(get_backup_files_prefix $base_file)
@@ -116,7 +119,7 @@ function archive_pair_files() {
   DP_log "Archived files: ${incr_file} and ${base_file} to $target_file"
 }
 
-function update_aof_file() {
+update_aof_file() {
   local incr_file=$(aof_incr_file "$global_backup_seq")
   local base_file=$(aof_base_file "$global_backup_seq")
   local backup_files_prefix=$(get_backup_files_prefix $base_file)
@@ -153,7 +156,7 @@ function update_aof_file() {
   fi
 }
 
-function purge_expired_files() {
+purge_expired_files() {
   local current_unix=$(date +%s)
   info=$(DP_purge_expired_files ${current_unix} ${global_last_purge_time} / 600)
   if [ ! -z "${info}" ]; then
@@ -164,10 +167,10 @@ function purge_expired_files() {
   fi
 }
 
-function save_backup_status() {
+save_backup_status() {
   # if no size changes, return
   local total_size=$(datasafed stat / | grep TotalSize | awk '{print $2}')
-  if [[ -z ${total_size} || ${total_size} -eq 0 || ${total_size} == ${global_old_size} ]]; then
+  if [ -z "${total_size}" ] || [ "${total_size}" -eq 0 ] || [ "${total_size}" = "${global_old_size}" ]; then
     return
   fi
   global_old_size=${total_size}
@@ -179,16 +182,16 @@ function save_backup_status() {
   DP_save_backup_status_info "${total_size}" "${start_time}" "$(date +%s)"
 }
 
-function check_conf() {
+check_conf() {
   aof_timestamp_enabled=$(${connect_url} CONFIG GET aof-timestamp-enabled 2>/dev/null | awk 'NR==2')
-  if [ "$aof_timestamp_enabled" == "no" ]; then
+  if [ "$aof_timestamp_enabled" = "no" ]; then
     DP_error_log "aof-timestamp-enabled is not set to yes, set it to yes by 'kbcli cluster edit-config' or 'kbcli cluster configure'"
     ${connect_url} CONFIG SET aof-disable-auto-gc no
     exit 1
   fi
 
   disable_gc=$(${connect_url} CONFIG GET aof-disable-auto-gc 2>/dev/null | awk 'NR==2')
-  if [ "$disable_gc" == "no" ]; then
+  if [ "$disable_gc" = "no" ]; then
     ${connect_url} CONFIG SET aof-disable-auto-gc yes
     DP_log "aof-disable-auto-gc set to yes"
   fi

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 if [ -z "${SENTINEL_POD_NAME_LIST}" ]; then
    exit 0

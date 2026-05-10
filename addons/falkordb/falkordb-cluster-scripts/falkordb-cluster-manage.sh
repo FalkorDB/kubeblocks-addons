@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # shellcheck disable=SC2128
 # shellcheck disable=SC2207
@@ -23,26 +23,38 @@ test || __() {
   set -ex;
 }
 
-# declare the global variables for initialize redis cluster
-declare -gA initialize_redis_cluster_primary_nodes
-declare -gA initialize_redis_cluster_secondary_nodes
-declare -gA initialize_pod_name_to_advertise_host_port_map
+# Helper functions for TAB-separated key-value temp file maps
+_map_get() { awk -F'\t' -v k="$2" '$1==k{print $2; exit}' "$1"; }
+_map_keys() { awk -F'\t' 'NF>0{print $1}' "$1"; }
+_map_append() { printf '%s\t%s\n' "$2" "$3" >> "$1"; }
+_map_size() { grep -c '' "$1" 2>/dev/null || printf '0'; }
 
-# declare the global variables for scale out redis cluster shard
-declare -gA scale_out_shard_default_primary_node
-declare -gA scale_out_shard_default_other_nodes
+# Temp files for associative maps (initialized in init_cluster_map_files)
+_initialize_redis_cluster_primary_nodes=""
+_initialize_redis_cluster_secondary_nodes=""
+_initialize_pod_name_to_advertise_host_port_map=""
+_scale_out_shard_default_primary_node=""
+_scale_out_shard_default_other_nodes=""
+
+init_cluster_map_files() {
+  _initialize_redis_cluster_primary_nodes=$(mktemp)
+  _initialize_redis_cluster_secondary_nodes=$(mktemp)
+  _initialize_pod_name_to_advertise_host_port_map=$(mktemp)
+  _scale_out_shard_default_primary_node=$(mktemp)
+  _scale_out_shard_default_other_nodes=$(mktemp)
+}
 
 init_environment(){
-  if [[ -z "${CURRENT_SHARD_ADVERTISED_PORT}" ]]; then
+  if [ -z "${CURRENT_SHARD_ADVERTISED_PORT}" ]; then
     CURRENT_SHARD_ADVERTISED_PORT="${CURRENT_SHARD_LB_ADVERTISED_PORT}"
   fi
-  if [[ -z "${CURRENT_SHARD_ADVERTISED_BUS_PORT}" ]]; then
+  if [ -z "${CURRENT_SHARD_ADVERTISED_BUS_PORT}" ]; then
     CURRENT_SHARD_ADVERTISED_BUS_PORT="${CURRENT_SHARD_LB_ADVERTISED_BUS_PORT}"
   fi
-  if [[ -z "${ALL_SHARDS_ADVERTISED_PORT}" ]]; then
+  if [ -z "${ALL_SHARDS_ADVERTISED_PORT}" ]; then
     ALL_SHARDS_ADVERTISED_PORT="${ALL_SHARDS_LB_ADVERTISED_PORT}"
   fi
-  if [[ -z "${ALL_SHARDS_ADVERTISED_BUS_PORT}" ]]; then
+  if [ -z "${ALL_SHARDS_ADVERTISED_BUS_PORT}" ]; then
     ALL_SHARDS_ADVERTISED_BUS_PORT="${ALL_SHARDS_LB_ADVERTISED_BUS_PORT}"
   fi
 }
@@ -52,13 +64,13 @@ load_redis_cluster_common_utils() {
   # and are mounted to the same path which defined in the cmpd.spec.scripts
   kblib_common_library_file="/scripts/common.sh"
   redis_cluster_common_library_file="/scripts/falkordb-cluster-common.sh"
-  source "${kblib_common_library_file}"
-  source "${redis_cluster_common_library_file}"
+  . "${kblib_common_library_file}"
+  . "${redis_cluster_common_library_file}"
 }
 
 check_initialize_nodes_ready() {
-  local nodes=("$@")
-  for node in "${nodes[@]}"; do
+  # $1 is a pipe-separated list of host:port nodes
+  for node in $(printf '%s' "$1" | tr '|' '\n'); do
     local host port
     host=$(echo "$node" | cut -d':' -f1)
     port=$(echo "$node" | cut -d':' -f2)
@@ -78,80 +90,88 @@ init_other_components_and_pods_info() {
   local all_deleting_component_list="$5"
   local all_undeleted_component_list="$6"
 
-  other_components=()
-  other_deleting_components=()
-  other_undeleted_components=()
-  other_undeleted_component_pod_ips=()
-  other_undeleted_component_pod_names=()
-  other_undeleted_component_nodes=()
+  other_components=""
+  other_deleting_components=""
+  other_undeleted_components=""
+  other_undeleted_component_pod_ips=""
+  other_undeleted_component_pod_names=""
+  other_undeleted_component_nodes=""
   echo "init other components and pods info, current component: $current_component"
   # filter out the components of the given component
-  IFS=',' read -ra components <<< "$all_component_list"
-  IFS=',' read -ra deleting_components <<< "$all_deleting_component_list"
-  IFS=',' read -ra undeleted_components <<< "$all_undeleted_component_list"
-  for comp in "${components[@]}"; do
+  for comp in $(printf '%s\n' "$all_component_list" | tr ',' ' '); do
     if contains "$comp" "$current_component"; then
       echo "skip the component $comp as it is the current component"
       continue
     fi
-    other_components+=("$comp")
+    other_components="${other_components:+${other_components}|}${comp}"
   done
-  for comp in "${deleting_components[@]}"; do
+  for comp in $(printf '%s\n' "$all_deleting_component_list" | tr ',' ' '); do
     if contains "$comp" "$current_component"; then
       echo "skip the component $comp as it is the current component"
       continue
     fi
-    other_deleting_components+=("$comp")
+    other_deleting_components="${other_deleting_components:+${other_deleting_components}|}${comp}"
   done
-  for comp in "${undeleted_components[@]}"; do
+  for comp in $(printf '%s\n' "$all_undeleted_component_list" | tr ',' ' '); do
     if contains "$comp" "$current_component"; then
       echo "skip the component $comp as it is the current component"
       continue
     fi
-    other_undeleted_components+=("$comp")
+    other_undeleted_components="${other_undeleted_components:+${other_undeleted_components}|}${comp}"
   done
 
-  # filter out the pods of the given component
-  IFS=',' read -ra pod_ips <<< "$all_pod_ip_list"
-  IFS=',' read -ra pod_names <<< "$all_pod_name_list"
-  for index in "${!pod_ips[@]}"; do
-    if echo "${pod_names[$index]}" | grep "$current_component-"; then
-      echo "skip the pod ${pod_names[$index]} as it belongs the component $current_component"
+  # filter out pods of the given component using parallel iteration via temp files
+  _tmp_names=$(mktemp)
+  _tmp_ips=$(mktemp)
+  _tmp_paste=$(mktemp)
+  printf '%s\n' "$all_pod_name_list" | tr ',' '\n' > "$_tmp_names"
+  printf '%s\n' "$all_pod_ip_list" | tr ',' '\n' > "$_tmp_ips"
+  paste "$_tmp_names" "$_tmp_ips" > "$_tmp_paste"
+  rm -f "$_tmp_names" "$_tmp_ips"
+
+  while IFS="$(printf '\t')" read -r _pod_name _pod_ip; do
+    [ -z "$_pod_name" ] && continue
+    if echo "$_pod_name" | grep -q "$current_component-"; then
+      echo "skip the pod $_pod_name as it belongs the component $current_component"
       continue
     fi
 
     # skip the pod belongs to the deleting component
-    for deleting_comp in "${deleting_components[@]}"; do
-      if echo "${pod_names[$index]}" | grep "$deleting_comp-"; then
-        echo "skip the pod ${pod_names[$index]} as it belongs the deleting component $deleting_comp"
-        continue 2
+    _skip=false
+    for _deleting_comp in $(printf '%s' "$other_deleting_components" | tr '|' '\n'); do
+      if echo "$_pod_name" | grep -q "$_deleting_comp-"; then
+        echo "skip the pod $_pod_name as it belongs the deleting component $_deleting_comp"
+        _skip=true
+        break
       fi
     done
+    [ "$_skip" = "true" ] && continue
 
-    other_undeleted_component_pod_ips+=("${pod_ips[$index]}")
-    other_undeleted_component_pod_names+=("${pod_names[$index]}")
+    other_undeleted_component_pod_ips="${other_undeleted_component_pod_ips:+${other_undeleted_component_pod_ips}|}${_pod_ip}"
+    other_undeleted_component_pod_names="${other_undeleted_component_pod_names:+${other_undeleted_component_pod_names}|}${_pod_name}"
 
     local service_port
-    service_port=$(get_pod_service_port_by_network_mode "${pod_names[$index]}")
+    service_port=$(get_pod_service_port_by_network_mode "$_pod_name")
 
     # TODO: resolve the pod fqdn from the Vars
-    pod_name_prefix=$(extract_pod_name_prefix "${pod_names[$index]}")
-    pod_fqdn="${pod_names[$index]}.$pod_name_prefix-headless.$CLUSTER_NAMESPACE.svc.$CLUSTER_DOMAIN"
-    other_undeleted_component_nodes+=("$pod_fqdn:$service_port")
-  done
+    pod_name_prefix=$(extract_pod_name_prefix "$_pod_name")
+    pod_fqdn="$_pod_name.$pod_name_prefix-headless.$CLUSTER_NAMESPACE.svc.$CLUSTER_DOMAIN"
+    other_undeleted_component_nodes="${other_undeleted_component_nodes:+${other_undeleted_component_nodes}|}${pod_fqdn}:${service_port}"
+  done < "$_tmp_paste"
+  rm -f "$_tmp_paste"
 
-  echo "other_components: ${other_components[*]}"
-  echo "other_deleting_components: ${other_deleting_components[*]}"
-  echo "other_undeleted_components: ${other_undeleted_components[*]}"
-  echo "other_undeleted_component_pod_ips: ${other_undeleted_component_pod_ips[*]}"
-  echo "other_undeleted_component_pod_names: ${other_undeleted_component_pod_names[*]}"
-  echo "other_undeleted_component_nodes: ${other_undeleted_component_nodes[*]}"
+  echo "other_components: ${other_components}"
+  echo "other_deleting_components: ${other_deleting_components}"
+  echo "other_undeleted_components: ${other_undeleted_components}"
+  echo "other_undeleted_component_pod_ips: ${other_undeleted_component_pod_ips}"
+  echo "other_undeleted_component_pod_names: ${other_undeleted_component_pod_names}"
+  echo "other_undeleted_component_nodes: ${other_undeleted_component_nodes}"
 }
 
 find_exist_available_node() {
   local node_ip
   local node_port
-  for node in "${other_undeleted_component_nodes[@]}"; do
+  for node in $(printf '%s' "$other_undeleted_component_nodes" | tr '|' '\n'); do
     # the $node is the headless address by default, we should get the real node address from cluster nodes
     node_ip=$(echo "$node" | cut -d':' -f1)
     node_port=$(echo "$node" | cut -d':' -f2)
@@ -181,16 +201,19 @@ extract_pod_name_prefix() {
 
 extract_lb_host_by_svc_name() {
   local svc_name="$1"
-  for lb_composed_name in $(echo "$ALL_SHARDS_LB_ADVERTISED_HOST" | tr ',' '\n' ); do
-    lb_composed_name=${lb_composed_name#*@}
-    if [[ ${lb_composed_name} == *":"* ]]; then
-       if [[ ${lb_composed_name%:*} == "$svc_name" ]]; then
-         echo "${lb_composed_name#*:}"
-         break
-       fi
-    else
-       break
-    fi
+  for _lbcn in $(printf '%s\n' "$ALL_SHARDS_LB_ADVERTISED_HOST" | tr ',' ' '); do
+    lb_composed_name="${_lbcn#*@}"
+    case "$lb_composed_name" in
+      *:*)
+        if [ "${lb_composed_name%:*}" = "$svc_name" ]; then
+          echo "${lb_composed_name#*:}"
+          break
+        fi
+        ;;
+      *)
+        break
+        ;;
+    esac
   done
 }
 
@@ -249,13 +272,15 @@ get_current_comp_nodes_for_scale_in() {
     local node_fqdn="$2"
     local node_role="$3"
 
-    if [[ "$node_fqdn" =~ "$CURRENT_SHARD_COMPONENT_NAME"* ]]; then
-      if [[ "$node_role" =~ "master" && ! "$node_role" =~ "fail" ]]; then
-        current_comp_primary_node+=("$node_address")
-      else
-        current_comp_other_nodes+=("$node_address")
-      fi
-    fi
+    case "$node_fqdn" in
+      "$CURRENT_SHARD_COMPONENT_NAME"*)
+        if contains "$node_role" "master" && ! contains "$node_role" "fail"; then
+          current_comp_primary_node="${current_comp_primary_node:+${current_comp_primary_node}|}${node_address}"
+        else
+          current_comp_other_nodes="${current_comp_other_nodes:+${current_comp_other_nodes}|}${node_address}"
+        fi
+        ;;
+    esac
   }
 
   local cluster_node="$1"
@@ -267,8 +292,8 @@ get_current_comp_nodes_for_scale_in() {
     return 1
   fi
 
-  current_comp_primary_node=()
-  current_comp_other_nodes=()
+  current_comp_primary_node=""
+  current_comp_other_nodes=""
 
   # if the cluster_nodes_info contains only one line, it means that the cluster not be initialized
   if [ "$(echo "$cluster_nodes_info" | wc -l)" -eq 1 ]; then
@@ -292,17 +317,20 @@ get_current_comp_nodes_for_scale_in() {
   # 3. using the host network ip as the nodeAddr
   # 4958e6dca033cd1b321922508553fab869a29d 172.10.0.1:1050@1051,falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc.cluster.local master - 0 1711958289570 4 connected 0-1364 5461-6826 10923-12287
   while read -r line; do
-    local node_info
     node_info=$(parse_node_line_info "$line")
-    read -r node_ip node_port node_fqdn node_role <<< "$node_info"
+    node_ip=$(printf '%s' "$node_info" | cut -d' ' -f1)
+    node_port=$(printf '%s' "$node_info" | cut -d' ' -f2)
+    node_fqdn=$(printf '%s' "$node_info" | cut -d' ' -f3)
+    node_role=$(printf '%s' "$node_info" | cut -d' ' -f4)
 
-    local node_address
     node_address=$(get_node_address_by_network_mode "$network_mode" "$node_ip" "$node_port" "$node_fqdn")
     categorize_node "$node_address" "$node_fqdn" "$node_role"
-  done <<< "$cluster_nodes_info"
+  done << _NODES_EOF_
+$cluster_nodes_info
+_NODES_EOF_
 
-  echo "current_comp_primary_node: ${current_comp_primary_node[*]}"
-  echo "current_comp_other_nodes: ${current_comp_other_nodes[*]}"
+  echo "current_comp_primary_node: ${current_comp_primary_node}"
+  echo "current_comp_other_nodes: ${current_comp_other_nodes}"
 }
 
 # init the current shard component default primary and secondary nodes for scale out shard.
@@ -316,9 +344,9 @@ init_current_comp_default_nodes_for_scale_out() {
     local pod_ordinal="$3"
 
     if equals "$pod_ordinal" "$min_lexicographical_pod_ordinal"; then
-      scale_out_shard_default_primary_node["$pod_name"]="$node_address"
+      _map_append "$_scale_out_shard_default_primary_node" "$pod_name" "$node_address"
     else
-      scale_out_shard_default_other_nodes["$pod_name"]="$node_address"
+      _map_append "$_scale_out_shard_default_other_nodes" "$pod_name" "$node_address"
     fi
   }
 
@@ -327,21 +355,14 @@ init_current_comp_default_nodes_for_scale_out() {
     local pod_name="$1"
     local pod_name_ordinal="$2"
 
-    local old_ifs="$IFS"
-    IFS=','
-    set -f
-    read -ra advertised_infos <<< "$CURRENT_SHARD_ADVERTISED_PORT"
-    set +f
-    IFS="$old_ifs"
-
     local found_advertised_port=false
-    for advertised_info in "${advertised_infos[@]}"; do
+    for advertised_info in $(printf '%s\n' "$CURRENT_SHARD_ADVERTISED_PORT" | tr ',' ' '); do
       local advertised_svc advertised_port advertised_svc_ordinal
       advertised_svc=$(echo "$advertised_info" | cut -d':' -f1)
       advertised_port=$(echo "$advertised_info" | cut -d':' -f2)
       advertised_svc_ordinal=$(extract_obj_ordinal "$advertised_svc")
 
-      if [ "$pod_name_ordinal" == "$advertised_svc_ordinal" ]; then
+      if [ "$pod_name_ordinal" = "$advertised_svc_ordinal" ]; then
         local pod_host_ip
         lb_host=$(extract_lb_host_by_svc_name "${advertised_svc}")
         if ! is_empty "$lb_host"; then
@@ -461,11 +482,11 @@ gen_initialize_redis_cluster_node() {
     local node_addr="$host:$port"
 
     if equals "$is_primary" "true"; then
-      initialize_redis_cluster_primary_nodes["$pod_name"]="$node_addr"
+      _map_append "$_initialize_redis_cluster_primary_nodes" "$pod_name" "$node_addr"
     else
-      initialize_redis_cluster_secondary_nodes["$pod_name"]="$node_addr"
+      _map_append "$_initialize_redis_cluster_secondary_nodes" "$pod_name" "$node_addr"
     fi
-    initialize_pod_name_to_advertise_host_port_map["$pod_name"]="$node_addr"
+    _map_append "$_initialize_pod_name_to_advertise_host_port_map" "$pod_name" "$node_addr"
   }
 
   # determine if pod should be processed based on primary/secondary role
@@ -494,16 +515,12 @@ gen_initialize_redis_cluster_node() {
     }
 
     ## the value format of ALL_SHARDS_ADVERTISED_PORT is "shard-98x@falkordb-shard-98x-falkordb-advertised-0:32024,falkordb-shard-98x-falkordb-advertised-1:31318.shard-cq7@falkordb-shard-cq7-falkordb-advertised-0:31828,falkordb-shard-cq7-falkordb-advertised-1:32000"
-    local old_ifs="$IFS"
-    IFS='.'
-    set -f
-    local shards
-    read -ra shards <<< "$ALL_SHARDS_ADVERTISED_PORT"
-    set +f
-    IFS="$old_ifs"
+    _tmp_shards=$(mktemp)
+    printf '%s\n' "$ALL_SHARDS_ADVERTISED_PORT" | tr '.' '\n' > "$_tmp_shards"
 
     local shard
-    for shard in "${shards[@]}"; do
+    while IFS= read -r shard; do
+      [ -z "$shard" ] && continue
       local shard_name
       shard_name=$(echo "$shard" | cut -d'@' -f1)
 
@@ -513,16 +530,8 @@ gen_initialize_redis_cluster_node() {
       fi
 
       # shard_advertised_infos like "falkordb-shard-98x-falkordb-advertised-0:32024,falkordb-shard-98x-falkordb-advertised-1:31318"
-      local old_ifs="$IFS"
-      IFS=','
-      set -f
-      local shard_advertised_infos
-      read -ra shard_advertised_infos <<< "$(echo "$shard" | cut -d'@' -f2)"
-      set +f
-      IFS="$old_ifs"
-
       local shard_advertised_info
-      for shard_advertised_info in "${shard_advertised_infos[@]}"; do
+      for shard_advertised_info in $(printf '%s\n' "$shard" | cut -d'@' -f2 | tr ',' ' '); do
         local shard_advertised_svc
         local shard_advertised_port
         local shard_advertised_svc_ordinal
@@ -542,7 +551,8 @@ gen_initialize_redis_cluster_node() {
           return 0
         fi
       done
-    done
+    done < "$_tmp_shards"
+    rm -f "$_tmp_shards"
     return 0
   }
 
@@ -674,10 +684,10 @@ populate_pod_ip_name_list() {
   #   1 if unable to get pod FQDNs
 
   local pod_fqdns
-  local pod_ips=()
-  local pod_names=()
-  local component_pod_names=()
-  local component_pod_ips=()
+  local pod_ips=""
+  local pod_names=""
+  local component_pod_names=""
+  local component_pod_ips=""
   local pod_name
   local pod_ip
 
@@ -688,13 +698,14 @@ populate_pod_ip_name_list() {
   fi
 
   # Handle empty FQDN list
-  if [[ -z "$pod_fqdns" ]]; then
+  if [ -z "$pod_fqdns" ]; then
     echo "Error: Failed to get all shard pod FQDNs" >&2
     return 1
   fi
 
   # Resolve each FQDN to IP
-  while IFS=',' read -r pod_fqdn; do
+  while IFS= read -r pod_fqdn; do
+    [ -z "$pod_fqdn" ] && continue
     # Extract pod name from FQDN (first part before the dot)
     pod_name="${pod_fqdn%%.*}"
 
@@ -704,40 +715,43 @@ populate_pod_ip_name_list() {
     pod_ip=$(echo "$getent_output" | awk '{print $1; exit}')
 
     # Skip pods that cannot be resolved
-    if [[ -z "$pod_ip" ]]; then
+    if [ -z "$pod_ip" ]; then
       echo "Warning: Failed to resolve IP for pod FQDN: $pod_fqdn (getent output: $getent_output)" >&2
       continue
     fi
 
-    pod_ips+=("$pod_ip")
-    pod_names+=("$pod_name")
-  done <<< "$(echo "$pod_fqdns" | tr ',' '\n')"
+    pod_ips="${pod_ips:+${pod_ips},}${pod_ip}"
+    pod_names="${pod_names:+${pod_names},}${pod_name}"
+  done << _ALLFQDNS_EOF_
+$(printf '%s\n' "$pod_fqdns" | tr ',' '\n')
+_ALLFQDNS_EOF_
 
   # Export all pods (across all components/shards in cluster) as comma-separated values
-  export KB_CLUSTER_POD_IP_LIST=$(IFS=,; echo "${pod_ips[*]}")
-  export KB_CLUSTER_POD_NAME_LIST=$(IFS=,; echo "${pod_names[*]}")
+  export KB_CLUSTER_POD_IP_LIST="$pod_ips"
+  export KB_CLUSTER_POD_NAME_LIST="$pod_names"
   # Keep host IP list aligned with resolved pod IPs for downstream consumers
   export KB_CLUSTER_POD_HOST_IP_LIST="$KB_CLUSTER_POD_IP_LIST"
 
   # Export component-specific pods if CURRENT_SHARD_COMPONENT_NAME is set
   # Use the component-specific FQDN environment variable via CURRENT_SHARD_COMPONENT_SHORT_NAME
   # e.g., for CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-gds", use ALL_SHARDS_POD_FQDN_LIST_SHARD_GDS
-  if [[ -n "$CURRENT_SHARD_COMPONENT_NAME" ]] && [[ -n "$CURRENT_SHARD_COMPONENT_SHORT_NAME" ]]; then
+  if [ -n "$CURRENT_SHARD_COMPONENT_NAME" ] && [ -n "$CURRENT_SHARD_COMPONENT_SHORT_NAME" ]; then
     # Extract the suffix after "shard-" from the short name
     # For "shard-gds", extract "gds"
     local shard_suffix
     shard_suffix="${CURRENT_SHARD_COMPONENT_SHORT_NAME##*shard-}"
-    
+
     # Convert to uppercase for env var name
     local component_var_suffix
-    component_var_suffix=$(echo "$shard_suffix" | tr '[:lower:]' '[:upper:]')
-    
-    local component_fqdn_var_name="ALL_SHARDS_POD_FQDN_LIST_SHARD_${component_var_suffix}"
-    local component_pod_fqdns="${!component_fqdn_var_name}"
+    component_var_suffix=$(printf '%s' "$shard_suffix" | tr '[:lower:]' '[:upper:]')
 
-    if [[ -n "$component_pod_fqdns" ]]; then
+    local component_fqdn_var_name="ALL_SHARDS_POD_FQDN_LIST_SHARD_${component_var_suffix}"
+    eval "component_pod_fqdns=\$$component_fqdn_var_name"
+
+    if [ -n "$component_pod_fqdns" ]; then
       # Resolve component pod FQDNs to IPs
-      while IFS=',' read -r pod_fqdn; do
+      while IFS= read -r pod_fqdn; do
+        [ -z "$pod_fqdn" ] && continue
         # Extract pod name from FQDN (first part before the dot)
         pod_name="${pod_fqdn%%.*}"
 
@@ -747,19 +761,21 @@ populate_pod_ip_name_list() {
         pod_ip=$(echo "$getent_output" | awk '{print $1; exit}')
 
         # Skip pods that cannot be resolved
-        if [[ -z "$pod_ip" ]]; then
+        if [ -z "$pod_ip" ]; then
           echo "Warning: Failed to resolve IP for component pod FQDN: $pod_fqdn (getent output: $getent_output)" >&2
           continue
         fi
 
-        component_pod_names+=("$pod_name")
-        component_pod_ips+=("$pod_ip")
-      done <<< "$(echo "$component_pod_fqdns" | tr ',' '\n')"
+        component_pod_names="${component_pod_names:+${component_pod_names},}${pod_name}"
+        component_pod_ips="${component_pod_ips:+${component_pod_ips},}${pod_ip}"
+      done << _COMPFQDNS_EOF_
+$(printf '%s\n' "$component_pod_fqdns" | tr ',' '\n')
+_COMPFQDNS_EOF_
 
       # Export component-specific pods if any were found
-      if [[ ${#component_pod_names[@]} -gt 0 ]]; then
-        export KB_CLUSTER_COMPONENT_POD_NAME_LIST=$(IFS=,; echo "${component_pod_names[*]}")
-        export KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST=$(IFS=,; echo "${component_pod_ips[*]}")
+      if [ -n "$component_pod_names" ]; then
+        export KB_CLUSTER_COMPONENT_POD_NAME_LIST="$component_pod_names"
+        export KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST="$component_pod_ips"
       fi
     fi
   fi
@@ -767,7 +783,8 @@ populate_pod_ip_name_list() {
   return 0
 }
 
-initialize_redis_cluster() {  
+initialize_redis_cluster() {
+  init_cluster_map_files
 
   if is_empty "$KB_CLUSTER_POD_NAME_LIST" || is_empty "$KB_CLUSTER_POD_HOST_IP_LIST"; then
     echo "Error: Required environment variable KB_CLUSTER_POD_NAME_LIST and KB_CLUSTER_POD_HOST_IP_LIST are not set when initializing redis cluster" >&2
@@ -778,30 +795,31 @@ initialize_redis_cluster() {
   gen_initialize_redis_cluster_primary_node
   gen_initialize_redis_cluster_secondary_nodes
 
-  if [ ${#initialize_redis_cluster_primary_nodes[@]} -eq 0 ] || [ ${#initialize_redis_cluster_primary_nodes[@]} -lt 3 ]; then
+  _pn_size=$(_map_size "$_initialize_redis_cluster_primary_nodes")
+  if [ "$_pn_size" -eq 0 ] || [ "$_pn_size" -lt 3 ]; then
     echo "Failed to get primary nodes or the primary nodes count is less than 3" >&2
     return 1
   fi
 
   # check all the primary nodes are ready
   local primary_nodes=""
-  local primary_node_list=()
-  for pod_name in "${!initialize_redis_cluster_primary_nodes[@]}"; do
-    primary_nodes+="${initialize_redis_cluster_primary_nodes[$pod_name]} "
-    primary_node_list+=("${initialize_redis_cluster_primary_nodes[$pod_name]}")
-  done
-  if ! check_initialize_nodes_ready "${primary_node_list[@]}"; then
+  local primary_node_list=""
+  while IFS="$(printf '\t')" read -r pod_name node_addr; do
+    primary_nodes="${primary_nodes}${node_addr} "
+    primary_node_list="${primary_node_list:+${primary_node_list}|}${node_addr}"
+  done < "$_initialize_redis_cluster_primary_nodes"
+  if ! check_initialize_nodes_ready "$primary_node_list"; then
     echo "Primary nodes health check failed" >&2
     return 1
   fi
 
   # check all the secondary nodes are ready
-  if [ ${#initialize_redis_cluster_secondary_nodes[@]} -gt 0 ]; then
-    secondary_node_list=()
-    for pod_name in "${!initialize_redis_cluster_secondary_nodes[@]}"; do
-      secondary_node_list+=("${initialize_redis_cluster_secondary_nodes[$pod_name]}")
-    done
-    if ! check_initialize_nodes_ready "${secondary_node_list[@]}"; then
+  if [ -s "$_initialize_redis_cluster_secondary_nodes" ]; then
+    secondary_node_list=""
+    while IFS="$(printf '\t')" read -r pod_name node_addr; do
+      secondary_node_list="${secondary_node_list:+${secondary_node_list}|}${node_addr}"
+    done < "$_initialize_redis_cluster_secondary_nodes"
+    if ! check_initialize_nodes_ready "$secondary_node_list"; then
       echo "Secondary nodes health check failed" >&2
       return 1
     fi
@@ -825,17 +843,16 @@ initialize_redis_cluster() {
   fi
 
   # initialize all the secondary nodes
-  if [ ${#initialize_redis_cluster_secondary_nodes[@]} -eq 0 ]; then
+  if [ ! -s "$_initialize_redis_cluster_secondary_nodes" ]; then
     echo "No secondary nodes to initialize"
     return 0
   fi
 
   all_secondaries_ready=true
-  for secondary_pod_name in "${!initialize_redis_cluster_secondary_nodes[@]}"; do
-    secondary_endpoint_with_port=${initialize_redis_cluster_secondary_nodes["$secondary_pod_name"]}
+  while IFS="$(printf '\t')" read -r secondary_pod_name secondary_endpoint_with_port; do
     # shellcheck disable=SC2001
     mapping_primary_pod_name=$(echo "$secondary_pod_name" | sed 's/-[0-9]*$/-0/')
-    mapping_primary_endpoint_with_port=${initialize_pod_name_to_advertise_host_port_map["$mapping_primary_pod_name"]}
+    mapping_primary_endpoint_with_port=$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" "$mapping_primary_pod_name")
     if is_empty "$mapping_primary_endpoint_with_port"; then
       echo "Failed to find the mapping primary node for secondary node: $secondary_pod_name" >&2
       return 1
@@ -859,13 +876,13 @@ initialize_redis_cluster() {
     sleep_when_ut_mode_false 5
 
     # verify secondary node is already in all primary nodes
-    if ! verify_secondary_in_all_primaries "$secondary_pod_name" "${primary_node_list[@]}"; then
+    if ! verify_secondary_in_all_primaries "$secondary_pod_name" "$primary_node_list"; then
       echo "Failed to verify secondary node $secondary_pod_name in all primary nodes" >&2
       all_secondaries_ready=false
       continue
     fi
     echo "Secondary node $secondary_pod_name successfully joined the cluster and verified in all primaries"
-  done
+  done < "$_initialize_redis_cluster_secondary_nodes"
 
   if [ "$all_secondaries_ready" = false ]; then
     echo "Failed to initialize all secondary nodes" >&2
@@ -877,17 +894,15 @@ initialize_redis_cluster() {
 
 verify_secondary_in_all_primaries() {
   local secondary_pod_name="$1"
-  local primary_nodes=("$@")
-  # Skip the first argument
-  shift
-  for primary_node in "$@"; do
+  local primary_node_list="$2"  # pipe-separated list of host:port primaries
+  for primary_node in $(printf '%s' "$primary_node_list" | tr '|' '\n'); do
     local primary_host primary_port
     primary_host=$(echo "$primary_node" | cut -d':' -f1)
     primary_port=$(echo "$primary_node" | cut -d':' -f2)
     retry_count=0
     while ! check_node_in_cluster "$primary_host" "$primary_port" "$secondary_pod_name" && [ $retry_count -lt 30 ]; do
       sleep_when_ut_mode_false 3
-      ((retry_count++))
+      retry_count=$((retry_count + 1))
     done
     # shellcheck disable=SC2086
     if [ $retry_count -eq 30 ]; then
@@ -902,16 +917,17 @@ check_current_shard_other_nodes_are_joined() {
   local current_primary_host="$1"
   local service_port="$2"
   cluster_nodes_info=$(get_cluster_nodes_info "$current_primary_host" "$service_port")
-  for secondary_pod_name in "${!scale_out_shard_default_other_nodes[@]}"; do
+  while IFS="$(printf '\t')" read -r secondary_pod_name _addr; do
     if ! contains "$cluster_nodes_info" "$secondary_pod_name"; then
       echo "Secondary node $secondary_pod_name not found in primary $current_primary_host, need to joined" >&2
       return 1
     fi
-  done
+  done < "$_scale_out_shard_default_other_nodes"
   return 0
 }
 
 scale_out_redis_cluster_shard() {
+  init_cluster_map_files
   if is_empty "$CURRENT_SHARD_COMPONENT_SHORT_NAME" || is_empty "$KB_CLUSTER_POD_NAME_LIST" || is_empty "$KB_CLUSTER_POD_HOST_IP_LIST" || is_empty "$KB_CLUSTER_COMPONENT_POD_NAME_LIST" || is_empty "$KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST"; then
     echo "Error: Required environment variable CURRENT_SHARD_COMPONENT_SHORT_NAME, KB_CLUSTER_POD_NAME_LIST, KB_CLUSTER_POD_HOST_IP_LIST, KB_CLUSTER_COMPONENT_POD_NAME_LIST and KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST are not set when scale out redis cluster shard" >&2
     return 1
@@ -926,11 +942,11 @@ scale_out_redis_cluster_shard() {
   fi
 
   # check the current component shard whether is already scaled out
-  if [ ${#scale_out_shard_default_primary_node[@]} -eq 0 ]; then
+  if [ ! -s "$_scale_out_shard_default_primary_node" ]; then
     echo "Failed to generate primary nodes when scaling out" >&2
     return 1
   fi
-  primary_node_with_port=$(echo "${scale_out_shard_default_primary_node[*]}" | awk '{print $1}')
+  primary_node_with_port=$(awk -F'\t' 'NR==1{print $2}' "$_scale_out_shard_default_primary_node")
   primary_node_fqdn=$(echo "$primary_node_with_port" | awk -F ':' '{print $1}')
   primary_node_port=$(echo "$primary_node_with_port" | awk -F ':' '{print $2}')
   mapping_primary_cluster_id=$(get_cluster_id "$primary_node_fqdn" "$primary_node_port")
@@ -953,15 +969,14 @@ scale_out_redis_cluster_shard() {
   # add the primary node for the current shard
   if [ "$current_primary_joined" = false ]; then
     local scale_out_shard_default_primary
-    for primary_pod_name in "${!scale_out_shard_default_primary_node[@]}"; do
-      scale_out_shard_default_primary="${scale_out_shard_default_primary_node[$primary_pod_name]}"
+    while IFS="$(printf '\t')" read -r primary_pod_name scale_out_shard_default_primary; do
       if scale_out_shard_primary_join_cluster "$scale_out_shard_default_primary" "$available_node"; then
         echo "FalkorDB cluster scale out shard primary node $primary_pod_name successfully"
       else
         echo "Failed to scale out shard primary node $primary_pod_name" >&2
         return 1
       fi
-    done
+    done < "$_scale_out_shard_default_primary_node"
   fi
 
   # waiting for all nodes sync the information
@@ -969,8 +984,8 @@ scale_out_redis_cluster_shard() {
 
   # add the secondary nodes to replicate the primary node
   local scale_out_shard_secondary_node
-  for secondary_pod_name in "${!scale_out_shard_default_other_nodes[@]}"; do
-    scale_out_shard_secondary_node="${scale_out_shard_default_other_nodes[$secondary_pod_name]}"
+  while IFS="$(printf '\t')" read -r secondary_pod_name scale_out_shard_secondary_node; do
+    true  # body follows
     echo "primary_node_with_port: $primary_node_with_port, primary_node_fqdn: $primary_node_fqdn, mapping_primary_cluster_id: $mapping_primary_cluster_id"
     if check_node_in_cluster "$primary_node_fqdn" "$primary_node_with_port" "$secondary_pod_name"; then
       echo "Secondary node $secondary_pod_name already joined the cluster, skip replicating to primary"
@@ -982,7 +997,7 @@ scale_out_redis_cluster_shard() {
       echo "Failed to scale out shard secondary node $secondary_pod_name" >&2
       return 1
     fi
-  done
+  done < "$_scale_out_shard_default_other_nodes"
 
   # do the reshard
   # TODO: optimize the number of reshard slots according to the cluster status
@@ -1049,24 +1064,25 @@ sync_acl_for_redis_cluster_shard() {
   # 2. apply acl list to current shard pods
   set -e
   while IFS= read -r user_rule; do
-      [[ -z "$user_rule" ]] && continue
+      [ -z "$user_rule" ] && continue
 
-      if [[ "$user_rule" =~ ^user[[:space:]]+([^[:space:]]+) ]]; then
-          username="${BASH_REMATCH[1]}"
-      else
+      username=$(printf '%s' "$user_rule" | sed -n 's/^user[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
+      if [ -z "$username" ]; then
         # skip invalid user rule
         continue
       fi
 
-      if [[ "$username" == "default" ]]; then
+      if [ "$username" = "default" ]; then
           continue
       fi
       rule_part="${user_rule#user $username }"
-      for pod_fqdn in $(echo "$CURRENT_SHARD_POD_FQDN_LIST" | tr ',' '\n'); do
+      for pod_fqdn in $(printf '%s\n' "$CURRENT_SHARD_POD_FQDN_LIST" | tr ',' ' '); do
          $redis_base_cmd -h $pod_fqdn ACL SETUSER "$username" $rule_part >&2
          $redis_base_cmd -h $pod_fqdn ACL save >&2
       done
-  done <<< "$acl_list"
+  done << _ACL_EOF_
+$acl_list
+_ACL_EOF_
   set_xtrace_when_ut_mode_false
 }
 
@@ -1091,19 +1107,20 @@ scale_in_redis_cluster_shard() {
 
   # Check if the number of shards in the cluster is less than 3 after scaling down.
   current_comp_pod_count=0
-  for pod_name in $(echo "$KB_CLUSTER_COMPONENT_POD_NAME_LIST" | tr ',' ' '); do
-    if [[ "$pod_name" == "$CURRENT_SHARD_COMPONENT_NAME"* ]]; then
-      current_comp_pod_count=$((current_comp_pod_count + 1))
-    fi
+  for pod_name in $(printf '%s\n' "$KB_CLUSTER_COMPONENT_POD_NAME_LIST" | tr ',' ' '); do
+    case "$pod_name" in
+      "$CURRENT_SHARD_COMPONENT_NAME"*) current_comp_pod_count=$((current_comp_pod_count + 1)) ;;
+    esac
   done
-  shard_count=$((${#other_undeleted_component_nodes[@]} / current_comp_pod_count))
+  _node_count=$(printf '%s' "$other_undeleted_component_nodes" | tr '|' '\n' | grep -c '.'  2>/dev/null || echo 0)
+  shard_count=$((_node_count / current_comp_pod_count))
   if [ $shard_count -lt 3 ]; then
     echo "The number of shards in the cluster is less than 3 after scaling in, please check." >&2
     return 1
   fi
 
   # set the current shard component slot to 0 by rebalance command
-  for primary_node in "${current_comp_primary_node[@]}"; do
+  for primary_node in $(printf '%s' "$current_comp_primary_node" | tr '|' '\n'); do
     primary_node_fqdn=$(echo "$primary_node" | awk -F ':' '{print $1}')
     primary_node_port=$(echo "$primary_node" | awk -F ':' '{print $2}')
     primary_node_cluster_id=$(get_cluster_id "$primary_node_fqdn" "$primary_node_port")
@@ -1118,7 +1135,8 @@ scale_in_redis_cluster_shard() {
   sleep_when_ut_mode_false 5
 
   # delete the current shard component nodes from the cluster
-  for node_to_del in "${current_comp_primary_node[@]}" "${current_comp_other_nodes[@]}"; do
+  _all_to_del="${current_comp_primary_node:+${current_comp_primary_node}${current_comp_other_nodes:+|}}${current_comp_other_nodes}"
+  for node_to_del in $(printf '%s' "$_all_to_del" | tr '|' '\n'); do
     node_to_del_fqdn=$(echo "$node_to_del" | awk -F ':' '{print $1}')
     node_to_del_port=$(echo "$node_to_del" | awk -F ':' '{print $2}')
     node_to_del_cluster_id=$(get_cluster_id "$node_to_del_fqdn" "$node_to_del_port")

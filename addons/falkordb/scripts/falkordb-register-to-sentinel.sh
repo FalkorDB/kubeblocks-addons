@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Based on the Component Definition API, FalkorDB deployed independently, this script is used to register FalkorDB to Sentinel.
 # And the script will only be executed once during the initialization of the FalkorDB cluster.
@@ -38,7 +38,7 @@ load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
 get_announce_hostname_override_or_default() {
@@ -46,9 +46,13 @@ get_announce_hostname_override_or_default() {
   if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
     local override_value="$ANNOUNCE_HOSTNAME_OVERRIDE"
     # Expand $(POD_NAME) when present (pod name available in action context)
-    if [[ "$override_value" == *'$(POD_NAME)'* ]] && ! is_empty "$POD_NAME"; then
-      override_value="${override_value//\$(POD_NAME)/$POD_NAME}"
-    fi
+    case "$override_value" in
+      *'$(POD_NAME)'*)
+        if ! is_empty "$POD_NAME"; then
+          override_value=$(printf '%s' "$override_value" | sed "s/\$(POD_NAME)/$POD_NAME/g")
+        fi
+        ;;
+    esac
     echo "$override_value"
     return
   fi
@@ -63,15 +67,16 @@ init_redis_service_port() {
 
 extract_lb_host_by_svc_name() {
   local svc_name="$1"
-  for lb_composed_name in $(echo "$REDIS_LB_ADVERTISED_HOST" | tr ',' '\n' ); do
-    if [[ ${lb_composed_name} == *":"* ]]; then
-       if [[ ${lb_composed_name%:*} == "$svc_name" ]]; then
-         echo "${lb_composed_name#*:}"
-         break
-       fi
-    else
-       break
-    fi
+  for lb_composed_name in $(echo "$REDIS_LB_ADVERTISED_HOST" | tr ',' ' '); do
+    case "$lb_composed_name" in
+      *:*)
+        if [ "${lb_composed_name%:*}" = "$svc_name" ]; then
+          echo "${lb_composed_name#*:}"
+          break
+        fi
+        ;;
+      *) break ;;
+    esac
   done
 }
 
@@ -96,15 +101,11 @@ parse_redis_primary_announce_addr() {
   local found=false
   pod_name_ordinal=$(extract_obj_ordinal "$pod_name")
   # the value format of REDIS_ADVERTISED_PORT is "pod1Svc:advertisedPort1,pod2Svc:advertisedPort2,..."
-  # shellcheck disable=SC2207
-  advertised_ports=($(split "$REDIS_ADVERTISED_PORT" ","))
-  for advertised_port in "${advertised_ports[@]}"; do
-    # shellcheck disable=SC2207
-    parts=($(split "$advertised_port" ":"))
-    local svc_name="${parts[0]}"
-    local port="${parts[1]}"
+  for advertised_port in $(printf '%s\n' "$REDIS_ADVERTISED_PORT" | tr ',' ' '); do
+    svc_name=$(printf '%s' "$advertised_port" | cut -d: -f1)
+    port=$(printf '%s' "$advertised_port" | cut -d: -f2)
     svc_name_ordinal=$(extract_obj_ordinal "$svc_name")
-    if [[ "$svc_name_ordinal" == "$pod_name_ordinal" ]]; then
+    if [ "$svc_name_ordinal" = "$pod_name_ordinal" ]; then
       echo "Found matching svcName and port for podName '$pod_name', REDIS_ADVERTISED_PORT: $REDIS_ADVERTISED_PORT. svcName: $svc_name, port: $port."
       redis_announce_port_value="$port"
       # TODO: get the host ip from env defined in the action context.
@@ -257,11 +258,11 @@ register_to_sentinel() {
     echo "Sentinel is already monitoring $master_name at $master_addr. Skipping monitor registration."
   fi
   #configure the FalkorDB primary with Sentinel
-  sentinel_configure_commands=("down-after-milliseconds" "failover-timeout" "parallel-syncs" "auth-pass")
+  sentinel_configure_commands="down-after-milliseconds failover-timeout parallel-syncs auth-pass"
   if [ "$IS_REDIS5" != "true" ]; then
-    sentinel_configure_commands+=("auth-user")
+    sentinel_configure_commands="$sentinel_configure_commands auth-user"
   fi
-  for cmd in "${sentinel_configure_commands[@]}"
+  for cmd in $sentinel_configure_commands
   do
     sentinel_cli_cmd=$(construct_sentinel_sub_command "$cmd" "$master_name" "$redis_primary_host" "$redis_primary_port")
     if [ -n "$sentinel_cli_cmd" ]; then
@@ -272,7 +273,7 @@ register_to_sentinel() {
   echo "redis sentinel register to $sentinel_host succeeded!"
 }
 
-function register_to_sentinel_for_redis5() {
+register_to_sentinel_for_redis5() {
   local sentinel_pod_fqdn=${1:? "Error: Required argument sentinel_pod_fqdn is not set."}
   sentinel_pod_ip=$(getent hosts "$sentinel_pod_fqdn" | awk '{ print $1 }')
   if [ -z "$sentinel_pod_ip" ]; then
@@ -283,7 +284,7 @@ function register_to_sentinel_for_redis5() {
     redis_primary_host=$(get_announce_hostname_override_or_default "$redis_announce_host_value")
     echo "register to sentinel:$sentinel_pod_fqdn with announce addr: redis_primary_host=$redis_primary_host, redis_announce_port_value=$redis_announce_port_value"
     register_to_sentinel "$sentinel_pod_ip" "$master_name" "$redis_primary_host" "$redis_announce_port_value"
-  elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
+  elif [ "$FIXED_POD_IP_ENABLED" = "true" ]; then
     # the post provision action is executed in the primary pod, so we can get the primary pod ip from the env defined in the action context.
     redis_primary_host=$(get_announce_hostname_override_or_default "$CURRENT_POD_IP")
     echo "register to sentinel:$sentinel_pod_fqdn with fixed primary host: redis_primary_host=$redis_primary_host, redis_default_service_port=$redis_default_service_port"
@@ -295,13 +296,13 @@ function register_to_sentinel_for_redis5() {
   fi
 }
 
-function register_to_sentinel_for_redis() {
+register_to_sentinel_for_redis() {
   local sentinel_pod_fqdn=${1:? "Error: Required argument sentinel_pod_fqdn is not set."}
   if ! is_empty "$redis_announce_host_value" && ! is_empty "$redis_announce_port_value"; then
     redis_primary_host=$(get_announce_hostname_override_or_default "$redis_announce_host_value")
     echo "register to sentinel:$sentinel_pod_fqdn with announce addr: redis_primary_host=$redis_primary_host, redis_announce_port_value=$redis_announce_port_value"
     register_to_sentinel "$sentinel_pod_fqdn" "$master_name" "$redis_primary_host" "$redis_announce_port_value"
-  elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
+  elif [ "$FIXED_POD_IP_ENABLED" = "true" ]; then
     # the post provision action is executed in the primary pod, so we can get the primary pod ip from the env defined in the action context.
     redis_primary_host=$(get_announce_hostname_override_or_default "$CURRENT_POD_IP")
     echo "register to sentinel:$sentinel_pod_fqdn with fixed primary host: redis_primary_host=$redis_primary_host, redis_default_service_port=$redis_default_service_port"
@@ -336,9 +337,8 @@ register_to_sentinel_wrapper() {
   else
     master_name="$CUSTOM_SENTINEL_MASTER_NAME"
   fi
-  sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
-  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
-    if [ "$IS_REDIS5" == "true" ]; then
+  for sentinel_pod_fqdn in $(printf '%s\n' "$SENTINEL_POD_FQDN_LIST" | tr ',' ' '); do
+    if [ "$IS_REDIS5" = "true" ]; then
        register_to_sentinel_for_redis5 "${sentinel_pod_fqdn}"
     else
        register_to_sentinel_for_redis "${sentinel_pod_fqdn}"

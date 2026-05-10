@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # shellcheck disable=SC2034
 # shellcheck disable=SC1090
@@ -28,8 +28,8 @@ load_redis_cluster_common_utils() {
   # and are mounted to the same path which defined in the cmpd.spec.scripts
   kblib_common_library_file="/scripts/common.sh"
   redis_cluster_common_library_file="/scripts/falkordb-cluster-common.sh"
-  source "${kblib_common_library_file}"
-  source "${redis_cluster_common_library_file}"
+  . "${kblib_common_library_file}"
+  . "${redis_cluster_common_library_file}"
 }
 
 # remove_replica_from_shard_if_need removes the current pod from the cluster if it is a replica

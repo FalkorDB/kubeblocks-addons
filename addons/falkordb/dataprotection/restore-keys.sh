@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 if [ -z "$DP_RESTORE_KEY_PATTERNS" ]; then
     echo "DP_RESTORE_KEY_PATTERNS is not set. Exiting..."
@@ -73,35 +73,44 @@ while ! redis-cli $REDIS_CLI_TLS_CMD ping | grep -q "PONG"; do
     sleep 1
 done
 
-# use comma  as delimiter to split patterns
-IFS=',' read -r -a patterns_array <<< "$DP_RESTORE_KEY_PATTERNS"
+# use comma as delimiter to split patterns
 DB_COUNT=$(redis-cli $REDIS_CLI_TLS_CMD -h ${DP_DB_HOST} -p ${DP_DB_PORT} -a ${REDIS_DEFAULT_PASSWORD} CONFIG GET databases | awk 'NR==2')
-pids=()
+pids=""
+
+# write LUA script to a temp file (process substitution not available in sh)
+_lua_tmp=$(mktemp)
+printf '%s' "$LUA_SCRIPT" > "$_lua_tmp"
 
 echo "start migration for all databases and patterns..."
 # migrate keys for each database and pattern in parallel
 for db in $(seq 0 $((DB_COUNT - 1))); do
-    for pattern in "${patterns_array[@]}"; do
+    for pattern in $(printf '%s\n' "$DP_RESTORE_KEY_PATTERNS" | tr ',' ' '); do
         (
             #echo "Migrating pattern '$pattern' from database '$db'"
-            output=$(redis-cli $REDIS_CLI_TLS_CMD --eval <(echo "$LUA_SCRIPT") , "$pattern" "$DP_DB_HOST" "$DP_DB_PORT" "$db" "$REDIS_DEFAULT_USER" "$REDIS_DEFAULT_PASSWORD")
+            output=$(redis-cli $REDIS_CLI_TLS_CMD --eval "$_lua_tmp" , "$pattern" "$DP_DB_HOST" "$DP_DB_PORT" "$db" "$REDIS_DEFAULT_USER" "$REDIS_DEFAULT_PASSWORD")
             echo "$output"
             # Check the output for errors
-            if [[ "$output" == *"errors"* ]] && [[ "$DP_RESTORE_KEY_IGNORE_ERRORS" != "true" ]]; then
-                exit 1
-            fi
+            case "$output" in
+              *errors*)
+                if [ "$DP_RESTORE_KEY_IGNORE_ERRORS" != "true" ]; then
+                  exit 1
+                fi
+                ;;
+            esac
         ) &
-        pids+=($!)
+        pids="${pids:+${pids} }$!"
     done
 done
 
-for pid in "${pids[@]}"; do
+for pid in $pids; do
     wait $pid
     if [ $? -ne 0 ]; then
         echo "A migration process failed. Exiting..."
+        rm -f "$_lua_tmp"
         exit 1
     fi
 done
+rm -f "$_lua_tmp"
 
 # as the MIGRATE command transform data in binary format, which will corrupt aof file, we need to trigger BGREWRITEAOF after migration.
 redis-cli $REDIS_CLI_TLS_CMD -h ${DP_DB_HOST} -p ${DP_DB_PORT} -a ${REDIS_DEFAULT_PASSWORD} BGREWRITEAOF

@@ -1,6 +1,15 @@
-#!/bin/bash
+#!/bin/sh
 
-# shellcheck disable=SC2153
+# shellcheck disable=SC2128
+
+# POSIX-compatible password masking helper (replaces bash ${var/pattern/replace})
+_mask_password() {
+  if [ -n "${REDIS_DEFAULT_PASSWORD:-}" ]; then
+    printf '%s' "$1" | sed "s/${REDIS_DEFAULT_PASSWORD}/********/g"
+  else
+    printf '%s' "$1"
+  fi
+}
 # shellcheck disable=SC2207
 # shellcheck disable=SC2034
 
@@ -26,10 +35,11 @@ retry_delay_second=2
 
 # usage: sleep_random_second_when_ut_mode_false <max_time> <min_time>
 sleep_random_second_when_ut_mode_false() {
-  if [ "false" == "$ut_mode" ]; then
+  if [ "false" = "$ut_mode" ]; then
     local max_time="$1"
     local min_time="$2"
-    local random_time=$((RANDOM % (max_time - min_time + 1) + min_time))
+    local random_time
+    random_time=$(awk -v max="$max_time" -v min="$min_time" 'BEGIN{srand(); print int(rand()*(max-min+1))+min}')
     echo "Sleeping for $random_time seconds"
     sleep "$random_time"
   fi
@@ -48,22 +58,13 @@ parse_host_ip_from_built_in_envs() {
     return 1
   fi
 
-  pod_name_list=($(split "$all_pod_name_list" ","))
-  pod_ip_list=($(split "$all_pod_host_ip_list" ","))
-  while [ -n "${pod_name_list[0]}" ]; do
-    pod_name="${pod_name_list[0]}"
-    host_ip="${pod_ip_list[0]}"
-    if equals "$pod_name" "$given_pod_name"; then
+  _idx=0
+  for _pname in $(printf '%s\n' "$all_pod_name_list" | tr ',' ' '); do
+    _idx=$((_idx + 1))
+    if equals "$_pname" "$given_pod_name"; then
+      host_ip=$(printf '%s\n' "$all_pod_host_ip_list" | tr ',' '\n' | sed -n "${_idx}p")
       echo "$host_ip"
       return 0
-    fi
-
-    if equals "${pod_name_list[-1]}" "$pod_name"; then
-      pod_name_list=()
-      pod_ip_list=()
-    else
-      pod_name_list=("${pod_name_list[@]:1}")
-      pod_ip_list=("${pod_ip_list[@]:1}")
     fi
   done
 
@@ -80,9 +81,8 @@ get_all_shards_components() {
     echo "Error: Required environment variable ALL_SHARDS_COMPONENT_SHORT_NAMES is not set." >&2
     return 1
   fi
-  IFS=',' read -ra all_shards_component_shortname_pairs <<< "$ALL_SHARDS_COMPONENT_SHORT_NAMES"
-  for pair in "${all_shards_component_shortname_pairs[@]}"; do
-    IFS=':' read -r shard_name _ <<< "$pair"
+  for pair in $(printf '%s\n' "$ALL_SHARDS_COMPONENT_SHORT_NAMES" | tr ',' ' '); do
+    shard_name=$(printf '%s' "$pair" | cut -d: -f1)
     all_shards_components="${all_shards_components},${shard_name}"
   done
   all_shards_components="${all_shards_components#,}"
@@ -109,7 +109,9 @@ get_all_shards_pods() {
         all_shards_pods="$all_shards_pods,$env_value"
       fi
     fi
-  done <<< "$envs"
+  done << _PODS_EOF_
+$envs
+_PODS_EOF_
   echo "$all_shards_pods"
   return 0
 }
@@ -125,14 +127,16 @@ get_all_shards_pod_fqdns() {
   local all_shards_pod_fqdns=""
   envs=$(env | grep "^ALL_SHARDS_POD_FQDN_LIST" | sort)
   while IFS='=' read -r env_name env_value; do
-    if [[ -n "$env_value" ]]; then
-      if [[ -z "$all_shards_pod_fqdns" ]]; then
+    if [ -n "$env_value" ]; then
+      if [ -z "$all_shards_pod_fqdns" ]; then
         all_shards_pod_fqdns="$env_value"
       else
         all_shards_pod_fqdns="$all_shards_pod_fqdns,$env_value"
       fi
     fi
-  done <<< "$envs"
+  done << _FQDNS_EOF_
+$envs
+_FQDNS_EOF_
   echo "$all_shards_pod_fqdns"
   return 0
 }
@@ -176,16 +180,14 @@ parse_advertised_svc_and_port() {
   local found=false
 
   pod_name_ordinal=$(extract_obj_ordinal "$pod_name")
-  IFS=',' read -ra ports_array <<< "$advertised_ports"
-  for entry in "${ports_array[@]}"; do
-    IFS=':' read -ra parts <<< "$entry"
-    local svc_name="${parts[0]}"
-    local port="${parts[1]}"
+  for entry in $(printf '%s\n' "$advertised_ports" | tr ',' ' '); do
+    svc_name=$(printf '%s' "$entry" | cut -d: -f1)
+    port=$(printf '%s' "$entry" | cut -d: -f2)
     local svc_name_ordinal
 
     svc_name_ordinal=$(extract_obj_ordinal "$svc_name")
-    if [[ "$svc_name_ordinal" == "$pod_name_ordinal" ]]; then
-      if [[ "${svc_and_port}" == "true" ]]; then
+    if [ "$svc_name_ordinal" = "$pod_name_ordinal" ]; then
+      if [ "${svc_and_port}" = "true" ]; then
          echo "$svc_name:$port"
       else
          echo "$port"
@@ -195,7 +197,7 @@ parse_advertised_svc_and_port() {
     fi
   done
 
-  if [[ "$found" == false ]]; then
+  if [ "$found" = "false" ]; then
     return 1
   fi
 }
@@ -205,8 +207,7 @@ get_pod_service_port_by_network_mode() {
   local service_port=${SERVICE_PORT:-6379}
   # if redis cluster is using host network, the service port should be the host network port
   if ! is_empty "$REDIS_CLUSTER_ALL_SHARDS_HOST_NETWORK_PORT"; then
-    IFS=',' read -ra port_mappings <<< "$REDIS_CLUSTER_ALL_SHARDS_HOST_NETWORK_PORT"
-    for mapping in "${port_mappings[@]}"; do
+    for mapping in $(printf '%s\n' "$REDIS_CLUSTER_ALL_SHARDS_HOST_NETWORK_PORT" | tr ',' ' '); do
       shard_name=$(echo "$mapping" | cut -d':' -f1)
       mapping_port=$(echo "$mapping" | cut -d':' -f2)
       if echo "${target_pod_name}" | grep -q "$shard_name"; then
@@ -231,7 +232,7 @@ send_cluster_meet() {
     logging_mask_meet_command="$meet_command"
   else
     meet_command="redis-cli $REDIS_CLI_TLS_CMD -h $primary_endpoint -p $primary_port -a $REDIS_DEFAULT_PASSWORD cluster meet $announce_ip $announce_port $announce_bus_port"
-    logging_mask_meet_command="${meet_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_meet_command=$(_mask_password "$meet_command")
   fi
   echo "check and correct other primary nodes meet command: $logging_mask_meet_command"
   if ! $meet_command
@@ -495,7 +496,7 @@ build_redis_cluster_create_command() {
     logging_mask_initialize_command="$initialize_command"
   else
     initialize_command="redis-cli $REDIS_CLI_TLS_CMD --cluster create $primary_nodes -a $REDIS_DEFAULT_PASSWORD --cluster-yes"
-    logging_mask_initialize_command="${initialize_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_initialize_command=$(_mask_password "$initialize_command")
   fi
   echo "initialize cluster command: $logging_mask_initialize_command" >&2
   set_xtrace_when_ut_mode_false
@@ -512,7 +513,7 @@ build_secondary_replicated_command() {
     logging_mask_replicated_command="$replicated_command"
   else
     replicated_command="redis-cli $REDIS_CLI_TLS_CMD --cluster add-node $secondary_endpoint_with_port $mapping_primary_endpoint_with_port --cluster-slave --cluster-master-id $mapping_primary_cluster_id -a $REDIS_DEFAULT_PASSWORD"
-    logging_mask_replicated_command="${replicated_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_replicated_command=$(_mask_password "$replicated_command")
   fi
   echo "initialize cluster secondary add-node command: $logging_mask_replicated_command" >&2
   set_xtrace_when_ut_mode_false
@@ -528,7 +529,7 @@ build_scale_out_shard_primary_join_command() {
     logging_mask_add_node_command="$add_node_command"
   else
     add_node_command="redis-cli $REDIS_CLI_TLS_CMD --cluster add-node $scale_out_shard_default_primary_endpoint_with_port $exist_available_node -a $REDIS_DEFAULT_PASSWORD"
-    logging_mask_add_node_command="${add_node_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_add_node_command=$(_mask_password "$add_node_command")
   fi
   echo "scale out shard primary add-node command: $logging_mask_add_node_command" >&2
   set_xtrace_when_ut_mode_false
@@ -545,7 +546,7 @@ build_reshard_command() {
     logging_mask_reshard_command="$reshard_command"
   else
     reshard_command="redis-cli $REDIS_CLI_TLS_CMD --cluster reshard $primary_node_with_port --cluster-from all --cluster-to $mapping_primary_cluster_id --cluster-slots $slots_per_shard -a $REDIS_DEFAULT_PASSWORD --cluster-yes"
-    logging_mask_reshard_command="${reshard_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_reshard_command=$(_mask_password "$reshard_command")
   fi
   echo "scale out shard reshard command: $logging_mask_reshard_command" >&2
   set_xtrace_when_ut_mode_false
@@ -561,7 +562,7 @@ build_rebalance_to_zero_command() {
     logging_mask_rebalance_command="$rebalance_command"
   else
     rebalance_command="redis-cli $REDIS_CLI_TLS_CMD --cluster rebalance $node_with_port --cluster-weight $node_cluster_id=0 --cluster-yes -a $REDIS_DEFAULT_PASSWORD"
-    logging_mask_rebalance_command="${rebalance_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_rebalance_command=$(_mask_password "$rebalance_command")
   fi
   echo "set current component slot to 0 by rebalance command: $logging_mask_rebalance_command" >&2
   set_xtrace_when_ut_mode_false
@@ -575,16 +576,16 @@ build_del_node_command() {
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
     del_node_command="redis-cli $REDIS_CLI_TLS_CMD --cluster del-node $available_node $node_to_del_cluster_id -p $SERVICE_PORT"
-    if [[ "$do_forget_node" == "true" ]]; then
+    if [ "$do_forget_node" = "true" ]; then
       del_node_command="redis-cli $REDIS_CLI_TLS_CMD -p $SERVICE_PORT --cluster call $available_node cluster forget $node_to_del_cluster_id"
     fi
     logging_mask_del_node_command="$del_node_command"
   else
     del_node_command="redis-cli $REDIS_CLI_TLS_CMD --cluster del-node $available_node $node_to_del_cluster_id -p $SERVICE_PORT -a $REDIS_DEFAULT_PASSWORD"
-    if [[ "$do_forget_node" == "true" ]]; then
+    if [ "$do_forget_node" = "true" ]; then
       del_node_command="redis-cli $REDIS_CLI_TLS_CMD -p $SERVICE_PORT --cluster call $available_node cluster forget $node_to_del_cluster_id -a $REDIS_DEFAULT_PASSWORD"
     fi
-    logging_mask_del_node_command="${del_node_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_del_node_command=$(_mask_password "$del_node_command")
   fi
   echo "del node command: $logging_mask_del_node_command" >&2
   set_xtrace_when_ut_mode_false
@@ -596,7 +597,7 @@ build_acl_save_command() {
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
     acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port -a $REDIS_DEFAULT_PASSWORD acl save"
-    logging_mask_acl_save_command="${acl_save_command/$REDIS_DEFAULT_PASSWORD/********}"
+    logging_mask_acl_save_command=$(_mask_password "$acl_save_command")
   else
     acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port acl save"
     logging_mask_acl_save_command="$acl_save_command"

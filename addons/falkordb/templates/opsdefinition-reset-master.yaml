@@ -44,7 +44,7 @@ spec:
               image: {{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}:{{ .Values.image.tag.major4.minor12 }}
               imagePullPolicy: IfNotPresent
               command:
-                - bash
+                - sh
                 - -c
                 - |
                   {{- .Files.Get "scripts/reset-master.sh" | nindent 18 }}

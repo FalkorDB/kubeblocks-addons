@@ -207,7 +207,7 @@ spec:
       exec:
         container: falkordb-sent
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/falkordb-sent-member-leave.sh > /tmp/member-leave.log 2>&1
         targetPodSelector: Any
@@ -259,7 +259,7 @@ spec:
               apiVersion: v1
               fieldPath: status.hostIP
       command:
-        - /bin/bash
+        - /bin/sh
       args:
         - -c
         - |

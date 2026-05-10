@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # shellcheck disable=SC2153
 # shellcheck disable=SC2207
@@ -32,35 +32,38 @@ retry_times=3
 check_ready_times=30
 retry_delay_second=2
 
-# variables for scale out replica
-current_comp_primary_node=()
-current_comp_primary_fail_node=()
-current_comp_other_nodes=()
-other_comp_primary_nodes=()
-other_comp_primary_fail_nodes=()
-other_comp_other_nodes=()
+# variables for scale out replica (pipe-separated strings)
+current_comp_primary_node=""
+current_comp_primary_fail_node=""
+current_comp_other_nodes=""
+other_comp_primary_nodes=""
+other_comp_primary_fail_nodes=""
+other_comp_other_nodes=""
 
 
 init_environment(){
-  if [[ -z "${CURRENT_SHARD_ADVERTISED_PORT}" ]]; then
+  if [ -z "${CURRENT_SHARD_ADVERTISED_PORT}" ]; then
     CURRENT_SHARD_ADVERTISED_PORT="${CURRENT_SHARD_LB_ADVERTISED_PORT}"
   fi
-  if [[ -z "${CURRENT_SHARD_ADVERTISED_BUS_PORT}" ]]; then
+  if [ -z "${CURRENT_SHARD_ADVERTISED_BUS_PORT}" ]; then
     CURRENT_SHARD_ADVERTISED_BUS_PORT="${CURRENT_SHARD_LB_ADVERTISED_BUS_PORT}"
   fi
 }
 
 extract_lb_host_by_svc_name() {
   local svc_name="$1"
-  for lb_composed_name in $(echo "$CURRENT_SHARD_LB_ADVERTISED_HOST" | tr ',' '\n' ); do
-    if [[ ${lb_composed_name} == *":"* ]]; then
-       if [[ ${lb_composed_name%:*} == "$svc_name" ]]; then
-         echo "${lb_composed_name#*:}"
-         break
-       fi
-    else
-       break
-    fi
+  for lb_composed_name in $(printf '%s\n' "$CURRENT_SHARD_LB_ADVERTISED_HOST" | tr ',' ' '); do
+    case "$lb_composed_name" in
+      *:*)
+        if [ "${lb_composed_name%:*}" = "$svc_name" ]; then
+          echo "${lb_composed_name#*:}"
+          break
+        fi
+        ;;
+      *)
+        break
+        ;;
+    esac
   done
 }
 
@@ -69,8 +72,8 @@ load_redis_cluster_common_utils() {
   # and are mounted to the same path which defined in the cmpd.spec.scripts
   kblib_common_library_file="/scripts/common.sh"
   redis_cluster_common_library_file="/scripts/falkordb-cluster-common.sh"
-  source "${kblib_common_library_file}"
-  source "${redis_cluster_common_library_file}"
+  . "${kblib_common_library_file}"
+  . "${redis_cluster_common_library_file}"
 }
 
 check_and_meet_node() {
@@ -114,14 +117,17 @@ check_and_meet_node() {
 check_and_meet_other_primary_nodes() {
   local current_primary_endpoint="$1"
   local current_primary_port="$2"
-  local meet_other_comp_primary_nodes=("${other_comp_primary_nodes[@]}" "${other_comp_primary_fail_nodes[@]}")
-  if [ ${#meet_other_comp_primary_nodes[@]} -eq 0 ]; then
+  _meet_list="$other_comp_primary_nodes"
+  if [ -n "$other_comp_primary_fail_nodes" ]; then
+    _meet_list="${_meet_list:+${_meet_list}|}${other_comp_primary_fail_nodes}"
+  fi
+  if [ -z "$_meet_list" ]; then
     echo "meet_other_comp_primary_nodes is empty, skip check_and_meet_other_primary_nodes"
     return
   fi
 
   # node_info value format: cluster_announce_ip#pod_fqdn#endpoint:port@bus_port
-  for node_info in "${meet_other_comp_primary_nodes[@]}"; do
+  for node_info in $(printf '%s' "$_meet_list" | tr '|' '\n'); do
     node_endpoint_with_port=$(echo "$node_info" | awk -F '@' '{print $1}' | awk -F '#' '{print $3}')
     node_endpoint=$(echo "$node_endpoint_with_port" | awk -F ':' '{print $1}')
     node_port=$(echo "$node_endpoint_with_port" | awk -F ':' '{print $2}')
@@ -235,63 +241,66 @@ get_current_comp_nodes_for_scale_out_replica() {
     if contains "$node_fqdn" "$CURRENT_SHARD_COMPONENT_NAME"; then
       if contains "$node_role" "master"; then
         if contains "$node_role" "fail"; then
-          current_comp_primary_fail_node+=("$node_entry")
+          current_comp_primary_fail_node="${current_comp_primary_fail_node:+${current_comp_primary_fail_node}|}${node_entry}"
         else
-          current_comp_primary_node+=("$node_entry")
+          current_comp_primary_node="${current_comp_primary_node:+${current_comp_primary_node}|}${node_entry}"
         fi
       else
-        current_comp_other_nodes+=("$node_entry")
+        current_comp_other_nodes="${current_comp_other_nodes:+${current_comp_other_nodes}|}${node_entry}"
       fi
     else
       if contains "$node_role" "master"; then
         if contains "$node_role" "fail"; then
-          other_comp_primary_fail_nodes+=("$node_entry")
+          other_comp_primary_fail_nodes="${other_comp_primary_fail_nodes:+${other_comp_primary_fail_nodes}|}${node_entry}"
         else
-          other_comp_primary_nodes+=("$node_entry")
+          other_comp_primary_nodes="${other_comp_primary_nodes:+${other_comp_primary_nodes}|}${node_entry}"
         fi
       else
-        other_comp_other_nodes+=("$node_entry")
+        other_comp_other_nodes="${other_comp_other_nodes:+${other_comp_other_nodes}|}${node_entry}"
       fi
     fi
   }
 
   # process each node
   while read -r line; do
-    local node_info
     node_info=$(parse_node_line_info "$line")
-    local node_announce_ip node_fqdn node_port node_bus_port node_role
-    read -r node_announce_ip node_fqdn node_port node_bus_port node_role <<< "$node_info"
+    node_announce_ip=$(printf '%s' "$node_info" | cut -d' ' -f1)
+    node_fqdn=$(printf '%s' "$node_info" | cut -d' ' -f2)
+    node_port=$(printf '%s' "$node_info" | cut -d' ' -f3)
+    node_bus_port=$(printf '%s' "$node_info" | cut -d' ' -f4)
+    node_role=$(printf '%s' "$node_info" | cut -d' ' -f5)
 
     # build node entry based on network mode
-    local node_entry
     node_entry=$(build_node_entry "$network_mode" "$node_announce_ip" "$node_fqdn" "$node_port" "$node_bus_port")
 
     # categorize nodes
     categorize_node "$node_entry" "$node_fqdn" "$node_role"
-  done <<< "$cluster_nodes_info"
+  done << _NODES_EOF_
+$cluster_nodes_info
+_NODES_EOF_
 
-  echo "current_comp_primary_node: ${current_comp_primary_node[*]}"
-  echo "current_comp_primary_fail_node: ${current_comp_primary_fail_node[*]}"
-  echo "current_comp_other_nodes: ${current_comp_other_nodes[*]}"
-  echo "other_comp_primary_nodes: ${other_comp_primary_nodes[*]}"
-  echo "other_comp_primary_fail_nodes: ${other_comp_primary_fail_nodes[*]}"
-  echo "other_comp_other_nodes: ${other_comp_other_nodes[*]}"
+  echo "current_comp_primary_node: ${current_comp_primary_node}"
+  echo "current_comp_primary_fail_node: ${current_comp_primary_fail_node}"
+  echo "current_comp_other_nodes: ${current_comp_other_nodes}"
+  echo "other_comp_primary_nodes: ${other_comp_primary_nodes}"
+  echo "other_comp_primary_fail_nodes: ${other_comp_primary_fail_nodes}"
+  echo "other_comp_other_nodes: ${other_comp_other_nodes}"
 }
 
 # Note: During rebuild-instance, a new PVC is created without existing data and having the rebuild.flag file.
 # Therefore, we must rejoin this instance to the cluster as a secondary node.
 is_rebuild_instance() {
   # Early return if rebuild flag doesn't exist
-  [[ ! -f /data/rebuild.flag ]] && return 1
+  [ ! -f /data/rebuild.flag ] && return 1
 
   # Check if nodes.conf exists
-  if [[ ! -f /data/nodes.conf ]]; then
+  if [ ! -f /data/nodes.conf ]; then
     echo "Rebuild instance detected: nodes.conf missing"
     return 0
   fi
 
   # Check if nodes.conf contains only one node
-  if [[ $(grep -c ":" /data/nodes.conf) -eq 1 ]]; then
+  if [ "$(grep -c ':' /data/nodes.conf)" -eq 1 ]; then
     echo "Rebuild instance detected: single node configuration"
     return 0
   fi
@@ -328,7 +337,7 @@ scale_redis_cluster_replica() {
   fi
 
   for target_node_name in $(echo "${CURRENT_SHARD_POD_NAME_LIST}" | tr ',' '\n'); do
-     if [ -f /data/rebuild.flag ] && [ "${CURRENT_POD_NAME}" == "${target_node_name}" ]; then
+     if [ -f /data/rebuild.flag ] && [ "${CURRENT_POD_NAME}" = "${target_node_name}" ]; then
        continue
      fi
      target_node_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$CURRENT_SHARD_POD_FQDN_LIST" "$target_node_name")
@@ -344,22 +353,22 @@ scale_redis_cluster_replica() {
   done
 
   # check current_comp_primary_node is empty or not
-  if [ ${#current_comp_primary_node[@]} -eq 0 ]; then
+  if [ -z "$current_comp_primary_node" ]; then
     if is_rebuild_instance; then
       echo "current instance is a rebuild-instance, the current shard primary cannot be empty, please check the cluster status" >&2
       shutdown_redis_server "$service_port"
       exit 1
     fi
-    if [ ${#current_comp_primary_fail_node[@]} -eq 0 ]; then
+    if [ -z "$current_comp_primary_fail_node" ]; then
       echo "current_comp_primary_node is empty, skip scale out replica"
       exit 0
     fi
     # if current_comp_primary_node is empty, use current_comp_primary_fail_node instead
-    current_comp_primary_node=("${current_comp_primary_fail_node[@]}")
+    current_comp_primary_node="$current_comp_primary_fail_node"
   fi
 
   # primary_node_info value format: cluster_announce_ip#pod_fqdn#endpoint:port@bus_port
-  primary_node_info=${current_comp_primary_node[0]}
+  primary_node_info=$(printf '%s' "$current_comp_primary_node" | cut -d'|' -f1)
   primary_node_endpoint_with_port=$(echo "$primary_node_info" | awk -F '@' '{print $1}' | awk -F '#' '{print $3}')
   primary_node_endpoint=$(echo "$primary_node_endpoint_with_port" | awk -F ':' '{print $1}')
   primary_node_port=$(echo "$primary_node_endpoint_with_port" | awk -F ':' '{print $2}')
@@ -410,7 +419,7 @@ scale_redis_cluster_replica() {
       exit 1
     elif contains "$replicated_output" "is not empty"; then
       echo "Replica is not empty, Either the node already knows other nodes (check with CLUSTER NODES) or contains some key in database 0"
-    elif [[ $replicated_output == *"Not all 16384 slots are covered by nodes"* ]]; then
+    elif contains "$replicated_output" "Not all 16384 slots are covered by nodes"; then
       # shutdown the redis server if the cluster is not fully covered by nodes
       echo "Not all 16384 slots are covered by nodes, shutdown redis server" >&2
       shutdown_redis_server
@@ -432,15 +441,12 @@ scale_redis_cluster_replica() {
 
   # cluster meet the primary node until the current node is successfully added to the cluster
   current_primary_met=false
-  declare -A other_primary_met
-  for node_info in "${other_comp_primary_nodes[@]}"; do
-    other_primary_met["$node_info"]=false
-  done
+  _other_primary_met=""  # pipe-separated list of already-met node_infos
   while true; do
     all_met=true
 
     # meet current component primary node if not met yet
-    if ! $current_primary_met; then
+    if [ "$current_primary_met" = "false" ]; then
       if scale_out_replica_send_meet "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port" "$CURRENT_POD_NAME"; then
         echo "Successfully meet the primary node $primary_node_endpoint_with_port in scale_redis_cluster_replica"
         current_primary_met=true
@@ -451,25 +457,28 @@ scale_redis_cluster_replica() {
     fi
 
     # meet the other components primary nodes if not met yet
-    for node_info in "${other_comp_primary_nodes[@]}"; do
-      if [ "${other_primary_met[$node_info]}" = false ]; then
-        node_endpoint_with_port=$(echo "$node_info" | awk -F '@' '{print $1}' | awk -F '#' '{print $3}')
-        node_endpoint=$(echo "$node_endpoint_with_port" | awk -F ':' '{print $1}')
-        node_port=$(echo "$node_endpoint_with_port" | awk -F ':' '{print $2}')
-        node_bus_port=$(echo "$node_info" | awk -F '@' '{print $2}')
+    for node_info in $(printf '%s' "$other_comp_primary_nodes" | tr '|' '\n'); do
+      case "|${_other_primary_met}|" in
+        *"|${node_info}|"*) ;; # already met
+        *)
+          node_endpoint_with_port=$(echo "$node_info" | awk -F '@' '{print $1}' | awk -F '#' '{print $3}')
+          node_endpoint=$(echo "$node_endpoint_with_port" | awk -F ':' '{print $1}')
+          node_port=$(echo "$node_endpoint_with_port" | awk -F ':' '{print $2}')
+          node_bus_port=$(echo "$node_info" | awk -F '@' '{print $2}')
 
-        if scale_out_replica_send_meet "$node_endpoint" "$node_port" "$node_bus_port" "$CURRENT_POD_NAME"; then
-          echo "Successfully meet the primary node $node_endpoint_with_port in scale_redis_cluster_replica"
-          other_primary_met["$node_info"]=true
-        else
-          echo "Failed to meet the other component primary node $node_endpoint_with_port in scale_redis_cluster_replica" >&2
-          all_met=false
-        fi
-      fi
+          if scale_out_replica_send_meet "$node_endpoint" "$node_port" "$node_bus_port" "$CURRENT_POD_NAME"; then
+            echo "Successfully meet the primary node $node_endpoint_with_port in scale_redis_cluster_replica"
+            _other_primary_met="${_other_primary_met:+${_other_primary_met}|}${node_info}"
+          else
+            echo "Failed to meet the other component primary node $node_endpoint_with_port in scale_redis_cluster_replica" >&2
+            all_met=false
+          fi
+          ;;
+      esac
     done
 
     # If all nodes are met successfully, break the loop
-    if $all_met && $current_primary_met; then
+    if [ "$all_met" = "true" ] && [ "$current_primary_met" = "true" ]; then
       echo "All primary nodes have been successfully met"
       break
     fi
@@ -564,7 +573,7 @@ build_announce_ip_and_port() {
     echo "redis use advertised svc $redis_announce_host_value:$redis_announce_port_value to announce"
     announce_host_value="$redis_announce_host_value"
     announce_port_value="$redis_announce_port_value"
-  elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
+  elif [ "$FIXED_POD_IP_ENABLED" = "true" ]; then
     echo "redis use fixed pod ip: $CURRENT_POD_IP to announce"
     announce_host_value="$CURRENT_POD_IP"
   else
@@ -626,14 +635,14 @@ build_cluster_announce_info() {
       echo "cluster-announce-bus-port $redis_announce_bus_port_value"
       echo "cluster-announce-hostname $cluster_announce_hostname_value"
       echo "cluster-preferred-endpoint-type ip"
-      if [ "$TLS_ENABLED" == "true" ]; then
+      if [ "$TLS_ENABLED" = "true" ]; then
         echo "cluster-announce-tls-port $redis_announce_port_value"
         echo "cluster-announce-port 0"
       else
         echo "cluster-announce-port $redis_announce_port_value"
       fi
     } >> $redis_real_conf
-  elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
+  elif [ "$FIXED_POD_IP_ENABLED" = "true" ]; then
     echo "redis cluster use fixed pod ip: $CURRENT_POD_IP to announce"
     {
       echo "cluster-announce-ip $CURRENT_POD_IP"
@@ -657,7 +666,7 @@ build_redis_cluster_service_port() {
   if ! is_empty "$CLUSTER_BUS_PORT"; then
     cluster_bus_port=$CLUSTER_BUS_PORT
   fi
-  if [ "$TLS_ENABLED" == "true" ]; then
+  if [ "$TLS_ENABLED" = "true" ]; then
     echo "tls-port $service_port" >> $redis_real_conf
   else
     echo "port $service_port" >> $redis_real_conf
@@ -684,14 +693,14 @@ parse_redis_cluster_shard_announce_addr() {
   local bus_port
   svc_and_port=$(parse_advertised_svc_and_port "$pod_name" "$CURRENT_SHARD_ADVERTISED_PORT" "true")
   status=$?
-  if [[ $status -ne 0 ]] || is_empty "$svc_and_port"; then
+  if [ "$status" -ne 0 ] || is_empty "$svc_and_port"; then
     echo "Exiting due to error in CURRENT_SHARD_ADVERTISED_PORT."
     exit 1
   fi
 
   bus_port=$(parse_advertised_svc_and_port "$pod_name" "$CURRENT_SHARD_ADVERTISED_BUS_PORT")
   status=$?
-  if [[ $status -ne 0 ]] || is_empty "$bus_port"; then
+  if [ "$status" -ne 0 ] || is_empty "$bus_port"; then
     echo "Exiting due to error in CURRENT_SHARD_ADVERTISED_BUS_PORT."
     exit 1
   fi
