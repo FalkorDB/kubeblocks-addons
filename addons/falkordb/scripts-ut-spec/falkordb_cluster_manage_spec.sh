@@ -219,8 +219,7 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       }
 
       setup() {
-        declare -gA scale_out_shard_default_primary_node
-        declare -gA scale_out_shard_default_other_nodes
+        init_cluster_map_files
         export KB_CLUSTER_COMPONENT_POD_NAME_LIST="falkordb-shard-sxj-0,falkordb-shard-sxj-1"
         export CURRENT_SHARD_ADVERTISED_PORT="falkordb-shard-sxj-0:31000,falkordb-shard-sxj-1:31001"
       }
@@ -235,8 +234,8 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       It "initializes default nodes correctly when using advertised ports"
         When call init_current_comp_default_nodes_for_scale_out
         The status should be success
-        The variable scale_out_shard_default_primary_node['falkordb-shard-sxj-0'] should equal "10.42.0.1:31000"
-        The variable scale_out_shard_default_other_nodes['falkordb-shard-sxj-1'] should equal "10.42.0.2:31001"
+        The value "$(_map_get "$_scale_out_shard_default_primary_node" 'falkordb-shard-sxj-0')" should equal "10.42.0.1:31000"
+        The value "$(_map_get "$_scale_out_shard_default_other_nodes" 'falkordb-shard-sxj-1')" should equal "10.42.0.2:31001"
       End
     End
 
@@ -261,8 +260,7 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       }
 
       setup() {
-        declare -gA scale_out_shard_default_primary_node
-        declare -gA scale_out_shard_default_other_nodes
+        init_cluster_map_files
         export KB_CLUSTER_COMPONENT_POD_NAME_LIST="falkordb-shard-sxj-0,falkordb-shard-sxj-1"
         export CURRENT_SHARD_POD_FQDN_LIST="falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc.cluster.local,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc.cluster.local"
         export SERVICE_PORT="6379"
@@ -279,8 +277,8 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       It "initializes default nodes correctly when not using advertised ports"
         When call init_current_comp_default_nodes_for_scale_out
         The status should be success
-        The variable scale_out_shard_default_primary_node['falkordb-shard-sxj-0'] should equal "falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc.cluster.local:6379"
-        The variable scale_out_shard_default_other_nodes['falkordb-shard-sxj-1'] should equal "falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc.cluster.local:6379"
+        The value "$(_map_get "$_scale_out_shard_default_primary_node" 'falkordb-shard-sxj-0')" should equal "falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc.cluster.local:6379"
+        The value "$(_map_get "$_scale_out_shard_default_other_nodes" 'falkordb-shard-sxj-1')" should equal "falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc.cluster.local:6379"
       End
     End
 
@@ -443,9 +441,7 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
         export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
         export KB_CLUSTER_POD_HOST_IP_LIST="10.42.0.1,10.42.0.2,10.42.0.3,10.42.0.4,10.42.0.5,10.42.0.6"
         export ALL_SHARDS_ADVERTISED_PORT="shard-98x@falkordb-shard-98x-redis-advertised-0:32024,falkordb-shard-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:32025,falkordb-shard-7hy-redis-advertised-1:31319.shard-jwl@falkordb-shard-jwl-redis-advertised-0:32026,falkordb-shard-jwl-redis-advertised-1:31320"
-        declare -gA initialize_redis_cluster_primary_nodes
-        declare -gA initialize_redis_cluster_secondary_nodes
-        declare -gA initialize_pod_name_to_advertise_host_port_map
+        init_cluster_map_files
       }
       Before "setup"
 
@@ -459,15 +455,15 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       It "initializes primary nodes correctly when using advertised ports"
         When call gen_initialize_redis_cluster_node "true"
         The status should be success
-        The variable initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"] should equal "10.42.0.1:32024"
-        The variable initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"] should equal "10.42.0.3:32025"
-        The variable initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"] should equal "10.42.0.5:32026"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-98x-0"] should equal "10.42.0.1:32024"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-7hy-0"] should equal "10.42.0.3:32025"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-jwl-0"] should equal "10.42.0.5:32026"
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-98x-1"] should be blank
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-7hy-1"] should be blank
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-jwl-1"] should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-98x-0')" should equal "10.42.0.1:32024"
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-7hy-0')" should equal "10.42.0.3:32025"
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-jwl-0')" should equal "10.42.0.5:32026"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-98x-0')" should equal "10.42.0.1:32024"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-7hy-0')" should equal "10.42.0.3:32025"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-jwl-0')" should equal "10.42.0.5:32026"
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-98x-1')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-7hy-1')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-jwl-1')" should be blank
       End
     End
 
@@ -476,9 +472,7 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
         export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
         export KB_CLUSTER_POD_HOST_IP_LIST="10.42.0.1,10.42.0.2,10.42.0.3,10.42.0.4,10.42.0.5,10.42.0.6"
         export ALL_SHARDS_ADVERTISED_PORT="shard-98x@falkordb-shard-98x-redis-advertised-0:32024,falkordb-shard-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:32025,falkordb-shard-7hy-redis-advertised-1:31319.shard-jwl@falkordb-shard-jwl-redis-advertised-0:32026,falkordb-shard-jwl-redis-advertised-1:31320"
-        declare -gA initialize_redis_cluster_primary_nodes
-        declare -gA initialize_redis_cluster_secondary_nodes
-        declare -gA initialize_pod_name_to_advertise_host_port_map
+        init_cluster_map_files
       }
       Before "setup"
 
@@ -492,15 +486,15 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       It "initializes secondary nodes correctly when using advertised ports"
         When call gen_initialize_redis_cluster_node "false"
         The status should be success
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-98x-1"] should equal "10.42.0.2:31318"
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-7hy-1"] should equal "10.42.0.4:31319"
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-jwl-1"] should equal "10.42.0.6:31320"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-98x-1"] should equal "10.42.0.2:31318"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-7hy-1"] should equal "10.42.0.4:31319"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-jwl-1"] should equal "10.42.0.6:31320"
-        The variable initialize_redis_cluster_primary_nodes['falkordb-shard-98x-0'] should be blank
-        The variable initialize_redis_cluster_primary_nodes['falkordb-shard-7hy-0'] should be blank
-        The variable initialize_redis_cluster_primary_nodes['falkordb-shard-jwl-0'] should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-98x-1')" should equal "10.42.0.2:31318"
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-7hy-1')" should equal "10.42.0.4:31319"
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-jwl-1')" should equal "10.42.0.6:31320"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-98x-1')" should equal "10.42.0.2:31318"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-7hy-1')" should equal "10.42.0.4:31319"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-jwl-1')" should equal "10.42.0.6:31320"
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-98x-0')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-7hy-0')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-jwl-0')" should be blank
       End
     End
 
@@ -512,9 +506,7 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       setup() {
         export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
         export SERVICE_PORT="6379"
-        declare -gA initialize_redis_cluster_primary_nodes
-        declare -gA initialize_redis_cluster_secondary_nodes
-        declare -gA initialize_pod_name_to_advertise_host_port_map
+        init_cluster_map_files
       }
       Before "setup"
 
@@ -527,15 +519,15 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       It "initializes primary nodes correctly when not using advertised ports"
         When call gen_initialize_redis_cluster_node "true"
         The status should be success
-        The variable initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"] should equal "falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
-        The variable initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"] should equal "falkordb-shard-7hy-0.namespace.svc.cluster.local:6379"
-        The variable initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"] should equal "falkordb-shard-jwl-0.namespace.svc.cluster.local:6379"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-98x-0"] should equal "falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-7hy-0"] should equal "falkordb-shard-7hy-0.namespace.svc.cluster.local:6379"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-jwl-0"] should equal "falkordb-shard-jwl-0.namespace.svc.cluster.local:6379"
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-98x-1"] should be blank
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-7hy-1"] should be blank
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-jwl-1"] should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-98x-0')" should equal "falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-7hy-0')" should equal "falkordb-shard-7hy-0.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-jwl-0')" should equal "falkordb-shard-jwl-0.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-98x-0')" should equal "falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-7hy-0')" should equal "falkordb-shard-7hy-0.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-jwl-0')" should equal "falkordb-shard-jwl-0.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-98x-1')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-7hy-1')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-jwl-1')" should be blank
       End
     End
 
@@ -547,9 +539,7 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       setup() {
         export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
         export SERVICE_PORT="6379"
-        declare -gA initialize_redis_cluster_primary_nodes
-        declare -gA initialize_redis_cluster_secondary_nodes
-        declare -gA initialize_pod_name_to_advertise_host_port_map
+        init_cluster_map_files
       }
       Before "setup"
 
@@ -562,15 +552,15 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       It "initializes secondary nodes correctly when not using advertised ports"
         When call gen_initialize_redis_cluster_node "false"
         The status should be success
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-98x-1"] should equal "falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-7hy-1"] should equal "falkordb-shard-7hy-1.namespace.svc.cluster.local:6379"
-        The variable initialize_redis_cluster_secondary_nodes["falkordb-shard-jwl-1"] should equal "falkordb-shard-jwl-1.namespace.svc.cluster.local:6379"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-98x-1"] should equal "falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-7hy-1"] should equal "falkordb-shard-7hy-1.namespace.svc.cluster.local:6379"
-        The variable initialize_pod_name_to_advertise_host_port_map["falkordb-shard-jwl-1"] should equal "falkordb-shard-jwl-1.namespace.svc.cluster.local:6379"
-        The variable initialize_redis_cluster_primary_nodes['falkordb-shard-98x-0'] should be blank
-        The variable initialize_redis_cluster_primary_nodes['falkordb-shard-7hy-0'] should be blank
-        The variable initialize_redis_cluster_primary_nodes['falkordb-shard-jwl-0'] should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-98x-1')" should equal "falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-7hy-1')" should equal "falkordb-shard-7hy-1.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_redis_cluster_secondary_nodes" 'falkordb-shard-jwl-1')" should equal "falkordb-shard-jwl-1.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-98x-1')" should equal "falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-7hy-1')" should equal "falkordb-shard-7hy-1.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_pod_name_to_advertise_host_port_map" 'falkordb-shard-jwl-1')" should equal "falkordb-shard-jwl-1.namespace.svc.cluster.local:6379"
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-98x-0')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-7hy-0')" should be blank
+        The value "$(_map_get "$_initialize_redis_cluster_primary_nodes" 'falkordb-shard-jwl-0')" should be blank
       End
     End
 
@@ -720,7 +710,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to get primary nodes or primary nodes count is less than 3"
       gen_initialize_redis_cluster_primary_node() {
-        declare -gA initialize_redis_cluster_primary_nodes
+        true
       }
 
       setup() {
@@ -744,10 +734,9 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to create falkordb cluster when initializing"
       gen_initialize_redis_cluster_primary_node() {
-        declare -gA initialize_redis_cluster_primary_nodes
-        initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"]="10.42.0.3:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"]="10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-jwl-0" "10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-7hy-0" "10.42.0.3:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       check_initialize_nodes_ready() {
@@ -779,10 +768,9 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to check slots covered"
       gen_initialize_redis_cluster_primary_node() {
-        declare -gA initialize_redis_cluster_primary_nodes
-        initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"]="10.42.0.3:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"]="10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-jwl-0" "10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-7hy-0" "10.42.0.3:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       check_initialize_nodes_ready() {
@@ -821,10 +809,9 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when no secondary nodes to initialize"
       gen_initialize_redis_cluster_primary_node() {
-        declare -gA initialize_redis_cluster_primary_nodes
-        initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"]="10.42.0.3:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"]="10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-jwl-0" "10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-7hy-0" "10.42.0.3:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       check_initialize_nodes_ready() {
@@ -840,7 +827,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       gen_initialize_redis_cluster_secondary_nodes() {
-        declare -gA initialize_redis_cluster_secondary_nodes
+        true
       }
 
       setup() {
@@ -866,10 +853,9 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to find the mapping primary node for secondary node"
       gen_initialize_redis_cluster_primary_node() {
-        declare -gA initialize_redis_cluster_primary_nodes
-        initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"]="10.42.0.3:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"]="10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-jwl-0" "10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-7hy-0" "10.42.0.3:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       check_initialize_nodes_ready() {
@@ -885,8 +871,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       gen_initialize_redis_cluster_secondary_nodes() {
-        declare -gA initialize_redis_cluster_secondary_nodes
-        initialize_redis_cluster_secondary_nodes["falkordb-shard-98x-1"]="10.42.0.2:6379"
+        _map_append "$_initialize_redis_cluster_secondary_nodes" "falkordb-shard-98x-1" "10.42.0.2:6379"
       }
 
       setup() {
@@ -903,9 +888,6 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
       After "un_setup"
 
-      declare -gA initialize_pod_name_to_advertise_host_port_map
-      initialize_pod_name_to_advertise_host_port_map=()
-
       It "exits with error when failed to find the mapping primary node for secondary node"
         When run initialize_redis_cluster
         The status should be failure
@@ -917,10 +899,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to get the cluster id from cluster nodes of the mapping primary node"
       gen_initialize_redis_cluster_primary_node() {
-        declare -gA initialize_redis_cluster_primary_nodes
-        initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"]="10.42.0.3:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"]="10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-jwl-0" "10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-7hy-0" "10.42.0.3:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-98x-0" "10.42.0.1:6379"
+        _map_append "$_initialize_pod_name_to_advertise_host_port_map" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       check_initialize_nodes_ready() {
@@ -936,12 +918,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       gen_initialize_redis_cluster_secondary_nodes() {
-        declare -gA initialize_redis_cluster_secondary_nodes
-        initialize_redis_cluster_secondary_nodes["falkordb-shard-98x-1"]="10.42.0.2:6379"
+        _map_append "$_initialize_redis_cluster_secondary_nodes" "falkordb-shard-98x-1" "10.42.0.2:6379"
       }
-
-      declare -gA initialize_pod_name_to_advertise_host_port_map
-      initialize_pod_name_to_advertise_host_port_map["falkordb-shard-98x-0"]="10.42.0.1:6379"
 
       get_cluster_id() {
         echo ""
@@ -971,10 +949,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to initialize the secondary node"
       gen_initialize_redis_cluster_primary_node() {
-        declare -gA initialize_redis_cluster_primary_nodes
-        initialize_redis_cluster_primary_nodes["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-7hy-0"]="10.42.0.3:6379"
-        initialize_redis_cluster_primary_nodes["falkordb-shard-jwl-0"]="10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-jwl-0" "10.42.0.5:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-7hy-0" "10.42.0.3:6379"
+        _map_append "$_initialize_redis_cluster_primary_nodes" "falkordb-shard-98x-0" "10.42.0.1:6379"
+        _map_append "$_initialize_pod_name_to_advertise_host_port_map" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       check_initialize_nodes_ready() {
@@ -990,12 +968,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       gen_initialize_redis_cluster_secondary_nodes() {
-        declare -gA initialize_redis_cluster_secondary_nodes
-        initialize_redis_cluster_secondary_nodes["falkordb-shard-98x-1"]="10.42.0.2:6379"
+        _map_append "$_initialize_redis_cluster_secondary_nodes" "falkordb-shard-98x-1" "10.42.0.2:6379"
       }
-
-      declare -gA initialize_pod_name_to_advertise_host_port_map
-      initialize_pod_name_to_advertise_host_port_map["falkordb-shard-98x-0"]="10.42.0.1:6379"
 
       get_cluster_id() {
         echo "cluster_id_123"
@@ -1096,8 +1070,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to generate primary nodes when scaling out"
       init_current_comp_default_nodes_for_scale_out() {
-        declare -gA scale_out_shard_default_primary_node
-        scale_out_shard_default_primary_node=()
+        true
       }
 
       setup() {
@@ -1136,8 +1109,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when the current component shard is already scaled out"
       init_current_comp_default_nodes_for_scale_out() {
-        declare -gA scale_out_shard_default_primary_node
-        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
+        _map_append "$_scale_out_shard_default_primary_node" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       get_cluster_id() {
@@ -1189,8 +1161,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when no exist available node found or cluster status is not ok"
       init_current_comp_default_nodes_for_scale_out() {
-        declare -gA scale_out_shard_default_primary_node
-        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
+        _map_append "$_scale_out_shard_default_primary_node" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       get_cluster_id() {
@@ -1243,8 +1214,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to scale out shard primary node"
       init_current_comp_default_nodes_for_scale_out() {
-        declare -gA scale_out_shard_default_primary_node
-        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
+        _map_append "$_scale_out_shard_default_primary_node" "falkordb-shard-98x-0" "10.42.0.1:6379"
       }
 
       get_cluster_id() {
@@ -1301,10 +1271,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to scale out shard secondary node"
       init_current_comp_default_nodes_for_scale_out() {
-        declare -gA scale_out_shard_default_primary_node
-        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        declare -gA scale_out_shard_default_other_nodes
-        scale_out_shard_default_other_nodes["falkordb-shard-98x-1"]="10.42.0.2:6379"
+        _map_append "$_scale_out_shard_default_primary_node" "falkordb-shard-98x-0" "10.42.0.1:6379"
+        _map_append "$_scale_out_shard_default_other_nodes" "falkordb-shard-98x-1" "10.42.0.2:6379"
       }
 
       get_cluster_id() {
@@ -1366,10 +1334,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
 
     Context "when failed to scale out shard reshard"
       init_current_comp_default_nodes_for_scale_out() {
-        declare -gA scale_out_shard_default_primary_node
-        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
-        declare -gA scale_out_shard_default_other_nodes
-        scale_out_shard_default_other_nodes["falkordb-shard-98x-1"]="10.42.0.2:6379"
+        _map_append "$_scale_out_shard_default_primary_node" "falkordb-shard-98x-0" "10.42.0.1:6379"
+        _map_append "$_scale_out_shard_default_other_nodes" "falkordb-shard-98x-1" "10.42.0.2:6379"
       }
 
       get_cluster_id() {
@@ -1489,8 +1455,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       get_current_comp_nodes_for_scale_in() {
-        current_comp_primary_node=("falkordb-shard-98x-0.namespace.svc.cluster.local:6379")
-        current_comp_other_nodes=("falkordb-shard-98x-1.namespace.svc.cluster.local:6379")
+        current_comp_primary_node="falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
+        current_comp_other_nodes="falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
       }
 
       setup() {
@@ -1539,8 +1505,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       get_current_comp_nodes_for_scale_in() {
-        current_comp_primary_node=("falkordb-shard-98x-0.namespace.svc.cluster.local:6379")
-        current_comp_other_nodes=("falkordb-shard-98x-1.namespace.svc.cluster.local:6379")
+        current_comp_primary_node="falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
+        current_comp_other_nodes="falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
       }
 
       get_cluster_id() {
@@ -1600,8 +1566,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       get_current_comp_nodes_for_scale_in() {
-        current_comp_primary_node=("falkordb-shard-98x-0.namespace.svc.cluster.local:6379")
-        current_comp_other_nodes=("falkordb-shard-98x-1.namespace.svc.cluster.local:6379")
+        current_comp_primary_node="falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
+        current_comp_other_nodes="falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
       }
 
       get_cluster_id() {
@@ -1658,8 +1624,8 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       get_current_comp_nodes_for_scale_in() {
-        current_comp_primary_node=("falkordb-shard-98x-0.namespace.svc.cluster.local:6379")
-        current_comp_other_nodes=("falkordb-shard-98x-1.namespace.svc.cluster.local:6379")
+        current_comp_primary_node="falkordb-shard-98x-0.namespace.svc.cluster.local:6379"
+        current_comp_other_nodes="falkordb-shard-98x-1.namespace.svc.cluster.local:6379"
       }
 
       get_cluster_id() {

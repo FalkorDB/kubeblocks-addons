@@ -26,7 +26,7 @@ Describe "FalkorDB Sentinel Member Leave Script Tests"
     export SENTINEL_PASSWORD="sentinel_password"
     sentinel_leave_member_name=""
     sentinel_leave_member_fqdn=""
-    sentinel_pod_list=()
+    sentinel_pod_list=""
     # set ut_mode to true to hack control flow in the script
     ut_mode="true"
   }
@@ -50,9 +50,7 @@ Describe "FalkorDB Sentinel Member Leave Script Tests"
       The variable sentinel_leave_member_name should eq "sentinel-2"
       The variable sentinel_leave_member_fqdn should eq "127.0.0.3"
 
-      The variable sentinel_pod_list[0] should eq "sentinel-0.redis-sentinel-headless"
-      The variable sentinel_pod_list[1] should eq "sentinel-1.redis-sentinel-headless"
-      The variable sentinel_pod_list[2] should eq "sentinel-2.redis-sentinel-headless"
+      The variable sentinel_pod_list should eq "sentinel-0.redis-sentinel-headless|sentinel-1.redis-sentinel-headless|sentinel-2.redis-sentinel-headless"
     End
   End
 
@@ -69,7 +67,7 @@ Describe "FalkorDB Sentinel Member Leave Script Tests"
 
   Describe "check_all_sentinel_agreement function"
       setup() {
-        sentinel_pod_list=("sentinel-0.redis-sentinel-headless:26379" "sentinel-1.redis-sentinel-headless:26379" "sentinel-2.redis-sentinel-headless:26379")
+      sentinel_pod_list="sentinel-0.redis-sentinel-headless:26379|sentinel-1.redis-sentinel-headless:26379|sentinel-2.redis-sentinel-headless:26379"
       }
       Before 'setup'
 

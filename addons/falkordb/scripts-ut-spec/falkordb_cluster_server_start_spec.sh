@@ -580,7 +580,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       get_current_comp_nodes_for_scale_out_replica() {
-        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+        current_comp_primary_node="10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
       }
 
       check_node_in_cluster_with_retry() {
@@ -620,7 +620,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       get_current_comp_nodes_for_scale_out_replica() {
-        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+        current_comp_primary_node="10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
       }
 
       check_node_in_cluster_with_retry() {
@@ -666,7 +666,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       get_current_comp_nodes_for_scale_out_replica() {
-        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+        current_comp_primary_node="10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
       }
 
       check_node_in_cluster_with_retry() {
@@ -733,7 +733,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       get_current_comp_nodes_for_scale_out_replica() {
-        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+        current_comp_primary_node="10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
       }
 
       check_node_in_cluster_with_retry() {
@@ -786,7 +786,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       get_current_comp_nodes_for_scale_out_replica() {
-        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+        current_comp_primary_node="10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
       }
 
       check_node_in_cluster_with_retry() {
@@ -844,7 +844,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       get_current_comp_nodes_for_scale_out_replica() {
-        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+        current_comp_primary_node="10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
       }
 
       check_node_in_cluster_with_retry() {
