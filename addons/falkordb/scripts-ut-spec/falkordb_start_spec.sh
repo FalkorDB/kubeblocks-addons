@@ -193,7 +193,7 @@ Describe "FalkorDB Start Bash Script Tests"
 
   Describe "build_redis_service_port()"
     It "builds redis service port correctly when SERVICE_PORT env is set"
-      export  export service_por="6380"
+      export SERVICE_PORT="6380"
       When call build_redis_service_port
       The contents of file "$redis_real_conf" should include "port $SERVICE_PORT"
     End
