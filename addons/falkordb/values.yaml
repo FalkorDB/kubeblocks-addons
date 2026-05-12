@@ -14,13 +14,13 @@ falkordbVersions:
     componentDef: "falkordb-4"
     clusterComponentDef: "falkordb-cluster-4"
     sentinelComponentDef: "falkordb-sent-4"
-    serviceVersion: "4.18.3"
-    defaultImageTag: "v4.18.3"
+    serviceVersion: "4.18.6"
+    defaultImageTag: "v4.18.6"
     mirrorVersions:
       - version: "4.14.10"
         imageTag: "v4.14.10"
-      - version: "4.18.3"
-        imageTag: "v4.18.3"
+      - version: "4.18.6"
+        imageTag: "v4.18.6"
 
 image:
   # refer: https://redis.io/docs/stack/
@@ -35,7 +35,7 @@ image:
     major4:
       minor14: v4.14.10
       minor12: v4.12.5
-      minor18: v4.18.3
+      minor18: v4.18.6
 
   apeDts:
     registry: ""
