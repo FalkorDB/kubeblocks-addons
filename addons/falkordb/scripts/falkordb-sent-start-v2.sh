@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Based on the Component Definition API, FalkorDB Sentinel deployed independently
 
@@ -25,7 +25,7 @@ load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
 redis_sentinel_conf_dir="/data/sentinel"
@@ -34,15 +34,16 @@ redis_sentinel_extra_conf="/etc/conf/redis-sentinel-extra.conf"
 
 extract_lb_host_by_svc_name() {
   local svc_name="$1"
-  for lb_composed_name in $(echo "$REDIS_SENTINEL_LB_ADVERTISED_HOST" | tr ',' '\n' ); do
-    if [[ ${lb_composed_name} == *":"* ]]; then
-       if [[ ${lb_composed_name%:*} == "$svc_name" ]]; then
-         echo "${lb_composed_name#*:}"
-         break
-       fi
-    else
-       break
-    fi
+  for lb_composed_name in $(echo "$REDIS_SENTINEL_LB_ADVERTISED_HOST" | tr ',' ' '); do
+    case "$lb_composed_name" in
+      *:*)
+        if [ "${lb_composed_name%:*}" = "$svc_name" ]; then
+          echo "${lb_composed_name#*:}"
+          break
+        fi
+        ;;
+      *) break ;;
+    esac
   done
 }
 
@@ -72,15 +73,12 @@ parse_redis_sentinel_announce_addr() {
   fi
 
   # the value format of REDIS_SENTINEL_ADVERTISED_PORT is "pod1Svc:advertisedPort1,pod2Svc:advertisedPort2,..."
-  IFS=',' read -ra advertised_ports <<< "${REDIS_SENTINEL_ADVERTISED_PORT}"
   local pod_name="$1"
   local found=false
   pod_name_ordinal=$(extract_obj_ordinal "$pod_name")
-  for advertised_port in "${advertised_ports[@]}"; do
-    # shellcheck disable=SC2207
-    parts=($(split "$advertised_port" ":"))
-    local svc_name="${parts[0]}"
-    local port="${parts[1]}"
+  for advertised_port in $(printf '%s\n' "${REDIS_SENTINEL_ADVERTISED_PORT}" | tr ',' ' '); do
+    svc_name=$(printf '%s' "$advertised_port" | cut -d: -f1)
+    port=$(printf '%s' "$advertised_port" | cut -d: -f2)
     svc_name_ordinal=$(extract_obj_ordinal "$svc_name")
     if equals "$svc_name_ordinal" "$pod_name_ordinal"; then
       echo "Found matching svcName and port for podName '$pod_name', REDIS_SENTINEL_ADVERTISED_PORT: $REDIS_SENTINEL_ADVERTISED_PORT. svcName: $svc_name, port: $port."
@@ -97,7 +95,7 @@ parse_redis_sentinel_announce_addr() {
       break
     fi
   done
-  if [[ "$found" == false ]]; then
+  if [ "$found" = "false" ]; then
     echo "Error: No matching svcName and port found for podName '$pod_name', REDIS_SENTINEL_ADVERTISED_PORT: $REDIS_SENTINEL_ADVERTISED_PORT. Exiting."
     exit 1
   fi
@@ -153,12 +151,12 @@ reset_redis_sentinel_conf() {
   if [ -f $redis_sentinel_real_conf ] && ! is_empty "$REDIS_SENTINEL_ADVERTISED_PORT"; then
     temp_file=$(mktemp)
     grep "^sentinel monitor" $redis_sentinel_real_conf > "$temp_file"
-    while read -r line; do
-      if [[ $line =~ ^sentinel[[:space:]]+monitor[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+) ]]; then
-        master_name="${BASH_REMATCH[1]}"
-        master_port="${BASH_REMATCH[2]}"
-        sed -i -e "/^sentinel known-replica ${master_name} .* ${master_port}$/d" \
-        -e "/^sentinel known-sentinel ${master_name}/d" $redis_sentinel_real_conf
+    while IFS= read -r line; do
+      _mn=$(printf '%s' "$line" | sed -n 's/^sentinel[[:space:]]\{1,\}monitor[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p')
+      _mp=$(printf '%s' "$line" | sed -n 's/^sentinel[[:space:]]\{1,\}monitor[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\2/p')
+      if [ -n "$_mn" ] && [ -n "$_mp" ]; then
+        sed -i -e "/^sentinel known-replica ${_mn} .* ${_mp}$/d" \
+        -e "/^sentinel known-sentinel ${_mn}/d" $redis_sentinel_real_conf
       fi
     done < "$temp_file"
     rm -f "$temp_file"
@@ -184,7 +182,7 @@ build_redis_sentinel_conf() {
       echo "sentinel announce-ip $redis_sentinel_announce_host_value"
       echo "sentinel announce-port $redis_sentinel_announce_port_value"
     } >> $redis_sentinel_real_conf
-  elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
+  elif [ "$FIXED_POD_IP_ENABLED" = "true" ]; then
     echo "redis sentinel use the fixed pod ip $CURRENT_POD_IP:$sentinel_port to announce"
     {
       echo "sentinel announce-ip $CURRENT_POD_IP"
@@ -212,7 +210,7 @@ build_redis_sentinel_conf() {
   {
     echo "sentinel announce-ip $announce_host_value"
     echo "sentinel announce-port $announce_port_value"
-    if $enable_hostname_resolution; then
+    if [ "${enable_hostname_resolution:-false}" = "true" ]; then
       echo "sentinel resolve-hostnames yes"
       echo "sentinel announce-hostnames yes"
     fi
@@ -227,7 +225,7 @@ build_redis_sentinel_conf() {
   set_xtrace_when_ut_mode_false
   echo "aclfile /data/users.acl">> $redis_sentinel_real_conf
   echo "ignore-warnings ARM64-COW-BUG" >> $redis_sentinel_real_conf
-  if [ "$TLS_ENABLED" == "true" ]; then
+  if [ "$TLS_ENABLED" = "true" ]; then
     {
       echo "tls-cert-file ${TLS_MOUNT_PATH}/tls.crt"
       echo "tls-key-file ${TLS_MOUNT_PATH}/tls.key"

@@ -11,30 +11,26 @@ If the environment variable does not exist, an error is returned.
 Usage:
     get_pod_list_from_env "ENV_VAR_NAME"
 Result:
-    An array of pod names
+    A whitespace separated list of pod names
 Example:
     pods=$(get_pod_list_from_env "MY_POD_LIST")
 */}}
 {{- define "kblib.pods.get_pod_list_from_env" }}
 get_pod_list_from_env() {
   local env_name="${1}"
-
-  if [[ -z "${!env_name}" ]]; then
+  local pod_list_str=""
+  old_ifs="$IFS"
+  eval "pod_list_str=\${$env_name-}"
+  if [ -z "$pod_list_str" ]; then
     echo "failed to get pod list cause environment variable '$env_name' does not exist" >&2
     return 1
   fi
-
-  local pod_list_str="${!env_name}"
-  local pod_list=()
-
-  old_ifs="$IFS"
   IFS=','
   set -f
-  read -ra pod_list <<< "$pod_list_str"
+  set -- $pod_list_str
   set +f
   IFS="$old_ifs"
-
-  echo "${pod_list[@]}"
+  echo "$*"
 }
 {{- end }}
 
@@ -51,21 +47,14 @@ Example:
 {{- define "kblib.pods.min_lexicographical_order_pod" }}
 min_lexicographical_order_pod() {
   local pod_list_str="${1}"
-  local pod_list=()
-
+  local minimum_pod=""
   old_ifs="$IFS"
   IFS=','
   set -f
-  read -ra pod_list <<< "$pod_list_str"
+  set -- $pod_list_str
   set +f
   IFS="$old_ifs"
-
-  local minimum_pod="${pod_list[0]}"
-  for pod in "${pod_list[@]}"; do
-    if [[ "$pod" < "$minimum_pod" ]]; then
-      minimum_pod="$pod"
-    fi
-  done
+  minimum_pod="$(printf '%s\n' "$@" | sort | head -n 1)"
 
   echo "$minimum_pod"
 }

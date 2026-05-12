@@ -448,7 +448,7 @@ spec:
       exec:
         container: falkordb-cluster
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/{{ $falkordbClusterManageScripts }} --post-provision  > /tmp/post-provision.log 2>&1
         ## all lifecycle actions share the same env
@@ -475,7 +475,7 @@ spec:
       exec:
         container: falkordb-cluster
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/{{ $falkordbClusterManageScripts }} --pre-terminate > /tmp/pre-terminate.log 2>&1
       retryPolicy:
@@ -484,7 +484,7 @@ spec:
       exec:
         container: falkordb-cluster
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/falkordb-cluster-replica-member-leave.sh > /tmp/member-leave.log 2>&1
       retryPolicy:
@@ -493,14 +493,14 @@ spec:
       exec:
         container: falkordb-cluster
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/{{ $falkordbClusterSwitchoverScripts }}  > /tmp/switchover.log 2>&1
     memberJoin:
       exec:
         container: falkordb-cluster
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/sync-acl.sh
         targetPodSelector: Any
@@ -571,7 +571,7 @@ spec:
           preStop:
             exec:
               command:
-                - /bin/bash
+                - /bin/sh
                 - -c
                 - /scripts/falkordb-cluster-replica-pre-stop.sh
   {{- if $.Values.enableMetrics }}

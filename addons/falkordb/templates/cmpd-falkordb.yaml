@@ -337,7 +337,7 @@ spec:
       exec:
         container: falkordb
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/falkordb-register-to-sentinel.sh > /tmp/post-provision.log 2>&1
         targetPodSelector: Role
@@ -372,14 +372,14 @@ spec:
       exec:
         container: falkordb
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/falkordb-switchover.sh > /tmp/switchover.log 2>&1
     memberJoin:
       exec:
         container: falkordb
         command:
-          - /bin/bash
+          - /bin/sh
           - -c
           - /scripts/sync-acl.sh
         targetPodSelector: Any
@@ -448,7 +448,7 @@ spec:
           preStop:
             exec:
               command:
-                - /bin/bash
+                - /bin/sh
                 - -c
                 - /scripts/falkordb-pre-stop.sh
   {{- if $.Values.enableMetrics }}

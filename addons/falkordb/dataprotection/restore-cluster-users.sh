@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 set -o pipefail
 export PATH="$PATH:$DP_DATASAFED_BIN_PATH"
@@ -14,7 +14,7 @@ fi
 touch ${data_protection_file}
 cd ${DATA_DIR}
 datasafed pull "users.acl" "users.acl"
-if [ "${REBUILD_CLUSTER_INSTANCE}" == "true" ]; then
+if [ "${REBUILD_CLUSTER_INSTANCE}" = "true" ]; then
   touch rebuild.flag
 fi
 rm -rf ${data_protection_file} && sync

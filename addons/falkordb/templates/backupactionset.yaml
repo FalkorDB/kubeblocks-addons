@@ -22,7 +22,7 @@ spec:
         enabled: true
         intervalSeconds: 5
       command:
-      - bash
+      - sh
       - -c
       - |
         {{- .Files.Get "dataprotection/backup.sh" | nindent 8 }}
@@ -30,7 +30,7 @@ spec:
     prepareData:
       image: {{ include "falkordb4.image" . }}
       command:
-      - bash
+      - sh
       - -c
       - |
         {{- .Files.Get "dataprotection/switch-data-dir.sh" | nindent 8 }}
@@ -38,7 +38,7 @@ spec:
     postReady:
     - job:
         command:
-        - bash
+        - sh
         - -c
         - |
           {{- .Files.Get "dataprotection/restore-keys.sh" | nindent 10 }}
@@ -72,7 +72,7 @@ spec:
         enabled: true
         intervalSeconds: 5
       command:
-      - bash
+      - sh
       - -c
       - |
         {{- .Files.Get "dataprotection/backup.sh" | nindent 8 }}
@@ -80,14 +80,14 @@ spec:
     prepareData:
       image: {{ include "falkordb4.image" . }}
       command:
-      - bash
+      - sh
       - -c
       - |
         {{- .Files.Get "dataprotection/restore-cluster-users.sh" | nindent 8 }}
     postReady:
     - job:
         command:
-        - bash
+        - sh
         - -c
         - |
           {{- .Files.Get "dataprotection/wait-for-cluster-ready.sh" | nindent 10 }}
@@ -130,27 +130,27 @@ spec:
         enabled: true
         intervalSeconds: 5
       command:
-      - bash
+      - sh
       - -c
       - |
-        #!/bin/bash
+        #!/bin/sh
         {{- .Files.Get "dataprotection/common-scripts.sh" | nindent 8 }}
         {{- .Files.Get "dataprotection/pitr-backup.sh" | nindent 8 }}
   restore:
     prepareData:
       image: {{ include "falkordb4.image" . }}
       command:
-      - bash
+      - sh
       - -c
       - |
-        #!/bin/bash
+        #!/bin/sh
         {{- .Files.Get "dataprotection/common-scripts.sh" | nindent 8 }}
         {{- .Files.Get "dataprotection/switch-data-dir.sh" | nindent 8 }}
         {{- .Files.Get "dataprotection/pitr-restore.sh" | nindent 8 }}
     postReady:
     - job:
         command:
-        - bash
+        - sh
         - -c
         - |
           {{- .Files.Get "dataprotection/restore-keys.sh" | nindent 10 }}

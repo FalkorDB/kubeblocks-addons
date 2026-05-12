@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # This is magic for shellspec ut framework. "test" is a `test [expression]` well known as a shell command.
 # Normally test without [expression] returns false. It means that __() { :; }
@@ -23,14 +23,18 @@ load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
 acl_save_before_stop() {
   service_port=${SERVICE_PORT:-6379}
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
     acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port -a $REDIS_DEFAULT_PASSWORD acl save"
-    logging_mask_acl_save_command="${acl_save_command/$REDIS_DEFAULT_PASSWORD/********}"
+    if [ -n "${REDIS_DEFAULT_PASSWORD:-}" ]; then
+      logging_mask_acl_save_command=$(printf '%s' "$acl_save_command" | sed "s/${REDIS_DEFAULT_PASSWORD}/********/g")
+    else
+      logging_mask_acl_save_command="$acl_save_command"
+    fi
   else
     acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port acl save"
     logging_mask_acl_save_command="$acl_save_command"

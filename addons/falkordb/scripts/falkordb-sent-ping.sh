@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # This is magic for shellspec ut framework. "test" is a `test [expression]` well known as a shell command.
 # Normally test without [expression] returns false. It means that __() { :; }
@@ -23,7 +23,7 @@ load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
 check_redis_sentinel_ok() {

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # shellcheck disable=SC2207
 
@@ -23,7 +23,7 @@ load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
 redis_sentinel_conf_dir="/data/sentinel"
@@ -53,7 +53,7 @@ reset_redis_sentinel_monitor_conf() {
     sed "/sentinel failover-timeout/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
     sed "/sentinel parallel-syncs/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
     unset_xtrace_when_ut_mode_false
-    if [[ -v REDIS_SENTINEL_PASSWORD ]]; then
+    if [ -n "${REDIS_SENTINEL_PASSWORD+x}" ]; then
       sed "/sentinel auth-user/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
       sed "/sentinel auth-pass/d" $redis_sentinel_real_conf > $redis_sentinel_real_conf_bak && mv $redis_sentinel_real_conf_bak $redis_sentinel_real_conf
     fi
@@ -82,9 +82,8 @@ recover_registered_redis_servers() {
   local max_retries=5
   local retry_count=0
   local success=false
-  # shellcheck disable=SC2207
-  sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
-  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+  sentinel_pod_fqdn_list=$(printf '%s\n' "$SENTINEL_POD_FQDN_LIST" | tr ',' '|')
+  for sentinel_pod_fqdn in $(printf '%s' "$sentinel_pod_fqdn_list" | tr '|' '\n'); do
     while [ $retry_count -lt $max_retries ]; do
       redis_sentinel_get_masters "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT"
       if [ -n "$temp_output" ]; then
@@ -93,13 +92,13 @@ recover_registered_redis_servers() {
           case "$line" in
             flags)
               read -r master_flags
-              if [[ "$master_flags" == *"disconnected"* ]]; then
-                  disconnected=true
-              fi
+            case "$master_flags" in *disconnected*) disconnected=true ;; esac
               ;;
           esac
           master_flags=""
-        done <<< "$temp_output"
+        done << _RECOUT_EOF_
+$temp_output
+_RECOUT_EOF_
         if [ "$disconnected" = true ]; then
           retry_count=$((retry_count + 1))
           echo "one or more masters are disconnected. $retry_count/$max_retries failed. retrying..."
@@ -120,7 +119,7 @@ recover_registered_redis_servers() {
       echo "sentinel is either starting up or encountering an issue."
     fi
 
-    if [[ -n "$temp_output" ]]; then
+    if [ -n "$temp_output" ]; then
       while read -r line; do
         case "$line" in
           name)
@@ -133,14 +132,16 @@ recover_registered_redis_servers() {
             read -r pre_master_port
             ;;
         esac
-      done <<< "$temp_output"
+      done << _PRETMP_EOF_
+$temp_output
+_PRETMP_EOF_
 
-      if [[ -z "$reference_master_name" && -z "$reference_master_ip" && -z "$reference_master_port" ]]; then
+      if [ -z "$reference_master_name" ] && [ -z "$reference_master_ip" ] && [ -z "$reference_master_port" ]; then
         reference_master_name="$master_name"
         reference_master_ip="$master_ip"
         reference_master_port="$master_port"
       else
-        if [[ "$pre_master_name" != "$reference_master_name" || "$pre_master_ip" != "$reference_master_ip" || "$pre_master_port" != "$reference_master_port" ]]; then
+        if [ "$pre_master_name" != "$reference_master_name" ] || [ "$pre_master_ip" != "$reference_master_ip" ] || [ "$pre_master_port" != "$reference_master_port" ]; then
           echo "the masters of the sentinels are different, configuration error."
           return 1
         fi
@@ -182,9 +183,9 @@ recover_registered_redis_servers() {
         ;;
     esac
 
-    if [[ -n "$master_name" && -n "$master_ip" && -n "$master_port" && \
-          -n "$master_down_after_milliseconds" && -n "$master_failover_timeout" && \
-          -n "$master_parallel_syncs" && -n "$master_quorum" ]]; then
+    if [ -n "$master_name" ] && [ -n "$master_ip" ] && [ -n "$master_port" ] && \
+       [ -n "$master_down_after_milliseconds" ] && [ -n "$master_failover_timeout" ] && \
+       [ -n "$master_parallel_syncs" ] && [ -n "$master_quorum" ]; then
       echo "master-name: $master_name, master-ip: $master_ip, master-port: $master_port, \
       down-after-milliseconds: $master_down_after_milliseconds, \
       failover-timeout: $master_failover_timeout, \
@@ -203,8 +204,9 @@ recover_registered_redis_servers() {
         return 1
       fi
       var_name="REDIS_SENTINEL_PASSWORD_${comp_name_upper}"
-      if [[ -n "${!var_name}" ]]; then
-        auth_pass="${!var_name}"
+      eval "_var_val=\$$var_name"
+      if [ -n "$_var_val" ]; then
+        auth_pass="$_var_val"
       else
         auth_pass="$REDIS_SENTINEL_PASSWORD"
       fi
@@ -223,7 +225,9 @@ recover_registered_redis_servers() {
       master_name="" master_ip="" master_port="" master_down_after_milliseconds=""
       master_quorum="" master_failover_timeout="" master_parallel_syncs=""
     fi
-  done <<< "$output"
+  done << _RECFINAL_EOF_
+$output
+_RECFINAL_EOF_
 }
 
 

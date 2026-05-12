@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # This is magic for shellspec ut framework. "test" is a `test [expression]` well known as a shell command.
 # Normally test without [expression] returns false. It means that __() { :; }
@@ -20,29 +20,25 @@ test || __() {
   set -ex;
 }
 
-declare -A ORIGINAL_PRIORITIES
+# Temp file used as a key->value store for ORIGINAL_PRIORITIES (pod_fqdn TAB priority)
+_priorities_file=$(mktemp)
 redis_service_port=${SERVICE_PORT:-6379}
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
 check_environment_exist() {
-  local required_vars=(
-    "SENTINEL_POD_FQDN_LIST"
-    "REDIS_POD_FQDN_LIST"
-    "REDIS_COMPONENT_NAME"
-  )
-
-  if [[ ${COMPONENT_REPLICAS} -lt 2 ]]; then
+  if [ "${COMPONENT_REPLICAS:-0}" -lt 2 ]; then
     exit 0
   fi
 
-  for var in "${required_vars[@]}"; do
-    if is_empty "${!var}"; then
+  for var in SENTINEL_POD_FQDN_LIST REDIS_POD_FQDN_LIST REDIS_COMPONENT_NAME; do
+    eval "_chk_val=\$$var"
+    if is_empty "$_chk_val"; then
       echo "Error: Required environment variable $var is not set." >&2
       return 1
     fi
@@ -59,7 +55,7 @@ check_redis_role() {
   local port=$2
   unset_xtrace_when_ut_mode_false
   local role_info
-  if [[ -z "$REDIS_DEFAULT_PASSWORD" ]]; then
+  if [ -z "$REDIS_DEFAULT_PASSWORD" ]; then
     role_info=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" info replication)
   else
     role_info=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$REDIS_DEFAULT_PASSWORD" info replication)
@@ -67,7 +63,7 @@ check_redis_role() {
   status=$?
   set_xtrace_when_ut_mode_false
 
-  if [[ $status -ne 0 ]]; then
+  if [ $status -ne 0 ]; then
     echo "Failed to get role info from $host" >&2
     return 1
   fi
@@ -85,12 +81,10 @@ check_redis_role() {
 check_redis_kernel_status() {
   local role
   local current_master=""
-  local -a redis_pod_fqdn_list
-  IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
-  for redis_pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
+  for redis_pod_fqdn in $(printf '%s\n' "${REDIS_POD_FQDN_LIST}" | tr ',' ' '); do
     role=$(check_redis_role "$redis_pod_fqdn" "$redis_service_port") || continue
-    if [[ "$role" == "primary" ]]; then
-      if [[ -n "$current_master" ]]; then
+    if [ "$role" = "primary" ]; then
+      if [ -n "$current_master" ]; then
         echo "Error: Multiple primaries detected" >&2
         return 1
       fi
@@ -98,7 +92,7 @@ check_redis_kernel_status() {
     fi
   done
 
-  if [[ -z "$current_master" ]]; then
+  if [ -z "$current_master" ]; then
     echo "Error: No primary found" >&2
     return 1
   fi
@@ -114,18 +108,20 @@ check_switchover_result() {
   local wait_interval=5
   local elapsed=0
 
-  while [[ $elapsed -lt $max_wait ]]; do
+  while [ $elapsed -lt $max_wait ]; do
     local current_master
     if current_master=$(check_redis_kernel_status); then
       # if expected_master is specified, check if it is achieved
       if ! is_empty "$expected_master"; then
-        if [[ "$current_master" = "$expected_master"* ]]; then
-          echo "Switchover successful: $expected_master is now master"
-          return 0
-        fi
+        case "$current_master" in
+          "$expected_master"*)
+            echo "Switchover successful: $expected_master is now master"
+            return 0
+            ;;
+        esac
       # if initial_master is specified, check if it is switched to a different node
       elif ! is_empty "$initial_master"; then
-        if [[ "$current_master" != "$initial_master" ]]; then
+        if [ "$current_master" != "$initial_master" ]; then
           echo "Switchover successful: new master is $current_master"
           return 0
         fi
@@ -159,7 +155,7 @@ check_connectivity() {
     result=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" PING)
   fi
   set_xtrace_when_ut_mode_false
-  if [[ "$result" == "PONG" ]]; then
+  if [ "$result" = "PONG" ]; then
     echo "$host is reachable on port $port."
     return 0
   else
@@ -185,7 +181,7 @@ execute_sub_command() {
   set_xtrace_when_ut_mode_false
 
   echo "execute_sub_command output: $output"
-  if [[ $status -ne 0 ]] || [[ "$output" != "OK" ]]; then
+  if [ $status -ne 0 ] || [ "$output" != "OK" ]; then
     echo "Command failed with status $status or output not OK." >&2
     return 1
   fi
@@ -209,12 +205,12 @@ redis_config_get() {
   local status=$?
   set_xtrace_when_ut_mode_false
 
-  if [[ $status -ne 0 ]]; then
+  if [ $status -ne 0 ]; then
     echo "Command failed with status $status." >&2
     return 1
   fi
 
-  if [[ -z "$output" ]]; then
+  if [ -z "$output" ]; then
     echo "Command returned no output." >&2
     return 1
   fi
@@ -227,14 +223,12 @@ execute_sentinel_failover() {
   local master_name=$1
   local success=false
 
-  if [[ -z "$master_name" ]]; then
+  if [ -z "$master_name" ]; then
     master_name=$REDIS_COMPONENT_NAME
   fi
 
-  local -a sentinel_pod_fqdn_list
-  IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
   unset_xtrace_when_ut_mode_false
-  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+  for sentinel_pod_fqdn in $(printf '%s\n' "${SENTINEL_POD_FQDN_LIST}" | tr ',' ' '); do
     if call_func_with_retry 3 5 execute_sub_command "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL FAILOVER $master_name"; then
       echo "Sentinel failover started with $sentinel_pod_fqdn"
       success=true
@@ -243,7 +237,7 @@ execute_sentinel_failover() {
   done
   set_xtrace_when_ut_mode_false
 
-  if [[ "$success" == false ]]; then
+  if [ "$success" = "false" ]; then
     echo "All Sentinel failover attempts failed." >&2
     return 1
   fi
@@ -254,9 +248,7 @@ execute_sentinel_failover() {
 set_redis_priorities() {
   local candidate_fqdn="$1"
 
-  local -a redis_pod_fqdn_list
-  IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
-  for redis_pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
+  for redis_pod_fqdn in $(printf '%s\n' "${REDIS_POD_FQDN_LIST}" | tr ',' ' '); do
     call_func_with_retry 3 5 check_connectivity "$redis_pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" || return 1
 
     # Get original priority
@@ -269,15 +261,18 @@ set_redis_priorities() {
       return 1
     fi
 
-    # Save original priority to global variable
-    ORIGINAL_PRIORITIES[$redis_pod_fqdn]=$original_priority
+    # Save original priority to temp file (tab-separated: fqdn TAB priority)
+    printf '%s\t%s\n' "$redis_pod_fqdn" "$original_priority" >> "$_priorities_file"
 
     local redis_set_cmd
-    if [[ "$redis_pod_fqdn" = "$candidate_fqdn"* ]]; then
-      redis_set_cmd="CONFIG SET replica-priority 1"
-    else
-      redis_set_cmd="CONFIG SET replica-priority 100"
-    fi
+    case "$redis_pod_fqdn" in
+      "$candidate_fqdn"*)
+        redis_set_cmd="CONFIG SET replica-priority 1"
+        ;;
+      *)
+        redis_set_cmd="CONFIG SET replica-priority 100"
+        ;;
+    esac
 
     call_func_with_retry 3 5 execute_sub_command "$redis_pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "$redis_set_cmd" || return 1
   done
@@ -286,15 +281,13 @@ set_redis_priorities() {
 
 # recover all redis replica-priority
 recover_redis_priorities() {
-  local -a redis_pod_fqdn_list
-  IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
-
   echo "Recovering all FalkorDB replica-priority..."
-  for redis_pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
-    local redis_set_recover_cmd="CONFIG SET replica-priority ${ORIGINAL_PRIORITIES[$redis_pod_fqdn]}"
-    call_func_with_retry 3 5 execute_sub_command "$redis_pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "$redis_set_recover_cmd" || return 1
-  done
+  while IFS="	" read -r _fqdn _prio; do
+    local redis_set_recover_cmd="CONFIG SET replica-priority $_prio"
+    call_func_with_retry 3 5 execute_sub_command "$_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "$redis_set_recover_cmd" || return 1
+  done < "$_priorities_file"
   echo "All FalkorDB config set replica-priority recovered."
+  rm -f "$_priorities_file"
   return 0
 }
 
@@ -302,7 +295,7 @@ switchover_with_candidate() {
   # check the role of candidate before switchover
   local candidate_role
   candidate_role=$(check_redis_role "$KB_SWITCHOVER_CANDIDATE_FQDN" "$redis_service_port")
-  if [[ "$candidate_role" != "secondary" ]]; then
+  if [ "$candidate_role" != "secondary" ]; then
     echo "Error: Candidate node $KB_SWITCHOVER_CANDIDATE_FQDN is not in secondary role" >&2
     return 1
   fi

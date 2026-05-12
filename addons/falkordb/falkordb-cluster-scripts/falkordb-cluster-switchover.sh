@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # This is magic for shellspec ut framework. "test" is a `test [expression]` well known as a shell command.
 # Normally test without [expression] returns false. It means that __() { :; }
@@ -26,26 +26,23 @@ load_redis_cluster_common_utils() {
   # and are mounted to the same path which defined in the cmpd.spec.scripts
   kblib_common_library_file="/scripts/common.sh"
   redis_cluster_common_library_file="/scripts/falkordb-cluster-common.sh"
-  source "${kblib_common_library_file}"
-  source "${redis_cluster_common_library_file}"
+  . "${kblib_common_library_file}"
+  . "${redis_cluster_common_library_file}"
 }
 
 check_environment_exist() {
-  local required_vars=(
-    "CURRENT_SHARD_POD_NAME_LIST"
-    "CURRENT_SHARD_POD_FQDN_LIST"
-  )
-
-  if [[ ${COMPONENT_REPLICAS} -lt 2 ]]; then
+  if [ "${COMPONENT_REPLICAS:-0}" -lt 2 ]; then
     exit 0
   fi
 
-  for var in "${required_vars[@]}"; do
-    if is_empty "${!var}"; then
-      echo "Error: Required environment variable $var is not set." >&2
-      return 1
-    fi
-  done
+  if is_empty "$CURRENT_SHARD_POD_NAME_LIST"; then
+    echo "Error: Required environment variable CURRENT_SHARD_POD_NAME_LIST is not set." >&2
+    return 1
+  fi
+  if is_empty "$CURRENT_SHARD_POD_FQDN_LIST"; then
+    echo "Error: Required environment variable CURRENT_SHARD_POD_FQDN_LIST is not set." >&2
+    return 1
+  fi
 
   if [ "$KB_SWITCHOVER_ROLE" != "primary" ]; then
     echo "switchover not triggered for primary, nothing to do, exit 0"
@@ -173,7 +170,7 @@ do_switchover() {
       return 0
     fi
     sleep 2
-    ((attempt++))
+    attempt=$((attempt + 1))
   done
 
   echo "Error: Switchover verification timeout" >&2
@@ -198,9 +195,7 @@ switchover_without_candidate() {
 
   # get the one of secondary pod of current shard
   # TODO: get the most suitable secondary pod which has the lowest latency
-  IFS=',' read -ra PODS <<< "$CURRENT_SHARD_POD_NAME_LIST"
-  for pod_name in "${PODS[@]}"; do
-    local pod_fqdn
+  for pod_name in $(printf '%s\n' "$CURRENT_SHARD_POD_NAME_LIST" | tr ',' ' '); do
     pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$CURRENT_SHARD_POD_FQDN_LIST" "$pod_name") || {
       echo "Failed to get FQDN for pod: $pod_name" >&2
       return 1

@@ -31,7 +31,7 @@ Example:
 is_empty() {
   local string="$1"
 
-  if [[ -z "$string" ]]; then
+  if [ -z "$string" ]; then
     return 0
   else
     return 1
@@ -58,7 +58,7 @@ equals() {
   local string1="$1"
   local string2="$2"
 
-  if [[ "$string1" == "$string2" ]]; then
+  if [ "$string1" = "$string2" ]; then
     return 0
   else
     return 1
@@ -72,30 +72,28 @@ This function is used to split a string into an array of strings.
 Usage:
     `split "string" "separator"`
 Result:
-    Array of strings
+    Whitespace separated list of strings
 Note:
     If no separator is provided, it defaults to a comma.
 Example:
-    result=($(split "hello,world" ","))
-    echo "${result[@]}"
+    result=$(split "hello,world" ",")
+    echo "$result"
 */}}
 {{- define "kblib.strings.split" }}
 split() {
   local string="$1"
   local separator="${2:-,}"
-  local array=()
 
   old_ifs="$IFS"
   IFS="$separator"
   set -f
-  read -ra array <<< "$string"
+  set -- $string
   set +f
   IFS="$old_ifs"
 
-  echo "${array[@]}"
+  echo "$*"
 }
 {{- end }}
-
 
 {{/*
 This function checks if a string contains a substring.
@@ -116,14 +114,12 @@ contains() {
   local string="$1"
   local substring="$2"
 
-  if [[ "$string" == *"$substring"* ]]; then
-    return 0
-  else
-    return 1
-  fi
+  case "$string" in
+    *"$substring"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 {{- end }}
-
 
 {{/*
 This function checks if a string starts with a prefix.
@@ -144,11 +140,10 @@ has_prefix() {
   local string="$1"
   local prefix="$2"
 
-  if [[ "$string" == "$prefix"* ]]; then
-    return 0
-  else
-    return 1
-  fi
+  case "$string" in
+    "$prefix"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 {{- end }}
 
@@ -171,11 +166,10 @@ has_suffix() {
   local string="$1"
   local suffix="$2"
 
-  if [[ "$string" == *"$suffix" ]]; then
-    return 0
-  else
-    return 1
-  fi
+  case "$string" in
+    *"$suffix") return 0 ;;
+    *) return 1 ;;
+  esac
 }
 {{- end }}
 
@@ -195,28 +189,38 @@ replace() {
   local string="$1"
   local old="$2"
   local new="$3"
-  local n=$4
+  local n="$4"
 
-  if [[ -z "$old" ]]; then
+  if [ -z "$old" ]; then
     echo "$string"
     return
   fi
 
   local count=0
   local result=""
+  local prefix=""
 
-  while [[ "$string" == *"$old"* && (n -lt 0 || count -lt n) ]]; do
-    local index=${string%%$old*}
-    result+="${index}${new}"
-    string="${string#*$old}"
-    ((count++))
+  while :; do
+    case "$string" in
+      *"$old"*)
+        if [ "$n" -ge 0 ] && [ "$count" -ge "$n" ]; then
+          break
+        fi
+        prefix=${string%%"$old"*}
+        result="${result}${prefix}${new}"
+        string=${string#*"$old"}
+        count=$((count + 1))
+        ;;
+      *)
+        break
+        ;;
+    esac
   done
 
-  result+="$string"
+  result="${result}${string}"
   echo "$result"
 }
 {{- end }}
-
 
 {{/*
 This function replaces all occurrences of a substring with a replacement string.
@@ -235,12 +239,7 @@ replace_all() {
   local old="$2"
   local new="$3"
 
-  if [[ -z "$old" ]]; then
-    echo "$string"
-    return
-  fi
-
-  echo "${string//$old/$new}"
+  replace "$string" "$old" "$new" -1
 }
 {{- end }}
 
@@ -285,9 +284,9 @@ trim_prefix() {
   local string="$1"
   local prefix="$2"
 
-  if [[ "$string" == "$prefix"* ]]; then
-    string="${string#"$prefix"}"
-  fi
+  case "$string" in
+    "$prefix"*) string="${string#"$prefix"}" ;;
+  esac
 
   echo "$string"
 }
@@ -310,9 +309,9 @@ trim_suffix() {
   local string="$1"
   local suffix="$2"
 
-  if [[ "$string" == *"$suffix" ]]; then
-    string="${string%"$suffix"}"
-  fi
+  case "$string" in
+    *"$suffix") string="${string%"$suffix"}" ;;
+  esac
 
   echo "$string"
 }

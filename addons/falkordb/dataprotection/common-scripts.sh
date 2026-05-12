@@ -1,20 +1,20 @@
-#!/bin/bash
+#!/bin/sh
 # log info file
-function DP_log() {
+DP_log() {
   msg=$1
-  local curr_date=$(date -u '+%Y-%m-%d %H:%M:%S')
+  curr_date=$(date -u '+%Y-%m-%d %H:%M:%S')
   echo "${curr_date} INFO: $msg"
 }
 
 # log error info
-function DP_error_log() {
+DP_error_log() {
   msg=$1
-  local curr_date=$(date -u '+%Y-%m-%d %H:%M:%S')
+  curr_date=$(date -u '+%Y-%m-%d %H:%M:%S')
   echo "${curr_date} ERROR: $msg"
 }
 
 # Get file names without extensions based on the incoming file path
-function DP_get_file_name_without_ext() {
+DP_get_file_name_without_ext() {
   local fileName=$1
   local file_without_ext=${fileName%.*}
   echo $(basename ${file_without_ext})
@@ -23,7 +23,7 @@ function DP_get_file_name_without_ext() {
 # Save backup status info file for syncing progress.
 # timeFormat: %Y-%m-%dT%H:%M:%SZ
 # receive timestamp
-function DP_save_backup_status_info() {
+DP_save_backup_status_info() {
   local totalSize=$1
   local startTime=$(date -u -d @$2 +%Y-%m-%dT%H:%M:%SZ)
   local stopTime=$(date -u -d @$3 +%Y-%m-%dT%H:%M:%SZ)
@@ -42,25 +42,28 @@ function DP_save_backup_status_info() {
   fi
 }
 
-function DP_pull_directory() {
+DP_pull_directory() {
   local dir_path="$1"
   local local_path="$2"
-
+  local _tmp_list
+  _tmp_list=$(mktemp)
+  datasafed list -r -f "$dir_path" > "$_tmp_list"
   while IFS= read -r filename; do
       datasafed pull "$filename" "${local_path}/${filename#*/}"
-  done < <(datasafed list -r -f "$dir_path")
+  done < "$_tmp_list"
+  rm -f "$_tmp_list"
 }
 
 # Clean up expired logfiles.
 # Default interval is 60s
 # Default rootPath is /
-function DP_purge_expired_files() {
+DP_purge_expired_files() {
   local currentUnix="${1:?missing current unix}"
   local last_purge_time="${2:?missing last_purge_time}"
   local root_path=${3:-"/"}
   local interval_seconds=${4:-60}
   local diff_time=$((${currentUnix} - ${last_purge_time}))
-  if [[ -z ${DP_TTL_SECONDS} || ${diff_time} -lt ${interval_seconds} ]]; then
+  if [ -z "${DP_TTL_SECONDS}" ] || [ "${diff_time}" -lt "${interval_seconds}" ]; then
     return
   fi
   expiredUnix=$((${currentUnix} - ${DP_TTL_SECONDS}))

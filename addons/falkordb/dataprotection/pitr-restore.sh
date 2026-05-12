@@ -1,20 +1,23 @@
+#!/bin/sh
 export PATH="$PATH:$DP_DATASAFED_BIN_PATH"
 export DATASAFED_BACKEND_BASE_PATH="$DP_BACKUP_BASE_PATH"
 
-function truncate_aof() {
+truncate_aof() {
   local aof_file=$(find "$DATA_DIR" -type f -name "*.aof" | sort -r | head -n 1)
   local temp_file="${aof_file}.tmp"
   local found=false
   local restore_time=$(date -d "$DP_RESTORE_TIME" +%s)
   touch "$temp_file"
   while IFS= read -r line; do
-    if [[ "$line" == \#TS:* ]]; then
+    case "$line" in
+    \#TS:*)
       local timestamp=$(echo ${line#\#TS:} | tr -d '\r')
-      if ((${timestamp} > ${restore_time})); then
+      if [ "${timestamp}" -gt "${restore_time}" ]; then
         found=true
         break
       fi
-    fi
+      ;;
+    esac
     echo "$line" >>"$temp_file"
   done <"$aof_file"
 
@@ -26,7 +29,7 @@ function truncate_aof() {
   fi
 }
 
-function get_files_to_restore() {
+get_files_to_restore() {
   local restore_time=$(date -d "$DP_RESTORE_TIME" +%s)
 
   local filename=$(datasafed list / | sort -Vr | awk -v rt="$restore_time" -F '.' '$1 <= rt {print; exit}')

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # shellcheck disable=SC2207
 
@@ -23,14 +23,22 @@ load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
-declare -g redis_default_service_port=${SENTINEL_SERVICE_PORT:-26379}
-declare -A master_slave_counts
-declare -g sentinel_leave_member_name
-declare -g sentinel_leave_member_fqdn
-declare -a sentinel_pod_list
+redis_default_service_port=${SENTINEL_SERVICE_PORT:-26379}
+# temp file used as a map for master sentinel counts
+_msl_file=""
+_msl_get() { awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$_msl_file"; }
+_msl_set() {
+  _msltmp=$(mktemp)
+  { grep -v "^${1}$(printf '\t')" "$_msl_file" 2>/dev/null || true; printf '%s\t%s\n' "$1" "$2"; } > "$_msltmp"
+  mv "$_msltmp" "$_msl_file"
+}
+_msl_init() { _msl_file=$(mktemp); }
+sentinel_leave_member_name=""
+sentinel_leave_member_fqdn=""
+sentinel_pod_list=""
 
 redis_sentinel_member_get() {
   if [ -z "$KB_LEAVE_MEMBER_POD_FQDN" ]; then
@@ -50,7 +58,7 @@ redis_sentinel_member_get() {
 
   sentinel_leave_member_name=$KB_LEAVE_MEMBER_POD_NAME
   sentinel_leave_member_fqdn=$KB_LEAVE_MEMBER_POD_FQDN
-  sentinel_pod_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
+  sentinel_pod_list=$(printf '%s\n' "$SENTINEL_POD_FQDN_LIST" | tr ',' '|')
 }
 
 temp_output=""
@@ -72,7 +80,7 @@ redis_sentinel_remove_monitor() {
   while [ $retry_count -lt $max_retries ]; do
     redis_sentinel_get_masters "$sentinel_leave_member_fqdn" "$redis_default_service_port"
     if [ $? -eq 0 ]; then
-      if [[ -z "$temp_output" ]]; then
+      if [ -z "$temp_output" ]; then
         echo "no master nodes found."
         success=true
         break
@@ -82,13 +90,13 @@ redis_sentinel_remove_monitor() {
         case "$line" in
           flags)
             read -r master_flags
-            if [[ "$master_flags" == *"disconnected"* ]]; then
-              disconnected=true
-            fi
+            case "$master_flags" in *disconnected*) disconnected=true ;; esac
             ;;
         esac
         master_flags=""
-      done <<< "$temp_output"
+      done << _MSTOUT_EOF_
+$temp_output
+_MSTOUT_EOF_
       if [ "$disconnected" = true ]; then
         retry_count=$((retry_count + 1))
         echo "one or more masters are disconnected. $retry_count/$max_retries failed. retrying..."
@@ -109,7 +117,7 @@ redis_sentinel_remove_monitor() {
   else
     echo "sentinel connect failed after $max_retries retries."
   fi
-  if [[ -n "$output" ]]; then
+  if [ -n "$output" ]; then
     local master_name
     while read -r line; do
       case "$line" in
@@ -117,7 +125,7 @@ redis_sentinel_remove_monitor() {
           read -r master_name
           ;;
       esac
-      if [[ -n "$master_name" ]]; then
+      if [ -n "$master_name" ]; then
         echo "master name: $master_name"
         if [ -z "$SENTINEL_PASSWORD" ]; then
           redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_leave_member_fqdn" -p "$redis_default_service_port" SENTINEL REMOVE "$master_name"
@@ -127,14 +135,16 @@ redis_sentinel_remove_monitor() {
         echo "sentinel no longer monitors $master_name"
         master_name=""
       fi
-    done <<< "$output"
+    done << _RMOUT_EOF_
+$output
+_RMOUT_EOF_
   else
     echo "unable to connect to redis sentinel, or no master nodes found."
   fi
 }
 
 redis_sentinel_reset_all() {
-  for sentinel_pod in "${sentinel_pod_list[@]}"; do
+  for sentinel_pod in $(printf '%s' "$sentinel_pod_list" | tr '|' '\n'); do
     host=$(echo "$sentinel_pod" | cut -d ':' -f 1)
     sentinel_name="${host%%.*}"
     # TODO: check if there is an ongoing HA switchover Before executing the reset command
@@ -176,7 +186,8 @@ redis_sentinel_reset_all() {
 
 #Check that all the Sentinels agree about the number of Sentinels currently active
 check_all_sentinel_agreement() {
-  for sentinel_pod in "${sentinel_pod_list[@]}"; do
+  _msl_init
+  for sentinel_pod in $(printf '%s' "$sentinel_pod_list" | tr '|' '\n'); do
     host=$(echo "$sentinel_pod" | cut -d ':' -f 1)
     port=$(echo "$sentinel_pod" | cut -d ':' -f 2)
     sentinel_name="${host%%.*}"
@@ -198,13 +209,13 @@ check_all_sentinel_agreement() {
             case "$line" in
               flags)
                 read -r master_flags
-                if [[ "$master_flags" == *"disconnected"* ]]; then
-                  disconnected=true
-                fi
-                ;;
+            case "$master_flags" in *disconnected*) disconnected=true ;; esac
+              ;;
             esac
             master_flags=""
-          done <<< "$temp_output"
+          done << _CSAOUT_EOF_
+$temp_output
+_CSAOUT_EOF_
           if [ "$disconnected" = true ]; then
             retry_count=$((retry_count + 1))
             echo "one or more masters are disconnected. $retry_count/$max_retries failed. retrying..."
@@ -225,7 +236,7 @@ check_all_sentinel_agreement() {
       else
         echo "sentinel connect failed after $max_retries retries, it is either faulty or has already been shut down."
       fi
-      if [[ -n "$output" ]]; then
+      if [ -n "$output" ]; then
         local master_name
         local num_other_sentinels
         while read -r line; do
@@ -237,12 +248,13 @@ check_all_sentinel_agreement() {
               read -r num_other_sentinels
               ;;
           esac
-          if [[ -n "$master_name" && -n "$num_other_sentinels" ]]; then
+          if [ -n "$master_name" ] && [ -n "$num_other_sentinels" ]; then
             echo "master name: $master_name, num-other-sentinels: $num_other_sentinels"
-            if [[ -z "${master_slave_counts[$master_name]}" ]]; then
-              master_slave_counts[$master_name]=$num_other_sentinels
+            _existing=$(_msl_get "$master_name")
+            if [ -z "$_existing" ]; then
+              _msl_set "$master_name" "$num_other_sentinels"
             else
-              if [[ "${master_slave_counts[$master_name]}" -ne "$num_other_sentinels" ]]; then
+              if [ "$_existing" -ne "$num_other_sentinels" ]; then
                 echo "The number of slaves does not match the previous count; reset failed."
                 exit 1
               fi
@@ -250,7 +262,9 @@ check_all_sentinel_agreement() {
             master_name=""
             num_other_sentinels=""
           fi
-        done <<< "$output"
+        done << _CSAOUT2_EOF_
+$output
+_CSAOUT2_EOF_
       else
         echo "unable to connect to redis sentinel, or no master nodes found."
       fi

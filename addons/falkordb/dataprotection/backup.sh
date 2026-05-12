@@ -1,9 +1,9 @@
-#!/bin/bash
+#!/bin/sh
 set -o pipefail
 
 # if the script exits with a non-zero exit code, touch a file to indicate that the backup failed,
 # the sync progress container will check this file and exit if it exists
-function handle_exit() {
+handle_exit() {
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo "failed with exit code $exit_code"
@@ -39,7 +39,7 @@ while true; do
 done
 echo "INFO: start to save data file..."
 cd ${DATA_DIR}
-if [ "${MODE}" == "cluster" ]; then
+if [ "${MODE}" = "cluster" ]; then
   # only save rdb file for redis cluster.
   datasafed push -z zstd-fastest ./dump.rdb "${DP_BACKUP_NAME}.rdb.zst"
   datasafed push ./nodes.conf "nodes.conf"

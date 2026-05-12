@@ -14,7 +14,7 @@ Example:
 */}}
 {{- define "kblib.ututils.set_xtrace_when_ut_mode_false" }}
 set_xtrace_when_ut_mode_false() {
-  if [ "false" == "$ut_mode" ]; then
+  if [ "false" = "$ut_mode" ]; then
     set -x
   fi
 }
@@ -33,7 +33,7 @@ Example:
 */}}
 {{- define "kblib.ututils.unset_xtrace_when_ut_mode_false" }}
 unset_xtrace_when_ut_mode_false() {
-  if [ "false" == "$ut_mode" ]; then
+  if [ "false" = "$ut_mode" ]; then
     set +x
   fi
 }
@@ -52,7 +52,7 @@ Example:
 {{- define "kblib.ututils.sleep_when_ut_mode_false" }}
 sleep_when_ut_mode_false(){
   time="$1"
-  if [ "false" == "$ut_mode" ]; then
+  if [ "false" = "$ut_mode" ]; then
     sleep "$time"
   fi
 }

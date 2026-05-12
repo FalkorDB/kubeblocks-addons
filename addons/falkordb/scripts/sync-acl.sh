@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 service_port=${SERVICE_PORT:-6379}
 redis_base_cmd="redis-cli $REDIS_CLI_TLS_CMD -p $service_port -a $REDIS_DEFAULT_PASSWORD"
 if [ -z "$REDIS_DEFAULT_PASSWORD" ]; then
@@ -8,8 +8,8 @@ fi
 is_ok=false
 acl_list=""
 # 1. get acl list from other pods
-for pod_fqdn in $(echo "$REDIS_POD_FQDN_LIST" | tr ',' '\n'); do
-    if [[ "$pod_fqdn" == "$KB_JOIN_MEMBER_POD_FQDN" ]]; then
+for pod_fqdn in $(echo "$REDIS_POD_FQDN_LIST" | tr ',' ' '); do
+    if [ "$pod_fqdn" = "$KB_JOIN_MEMBER_POD_FQDN" ]; then
         continue
     fi
     acl_list=$($redis_base_cmd -h "$pod_fqdn" ACL LIST)
@@ -19,7 +19,7 @@ for pod_fqdn in $(echo "$REDIS_POD_FQDN_LIST" | tr ',' '\n'); do
     fi
 done
 
-if [ "$is_ok" = false ]; then
+if [ "$is_ok" = "false" ]; then
     echo "Failed to get ACL LIST from other pods" >&2
     exit 1
 fi
@@ -32,20 +32,21 @@ fi
 set -e
 # 2. apply acl list to current pod
 while IFS= read -r user_rule; do
-    [[ -z "$user_rule" ]] && continue
+    [ -z "$user_rule" ] && continue
 
-    if [[ "$user_rule" =~ ^user[[:space:]]+([^[:space:]]+) ]]; then
-        username="${BASH_REMATCH[1]}"
-    else
+    username=$(printf '%s' "$user_rule" | sed -n 's/^user[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p')
+    if [ -z "$username" ]; then
       # skip invalid user rule
       continue
     fi
 
-    if [[ "$username" == "default" ]]; then
+    if [ "$username" = "default" ]; then
         continue
     fi
     rule_part="${user_rule#user $username }"
     $redis_base_cmd -h $KB_JOIN_MEMBER_POD_FQDN ACL SETUSER "$username" $rule_part >&2
-done <<< "$acl_list"
+done << _ACL_LIST_EOF_
+$acl_list
+_ACL_LIST_EOF_
 
 $redis_base_cmd -h $KB_JOIN_MEMBER_POD_FQDN ACL save >&2

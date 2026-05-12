@@ -17,14 +17,20 @@ Example:
 get_target_pod_fqdn_from_pod_fqdn_vars() {
   local pod_fqdns="$1"
   local target_pod_name="$2"
+  local old_ifs="$IFS"
+  IFS=','
+  set -f
+  set -- $pod_fqdns
+  set +f
+  IFS="$old_ifs"
 
-  IFS=',' read -ra pod_fqdn_array <<< "$pod_fqdns"
-
-  for pod_fqdn in "${pod_fqdn_array[@]}"; do
-    if [[ "$pod_fqdn" == "$target_pod_name."* ]]; then
+  for pod_fqdn in "$@"; do
+    case "$pod_fqdn" in
+    "$target_pod_name".*)
       echo "$pod_fqdn"
       return 0
-    fi
+      ;;
+    esac
   done
 
   echo ""

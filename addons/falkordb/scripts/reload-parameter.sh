@@ -1,9 +1,11 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 paramName=""
 paramValue=""
-for val in $(echo "${1}" | tr ' ' '\n'); do
+_first_arg="${1:-}"
+shift 1 2>/dev/null || true
+for val in $(printf '%s\n' "$_first_arg" | tr ' ' '\n'); do
   if [ -z "${paramName}" ]; then
     paramName="${val}"
   elif [ -z "${paramValue}" ]; then
@@ -13,10 +15,12 @@ for val in $(echo "${1}" | tr ' ' '\n'); do
   fi
 done
 
-if  [ -z "${paramValue}" ]; then
-  paramValue="${@:2}"
+if [ -z "${paramValue}" ]; then
+  paramValue="$*"
 else
-  paramValue="${paramValue} ${@:2}"
+  if [ $# -gt 0 ]; then
+    paramValue="${paramValue} $*"
+  fi
 fi
 if [ "$paramValue" = "\"\"" ]; then
   paramValue=""

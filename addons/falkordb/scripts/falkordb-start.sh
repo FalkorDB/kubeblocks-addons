@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # shellcheck disable=SC2153
 # shellcheck disable=SC2207
@@ -35,7 +35,7 @@ load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
   common_library_file="/scripts/common.sh"
   # shellcheck disable=SC1090
-  source "${common_library_file}"
+  . "${common_library_file}"
 }
 
 load_redis_template_conf() {
@@ -48,15 +48,16 @@ load_redis_template_conf() {
 
 extract_lb_host_by_svc_name() {
   local svc_name="$1"
-  for lb_composed_name in $(echo "$REDIS_LB_ADVERTISED_HOST" | tr ',' '\n' ); do
-    if [[ ${lb_composed_name} == *":"* ]]; then
-       if [[ ${lb_composed_name%:*} == "$svc_name" ]]; then
-         echo "${lb_composed_name#*:}"
-         break
-       fi
-    else
-       break
-    fi
+  for lb_composed_name in $(echo "$REDIS_LB_ADVERTISED_HOST" | tr ',' ' '); do
+    case "$lb_composed_name" in
+      *:*)
+        if [ "${lb_composed_name%:*}" = "$svc_name" ]; then
+          echo "${lb_composed_name#*:}"
+          break
+        fi
+        ;;
+      *) break ;;
+    esac
   done
 }
 
@@ -117,7 +118,7 @@ build_announce_ip_and_port() {
     echo "redis use nodeport $redis_announce_host_value:$redis_announce_port_value to announce"
     announce_host_value="$redis_announce_host_value"
     announce_port_value="$redis_announce_port_value"
-  elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
+  elif [ "$FIXED_POD_IP_ENABLED" = "true" ]; then
       echo "" > /data/.fixed_pod_ip_enabled
       echo "redis use immutable pod ip $CURRENT_POD_IP to announce"
       announce_host_value="$CURRENT_POD_IP"
@@ -145,7 +146,7 @@ build_announce_ip_and_port() {
 }
 
 build_redis_service_port() {
-  if [ "$TLS_ENABLED" == "true" ]; then
+  if [ "$TLS_ENABLED" = "true" ]; then
     echo "tls-port $service_port" >> $redis_real_conf
   else
     echo "port $service_port" >> $redis_real_conf
@@ -186,32 +187,31 @@ init_or_get_primary_from_redis_sentinel() {
     exit 1
   fi
 
-  declare -A master_count_map
+  _master_count_file=$(mktemp)
   local first_redis_primary_host=""
   local first_redis_primary_port=""
-  sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
-  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+  for sentinel_pod_fqdn in $(printf '%s\n' "$SENTINEL_POD_FQDN_LIST" | tr ',' ' '); do
     # get primary info from sentinel
     if retry_get_master_addr_by_name_from_sentinel $retry_times $retry_delay_second "$sentinel_pod_fqdn"; then
-      echo "sentinel:$sentinel_pod_fqdn has master info: ${REDIS_SENTINEL_PRIMARY_INFO[*]}"
-      if [ "${#REDIS_SENTINEL_PRIMARY_INFO[@]}" -ne 2 ] || [ -z "${REDIS_SENTINEL_PRIMARY_INFO[0]}" ] || [ -z "${REDIS_SENTINEL_PRIMARY_INFO[1]}" ]; then
+      echo "sentinel:$sentinel_pod_fqdn has master info: ${REDIS_SENTINEL_PRIMARY_HOST} ${REDIS_SENTINEL_PRIMARY_PORT}"
+      if [ -z "$REDIS_SENTINEL_PRIMARY_HOST" ] || [ -z "$REDIS_SENTINEL_PRIMARY_PORT" ]; then
         echo "Empty primary info retrieved from sentinel: $sentinel_pod_fqdn. Skipping this sentinel."
         continue
       fi
 
-      # increment the count of this master in the map
-      host_port_key="${REDIS_SENTINEL_PRIMARY_INFO[0]}:${REDIS_SENTINEL_PRIMARY_INFO[1]}"
-      master_count_map[$host_port_key]=$((${master_count_map[$host_port_key]} + 1))
+      # increment the count of this master by appending to temp file
+      host_port_key="${REDIS_SENTINEL_PRIMARY_HOST}:${REDIS_SENTINEL_PRIMARY_PORT}"
+      printf '%s\n' "$host_port_key" >> "$_master_count_file"
 
       # track the primary host and port from the first sentinel
       if is_empty "$first_redis_primary_host" && is_empty "$first_redis_primary_port"; then
-        first_redis_primary_host=${REDIS_SENTINEL_PRIMARY_INFO[0]}
-        first_redis_primary_port=${REDIS_SENTINEL_PRIMARY_INFO[1]}
+        first_redis_primary_host=$REDIS_SENTINEL_PRIMARY_HOST
+        first_redis_primary_port=$REDIS_SENTINEL_PRIMARY_PORT
       fi
 
       # log if sentinel has different primary node info
-      if ! equals "$first_redis_primary_host" "${REDIS_SENTINEL_PRIMARY_INFO[0]}" || ! equals "$first_redis_primary_port" "${REDIS_SENTINEL_PRIMARY_INFO[1]}"; then
-        echo "The sentinel:$sentinel_pod_fqdn has different primary node info. First: $first_redis_primary_host:$first_redis_primary_port, Current: ${REDIS_SENTINEL_PRIMARY_INFO[0]}:${REDIS_SENTINEL_PRIMARY_INFO[1]}"
+      if ! equals "$first_redis_primary_host" "$REDIS_SENTINEL_PRIMARY_HOST" || ! equals "$first_redis_primary_port" "$REDIS_SENTINEL_PRIMARY_PORT"; then
+        echo "The sentinel:$sentinel_pod_fqdn has different primary node info. First: $first_redis_primary_host:$first_redis_primary_port, Current: ${REDIS_SENTINEL_PRIMARY_HOST}:${REDIS_SENTINEL_PRIMARY_PORT}"
       fi
     else
       echo "Failed to retrieve primary info from sentinel: $sentinel_pod_fqdn. Skipping this sentinel."
@@ -219,22 +219,20 @@ init_or_get_primary_from_redis_sentinel() {
   done
 
   # if there is no primary node found, use the default primary node
-  echo "get all primary info from redis sentinel master_count_map: ${master_count_map[*]}"
-  if [ ${#master_count_map[@]} -eq 0 ]; then
+  echo "get all primary info from redis sentinel master_count_file"
+  if [ ! -s "$_master_count_file" ]; then
     echo "no primary node found from all redis sentinels, use default primary node."
+    rm -f "$_master_count_file"
     get_default_initialize_primary_node
     return
   fi
 
   # get the primary node with the most counts
-  max_count=0
-  for host_port in "${!master_count_map[@]}"; do
-    if (( ${master_count_map[$host_port]} > max_count )); then
-      max_count=${master_count_map[$host_port]}
-      primary=$(echo $host_port | cut -d: -f1)
-      primary_port=$(echo $host_port | cut -d: -f2)
-    fi
-  done
+  _top_entry=$(sort "$_master_count_file" | uniq -c | sort -rn | head -n1)
+  _top_host_port=$(printf '%s' "$_top_entry" | awk '{print $2}')
+  primary=$(printf '%s' "$_top_host_port" | cut -d: -f1)
+  primary_port=$(printf '%s' "$_top_host_port" | cut -d: -f2)
+  rm -f "$_master_count_file"
 }
 
 build_sentinel_get_master_addr_by_name_command() {
@@ -254,15 +252,20 @@ get_master_addr_by_name_from_sentinel() {
   local sentinel_pod_fqdn="$1"
   unset_xtrace_when_ut_mode_false
   master_addr_by_name_command=$(build_sentinel_get_master_addr_by_name_command "$sentinel_pod_fqdn")
-  logging_mask_password_command="${master_addr_by_name_command/$SENTINEL_PASSWORD/********}"
+  if is_empty "$SENTINEL_PASSWORD"; then
+    logging_mask_password_command="$master_addr_by_name_command"
+  else
+    logging_mask_password_command=$(printf '%s' "$master_addr_by_name_command" | sed "s/${SENTINEL_PASSWORD}/********/g")
+  fi
   echo "execute get-master-addr-by-name command: $logging_mask_password_command"
   output=$(eval "$master_addr_by_name_command")
   exit_code=$?
   set_xtrace_when_ut_mode_false
 
   if [ $exit_code -eq 0 ]; then
-    read -r -d '' -a REDIS_SENTINEL_PRIMARY_INFO <<< "$output"
-    if [ "${#REDIS_SENTINEL_PRIMARY_INFO[@]}" -eq 2 ] && [ -n "${REDIS_SENTINEL_PRIMARY_INFO[0]}" ] && [ -n "${REDIS_SENTINEL_PRIMARY_INFO[1]}" ]; then
+    REDIS_SENTINEL_PRIMARY_HOST=$(printf '%s\n' "$output" | head -n1)
+    REDIS_SENTINEL_PRIMARY_PORT=$(printf '%s\n' "$output" | sed -n '2p')
+    if [ -n "$REDIS_SENTINEL_PRIMARY_HOST" ] && [ -n "$REDIS_SENTINEL_PRIMARY_PORT" ]; then
       echo "Successfully retrieved primary info from sentinel"
       return 0
     else
@@ -357,13 +360,11 @@ parse_redis_announce_addr() {
   local found=false
   pod_name_ordinal=$(extract_obj_ordinal "$pod_name")
   # the value format of REDIS_ADVERTISED_PORT is "pod1Svc:advertisedPort1,pod2Svc:advertisedPort2,..."
-  advertised_ports=($(split "$REDIS_ADVERTISED_PORT" ","))
-  for advertised_port in "${advertised_ports[@]}"; do
-    parts=($(split "$advertised_port" ":"))
-    local svc_name="${parts[0]}"
-    local port="${parts[1]}"
+  for advertised_port in $(printf '%s\n' "$REDIS_ADVERTISED_PORT" | tr ',' ' '); do
+    svc_name=$(printf '%s' "$advertised_port" | cut -d: -f1)
+    port=$(printf '%s' "$advertised_port" | cut -d: -f2)
     svc_name_ordinal=$(extract_obj_ordinal "$svc_name")
-    if [[ "$svc_name_ordinal" == "$pod_name_ordinal" ]]; then
+    if [ "$svc_name_ordinal" = "$pod_name_ordinal" ]; then
       echo "Found matching svcName and port for podName '$pod_name', REDIS_ADVERTISED_PORT: $REDIS_ADVERTISED_PORT. svcName: $svc_name, port: $port."
       redis_announce_port_value="$port"
       lb_host=$(extract_lb_host_by_svc_name "$svc_name")
