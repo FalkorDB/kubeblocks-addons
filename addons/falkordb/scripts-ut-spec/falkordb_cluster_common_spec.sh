@@ -205,18 +205,20 @@ Describe "FalkorDB Cluster Common Bash Script Tests"
 
       setup() {
         export KB_CLUSTER_POD_IP_LIST="172.0.0.1,172.0.0.2"
+        export KB_CLUSTER_POD_NAME_LIST="pod-0,pod-1"
         export SERVICE_PORT="6379"
       }
       Before "setup"
 
       un_setup() {
         unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
         unset SERVICE_PORT
       }
       After "un_setup"
 
       It "returns 0 when cluster is initialized"
-        When call check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$SERVICE_PORT"
+        When call check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"
         The status should be success
         The output should include "FalkorDB Cluster already initialized"
       End
@@ -230,20 +232,83 @@ Describe "FalkorDB Cluster Common Bash Script Tests"
 
       setup() {
         export KB_CLUSTER_POD_IP_LIST="172.0.0.1,172.0.0.2"
+        export KB_CLUSTER_POD_NAME_LIST="pod-0,pod-1"
         export SERVICE_PORT="6379"
       }
       Before "setup"
 
       un_setup() {
         unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
         unset SERVICE_PORT
       }
       After "un_setup"
 
       It "returns 1 when cluster is not initialized"
-        When call check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$SERVICE_PORT"
+        When call check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"
         The status should be failure
         The stderr should include "FalkorDB Cluster not initialized"
+      End
+    End
+
+    Context "returns 0 when first pod lookup fails but another pod confirms initialization"
+      get_cluster_info_with_retry() {
+        if [ "$1" = "172.0.0.1" ]; then
+          return 1
+        fi
+        echo "cluster_state:ok"
+        return 0
+      }
+
+      get_pod_service_port_by_network_mode() {
+        echo "6379"
+      }
+
+      setup() {
+        export KB_CLUSTER_POD_IP_LIST="172.0.0.1,172.0.0.2"
+        export KB_CLUSTER_POD_NAME_LIST="pod-0,pod-1"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      After "un_setup"
+
+      It "continues checking pods after a transient cluster info failure"
+        When call check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"
+        The status should be success
+        The stderr should include "Failed to get cluster info from pod pod-0 in check_cluster_initialized, continue checking others"
+        The output should include "FalkorDB Cluster already initialized"
+      End
+    End
+
+    Context "returns 1 when all cluster info lookups fail"
+      get_cluster_info_with_retry() {
+        return 1
+      }
+
+      get_pod_service_port_by_network_mode() {
+        echo "6379"
+      }
+
+      setup() {
+        export KB_CLUSTER_POD_IP_LIST="172.0.0.1,172.0.0.2"
+        export KB_CLUSTER_POD_NAME_LIST="pod-0,pod-1"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      After "un_setup"
+
+      It "returns failure when no pod can provide cluster info"
+        When call check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"
+        The status should be failure
+        The stderr should include "Failed to get cluster info from all candidate pods in check_cluster_initialized"
       End
     End
 

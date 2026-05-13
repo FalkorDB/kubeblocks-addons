@@ -417,8 +417,8 @@ spec:
           memoryLimit: Required
   lifecycleActions:
     roleProbe:
-      periodSeconds: 1
-      timeoutSeconds: 1
+      periodSeconds: 2
+      timeoutSeconds: 3
       exec:
         container: falkordb-cluster
         env:
@@ -441,9 +441,9 @@ spec:
         - name: KB_SERVICE_PORT
           value: "$(SERVICE_PORT)"
         command:
-          - /tools/dbctl
-          - redis
-          - getrole
+          - /bin/sh
+          - -c
+          - /scripts/falkordb-cluster-role-probe.sh
     postProvision:
       exec:
         container: falkordb-cluster

@@ -67,6 +67,30 @@ load_redis_cluster_common_utils() {
   . "${kblib_common_library_file}"
   . "${redis_cluster_common_library_file}"
 }
+call_func_with_retry_when_ut_mode_false() {
+  local max_retries="$1"
+  local retry_interval="$2"
+  local function_name="$3"
+  shift 3
+
+  local retries=0
+  while true; do
+    if "$function_name" "$@"; then
+      return 0
+    fi
+
+    retries=$((retries + 1))
+    if [ "$retries" -ge "$max_retries" ]; then
+      echo "Function '$function_name' failed after $max_retries retries." >&2
+      return 1
+    fi
+
+    echo "Function '$function_name' failed in $retries times. Retrying in $retry_interval seconds..." >&2
+    if [ "$retry_interval" -gt 0 ] 2>/dev/null; then
+      sleep_when_ut_mode_false "$retry_interval"
+    fi
+  done
+}
 
 check_initialize_nodes_ready() {
   # $1 is a pipe-separated list of host:port nodes
@@ -181,7 +205,7 @@ find_exist_available_node() {
       status=$?
       if [ $status -ne 0 ]; then
         echo "Failed to get cluster nodes info in find_exist_available_node" >&2
-        exit 1
+        return 1
       fi
       # grep my self node and return the nodeIp:port(it may be the announceIp and announcePort, for example when cluster enable NodePort/LoadBalancer service)
       available_node_with_port=$(echo "$cluster_nodes_info" | grep "myself" | awk '{print $2}' | cut -d'@' -f1)
@@ -1054,7 +1078,7 @@ sync_acl_for_redis_cluster_shard() {
 
   if [ "$is_ok" = false ]; then
       echo "Failed to get ACL LIST from other shard pods" >&2
-      exit 1
+      return 1
   fi
 
   if [ -z "$acl_list" ]; then
@@ -1161,26 +1185,51 @@ initialize_or_scale_out_redis_cluster() {
     return 1
   fi
 
-  # if the cluster is not initialized, initialize it
+  local initialize_retry_times
+  local initialize_retry_interval
+  local scale_out_retry_times
+  local scale_out_retry_interval
+  initialize_retry_times="${POST_PROVISION_INITIALIZE_RETRY_TIMES:-3}"
+  initialize_retry_interval="${POST_PROVISION_INITIALIZE_RETRY_INTERVAL:-5}"
+  scale_out_retry_times="${POST_PROVISION_SCALE_OUT_RETRY_TIMES:-3}"
+  scale_out_retry_interval="${POST_PROVISION_SCALE_OUT_RETRY_INTERVAL:-5}"
+
+  # if the cluster is not initialized, initialize it first.
+  # in concurrent lifecycle execution, another component may initialize first,
+  # so we re-check initialization state before returning failure.
   if ! check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"; then
     echo "FalkorDB Cluster not initialized, initializing..."
-    if initialize_redis_cluster; then
+    if call_func_with_retry_when_ut_mode_false "$initialize_retry_times" "$initialize_retry_interval" initialize_redis_cluster; then
       echo "FalkorDB Cluster initialized successfully"
-    else
+      return 0
+    fi
+
+    echo "Initialization retries failed, checking if another component has initialized the cluster..." >&2
+    if ! check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"; then
       echo "Failed to initialize FalkorDB Cluster" >&2
       return 1
     fi
-  else
-    sync_acl_for_redis_cluster_shard
-    echo "FalkorDB Cluster already initialized, scaling out the shard..."
-    if scale_out_redis_cluster_shard; then
-      echo "FalkorDB Cluster scale out shard successfully"
-    else
-      echo "Failed to scale out FalkorDB Cluster shard" >&2
-      return 1
-    fi
+    echo "FalkorDB Cluster has been initialized by another component, switching to scale-out flow."
   fi
-  return 0
+
+  if ! call_func_with_retry_when_ut_mode_false "$scale_out_retry_times" "$scale_out_retry_interval" sync_acl_for_redis_cluster_shard; then
+    echo "Warning: failed to sync ACL rules before scale out, continuing with best-effort scale out." >&2
+  fi
+
+  echo "FalkorDB Cluster already initialized, scaling out the shard..."
+  if call_func_with_retry_when_ut_mode_false "$scale_out_retry_times" "$scale_out_retry_interval" scale_out_redis_cluster_shard; then
+    echo "FalkorDB Cluster scale out shard successfully"
+    return 0
+  fi
+
+  # final convergence check in case retry failures were transient.
+  if scale_out_redis_cluster_shard; then
+    echo "FalkorDB Cluster scale out shard successfully"
+    return 0
+  fi
+
+  echo "Failed to scale out FalkorDB Cluster shard" >&2
+  return 1
 }
 
 # This is magic for shellspec ut framework.

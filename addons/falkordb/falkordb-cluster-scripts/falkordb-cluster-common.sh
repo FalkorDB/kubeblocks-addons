@@ -476,6 +476,8 @@ check_cluster_initialized() {
 
   local pod_ip
   local service_port
+  local checked_cluster_info_count=0
+  local cluster_info_error_count=0
   for pod_name in $(echo "$cluster_pod_name_list" | tr ',' ' '); do
     pod_ip=$(parse_host_ip_from_built_in_envs "$pod_name" "$cluster_pod_name_list" "$cluster_pod_ip_list")
     if is_empty "$pod_ip"; then
@@ -487,15 +489,22 @@ check_cluster_initialized() {
     cluster_info=$(get_cluster_info_with_retry "$pod_ip" "$service_port")
     status=$?
     if [ $status -ne 0 ]; then
-      echo "Failed to get cluster info in check_cluster_initialized" >&2
-      return 1
+      echo "Failed to get cluster info from pod $pod_name in check_cluster_initialized, continue checking others" >&2
+      cluster_info_error_count=$((cluster_info_error_count + 1))
+      continue
     fi
+    checked_cluster_info_count=$((checked_cluster_info_count + 1))
     cluster_state=$(echo "$cluster_info" | awk -F: '/cluster_state/{print $2}' | tr -d '[:space:]')
     if is_empty "$cluster_state" || equals "$cluster_state" "ok"; then
       echo "FalkorDB Cluster already initialized"
       return 0
     fi
   done
+
+  if [ "$checked_cluster_info_count" -eq 0 ] && [ "$cluster_info_error_count" -gt 0 ]; then
+    echo "Failed to get cluster info from all candidate pods in check_cluster_initialized" >&2
+    return 1
+  fi
   echo "FalkorDB Cluster not initialized" >&2
   return 1
 }
