@@ -72,6 +72,15 @@ metrics:
   service:
     port: 9121
     serverPort: 8888
+graphMetrics:
+  image:
+    registry: docker.io
+    repository: redis
+    tag: 7.2-alpine
+    pullPolicy: IfNotPresent
+  service:
+    port: 9122
+  pollIntervalSeconds: 15
 
 # defined the data volume mount path of redis server
 dataMountPath: /data
