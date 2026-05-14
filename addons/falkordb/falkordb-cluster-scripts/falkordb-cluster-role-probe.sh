@@ -46,14 +46,15 @@ run_role_probe() {
   current_pod_name="${CURRENT_POD_NAME:-}"
   pod_ordinal="${current_pod_name##*-}"
 
-  # During cluster bootstrap, non-zero ordinal pods can briefly report PRIMARY
-  # before replication converges. Treat that state as unstable while cluster_state
-  # is not yet OK to avoid role label oscillation that can leave the component
-  # stuck in Creating.
+  # During bootstrap/recovery, non-zero ordinal pods can briefly report PRIMARY
+  # before replication converges. When cluster_state is not OK, treat that as
+  # degraded and fall back to SECONDARY so role probing does not deadlock the
+  # component in Updating/Failed.
   if [ "$role" = "primary" ] && [ "$pod_ordinal" != "0" ]; then
     cluster_state=$(get_cluster_state)
     if [ "$cluster_state" != "ok" ]; then
-      return 1
+      printf '%s' "secondary"
+      return 0
     fi
   fi
 
