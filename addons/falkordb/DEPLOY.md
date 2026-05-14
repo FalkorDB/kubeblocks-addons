@@ -163,7 +163,7 @@ spec:
   topology: replication
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.18.3"
+      serviceVersion: "4.18.7"
       replicas: 2
       resources:
         limits: { cpu: "0.5", memory: "512Mi" }
@@ -176,7 +176,7 @@ spec:
               requests:
                 storage: 10Gi
     - name: falkordb-sent
-      serviceVersion: "4.18.3"
+      serviceVersion: "4.18.7"
       replicas: 3
       resources:
         limits: { cpu: "0.25", memory: "256Mi" }
@@ -218,7 +218,7 @@ spec:
   topology: standalone
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.18.3"
+      serviceVersion: "4.18.7"
       replicas: 1
       resources:
         limits: { cpu: "0.5", memory: "512Mi" }
@@ -251,7 +251,7 @@ spec:
       template:
         name: falkordb
         componentDef: falkordb-cluster-4
-        serviceVersion: "4.18.3"
+        serviceVersion: "4.18.7"
         replicas: 2
         resources:
           limits: { cpu: "1", memory: "1Gi" }
