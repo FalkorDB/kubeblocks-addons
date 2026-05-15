@@ -16,10 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout kubeblocks-addons Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout block-index Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: apecloud/block-index
           path: ./block-index

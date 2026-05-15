@@ -14,13 +14,13 @@ falkordbVersions:
     componentDef: "falkordb-4"
     clusterComponentDef: "falkordb-cluster-4"
     sentinelComponentDef: "falkordb-sent-4"
-    serviceVersion: "4.18.6"
-    defaultImageTag: "v4.18.6"
+    serviceVersion: "4.18.7"
+    defaultImageTag: "v4.18.7"
     mirrorVersions:
       - version: "4.14.10"
         imageTag: "v4.14.10"
-      - version: "4.18.6"
-        imageTag: "v4.18.6"
+      - version: "4.18.7"
+        imageTag: "v4.18.7"
 
 image:
   # refer: https://redis.io/docs/stack/
@@ -35,7 +35,7 @@ image:
     major4:
       minor14: v4.14.10
       minor12: v4.12.5
-      minor18: v4.18.6
+      minor18: v4.18.7
 
   apeDts:
     registry: ""
@@ -72,6 +72,15 @@ metrics:
   service:
     port: 9121
     serverPort: 8888
+graphMetrics:
+  image:
+    registry: docker.io
+    repository: redis
+    tag: 7.2-alpine
+    pullPolicy: IfNotPresent
+  service:
+    port: 9122
+  pollIntervalSeconds: 15
 
 # defined the data volume mount path of redis server
 dataMountPath: /data

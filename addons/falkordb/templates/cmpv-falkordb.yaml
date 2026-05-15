@@ -25,10 +25,12 @@ spec:
     images:
       falkordb: {{ $falkordbRepository }}:{{ .imageTag }}
       metrics: {{ include "metrics.repository" $ }}:{{ $.Values.metrics.image.tag }}
+      graph-metrics: {{ include "graphMetrics.repository" $ }}:{{ $.Values.graphMetrics.image.tag }}
       init-dbctl: {{ $.Values.dbctlImage.registry | default ( $.Values.image.registry | default "docker.io" ) }}/{{ $.Values.dbctlImage.repository }}:{{ $.Values.dbctlImage.tag }}
       postProvision: {{ $falkordbRepository }}:{{ .imageTag }}
       accountProvision: {{ $falkordbRepository }}:{{ .imageTag }}
       switchover: {{ $falkordbRepository }}:{{ .imageTag }}
       memberJoin: {{ $falkordbRepository }}:{{ .imageTag }}
+      roleProbe: {{ $falkordbRepository }}:{{ .imageTag }}
   {{- end }}
   {{- end }}

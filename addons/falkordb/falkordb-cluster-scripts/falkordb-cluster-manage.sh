@@ -67,6 +67,30 @@ load_redis_cluster_common_utils() {
   . "${kblib_common_library_file}"
   . "${redis_cluster_common_library_file}"
 }
+call_func_with_retry_when_ut_mode_false() {
+  local max_retries="$1"
+  local retry_interval="$2"
+  local function_name="$3"
+  shift 3
+
+  local retries=0
+  while true; do
+    if "$function_name" "$@"; then
+      return 0
+    fi
+
+    retries=$((retries + 1))
+    if [ "$retries" -ge "$max_retries" ]; then
+      echo "Function '$function_name' failed after $max_retries retries." >&2
+      return 1
+    fi
+
+    echo "Function '$function_name' failed in $retries times. Retrying in $retry_interval seconds..." >&2
+    if [ "$retry_interval" -gt 0 ] 2>/dev/null; then
+      sleep_when_ut_mode_false "$retry_interval"
+    fi
+  done
+}
 
 check_initialize_nodes_ready() {
   # $1 is a pipe-separated list of host:port nodes
@@ -181,7 +205,7 @@ find_exist_available_node() {
       status=$?
       if [ $status -ne 0 ]; then
         echo "Failed to get cluster nodes info in find_exist_available_node" >&2
-        exit 1
+        return 1
       fi
       # grep my self node and return the nodeIp:port(it may be the announceIp and announcePort, for example when cluster enable NodePort/LoadBalancer service)
       available_node_with_port=$(echo "$cluster_nodes_info" | grep "myself" | awk '{print $2}' | cut -d'@' -f1)
@@ -916,9 +940,11 @@ verify_secondary_in_all_primaries() {
 check_current_shard_other_nodes_are_joined() {
   local current_primary_host="$1"
   local service_port="$2"
+  local active_cluster_nodes_info
   cluster_nodes_info=$(get_cluster_nodes_info "$current_primary_host" "$service_port")
+  active_cluster_nodes_info=$(printf '%s\n' "$cluster_nodes_info" | awk '{if (index($3, "fail") == 0) print $0}')
   while IFS="$(printf '\t')" read -r secondary_pod_name _addr; do
-    if ! contains "$cluster_nodes_info" "$secondary_pod_name"; then
+    if ! contains "$active_cluster_nodes_info" "$secondary_pod_name"; then
       echo "Secondary node $secondary_pod_name not found in primary $current_primary_host, need to joined" >&2
       return 1
     fi
@@ -1054,7 +1080,7 @@ sync_acl_for_redis_cluster_shard() {
 
   if [ "$is_ok" = false ]; then
       echo "Failed to get ACL LIST from other shard pods" >&2
-      exit 1
+      return 1
   fi
 
   if [ -z "$acl_list" ]; then
@@ -1084,6 +1110,141 @@ sync_acl_for_redis_cluster_shard() {
 $acl_list
 _ACL_EOF_
   set_xtrace_when_ut_mode_false
+}
+
+get_cluster_info_field() {
+  local cluster_info="$1"
+  local field="$2"
+  printf '%s\n' "$cluster_info" | awk -F: -v key="$field" '$1 == key {print $2; exit}' | tr -d '[:space:]'
+}
+
+cluster_has_unassigned_slots() {
+  local pod_name
+  local pod_ip
+  local service_port
+  local cluster_info
+  local cluster_state
+  local cluster_slots_assigned
+  local checked_cluster_info_count=0
+
+  for pod_name in $(printf '%s\n' "$KB_CLUSTER_POD_NAME_LIST" | tr ',' ' '); do
+    pod_ip=$(parse_host_ip_from_built_in_envs "$pod_name" "$KB_CLUSTER_POD_NAME_LIST" "$KB_CLUSTER_POD_HOST_IP_LIST")
+    if is_empty "$pod_ip"; then
+      continue
+    fi
+    service_port=$(get_pod_service_port_by_network_mode "${pod_name}")
+    cluster_info=$(get_cluster_info_with_retry "$pod_ip" "$service_port")
+    if [ $? -ne 0 ] || is_empty "$cluster_info"; then
+      continue
+    fi
+    checked_cluster_info_count=$((checked_cluster_info_count + 1))
+    cluster_state=$(get_cluster_info_field "$cluster_info" "cluster_state")
+    cluster_slots_assigned=$(get_cluster_info_field "$cluster_info" "cluster_slots_assigned")
+    if ! equals "$cluster_state" "ok" || ! equals "$cluster_slots_assigned" "16384"; then
+      echo "Detected unhealthy slot state on $pod_name: cluster_state=${cluster_state:-unknown}, cluster_slots_assigned=${cluster_slots_assigned:-unknown}" >&2
+      return 0
+    fi
+  done
+
+  if [ "$checked_cluster_info_count" -eq 0 ]; then
+    echo "Failed to retrieve cluster info from all candidate pods while checking slot assignment." >&2
+    return 0
+  fi
+  return 1
+}
+
+cluster_is_fully_split() {
+  local pod_name
+  local pod_ip
+  local service_port
+  local cluster_info
+  local cluster_known_nodes
+  local cluster_slots_assigned
+  local checked_cluster_info_count=0
+  local split_cluster_info_count=0
+
+  for pod_name in $(printf '%s\n' "$KB_CLUSTER_POD_NAME_LIST" | tr ',' ' '); do
+    pod_ip=$(parse_host_ip_from_built_in_envs "$pod_name" "$KB_CLUSTER_POD_NAME_LIST" "$KB_CLUSTER_POD_HOST_IP_LIST")
+    if is_empty "$pod_ip"; then
+      continue
+    fi
+    service_port=$(get_pod_service_port_by_network_mode "${pod_name}")
+    cluster_info=$(get_cluster_info_with_retry "$pod_ip" "$service_port")
+    if [ $? -ne 0 ] || is_empty "$cluster_info"; then
+      continue
+    fi
+    checked_cluster_info_count=$((checked_cluster_info_count + 1))
+    cluster_known_nodes=$(get_cluster_info_field "$cluster_info" "cluster_known_nodes")
+    cluster_slots_assigned=$(get_cluster_info_field "$cluster_info" "cluster_slots_assigned")
+    if equals "$cluster_known_nodes" "1" && equals "$cluster_slots_assigned" "0"; then
+      split_cluster_info_count=$((split_cluster_info_count + 1))
+    fi
+  done
+
+  if [ "$checked_cluster_info_count" -gt 0 ] && [ "$split_cluster_info_count" -eq "$checked_cluster_info_count" ]; then
+    return 0
+  fi
+  return 1
+}
+
+find_cluster_repair_candidate_node() {
+  local pod_name
+  local pod_ip
+  local service_port
+  for pod_name in $(printf '%s\n' "$KB_CLUSTER_POD_NAME_LIST" | tr ',' ' '); do
+    pod_ip=$(parse_host_ip_from_built_in_envs "$pod_name" "$KB_CLUSTER_POD_NAME_LIST" "$KB_CLUSTER_POD_HOST_IP_LIST")
+    if is_empty "$pod_ip"; then
+      continue
+    fi
+    service_port=$(get_pod_service_port_by_network_mode "${pod_name}")
+    if get_cluster_info_with_retry "$pod_ip" "$service_port" >/dev/null 2>&1; then
+      echo "$pod_ip:$service_port"
+      return 0
+    fi
+  done
+  echo ""
+  return 1
+}
+
+repair_unassigned_slots_if_needed() {
+  local repair_candidate
+  local repair_port
+
+  if ! cluster_has_unassigned_slots; then
+    echo "Cluster slots are fully assigned and healthy."
+    return 0
+  fi
+
+  echo "Detected unassigned slots or unhealthy cluster state, starting recovery flow..."
+  if cluster_is_fully_split; then
+    echo "Detected fully split single-node topology; reinitializing Redis cluster layout..."
+    if initialize_redis_cluster; then
+      if ! cluster_has_unassigned_slots; then
+        echo "Recovered split topology via cluster reinitialization."
+        return 0
+      fi
+      echo "Cluster still reports unassigned slots after reinitialization; trying slot fix." >&2
+    else
+      echo "Failed to reinitialize split cluster topology; trying slot fix." >&2
+    fi
+  fi
+
+  repair_candidate=$(find_cluster_repair_candidate_node)
+  if is_empty "$repair_candidate"; then
+    echo "No available cluster node found for slot repair." >&2
+    return 1
+  fi
+  repair_port=$(echo "$repair_candidate" | cut -d':' -f2)
+  if ! fix_unassigned_slots "$repair_candidate" "$repair_port"; then
+    echo "Failed to repair unassigned slots using node $repair_candidate." >&2
+    return 1
+  fi
+  if cluster_has_unassigned_slots; then
+    echo "Cluster still has unassigned slots after repair attempt." >&2
+    return 1
+  fi
+  echo "Cluster slot recovery completed successfully."
+  return 0
 }
 
 scale_in_redis_cluster_shard() {
@@ -1161,26 +1322,56 @@ initialize_or_scale_out_redis_cluster() {
     return 1
   fi
 
-  # if the cluster is not initialized, initialize it
+  local initialize_retry_times
+  local initialize_retry_interval
+  local scale_out_retry_times
+  local scale_out_retry_interval
+  initialize_retry_times="${POST_PROVISION_INITIALIZE_RETRY_TIMES:-3}"
+  initialize_retry_interval="${POST_PROVISION_INITIALIZE_RETRY_INTERVAL:-5}"
+  scale_out_retry_times="${POST_PROVISION_SCALE_OUT_RETRY_TIMES:-3}"
+  scale_out_retry_interval="${POST_PROVISION_SCALE_OUT_RETRY_INTERVAL:-5}"
+
+  # if the cluster is not initialized, initialize it first.
+  # in concurrent lifecycle execution, another component may initialize first,
+  # so we re-check initialization state before returning failure.
   if ! check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"; then
     echo "FalkorDB Cluster not initialized, initializing..."
-    if initialize_redis_cluster; then
+    if call_func_with_retry_when_ut_mode_false "$initialize_retry_times" "$initialize_retry_interval" initialize_redis_cluster; then
       echo "FalkorDB Cluster initialized successfully"
-    else
+      return 0
+    fi
+
+    echo "Initialization retries failed, checking if another component has initialized the cluster..." >&2
+    if ! check_cluster_initialized "$KB_CLUSTER_POD_IP_LIST" "$KB_CLUSTER_POD_NAME_LIST"; then
       echo "Failed to initialize FalkorDB Cluster" >&2
       return 1
     fi
-  else
-    sync_acl_for_redis_cluster_shard
-    echo "FalkorDB Cluster already initialized, scaling out the shard..."
-    if scale_out_redis_cluster_shard; then
-      echo "FalkorDB Cluster scale out shard successfully"
-    else
-      echo "Failed to scale out FalkorDB Cluster shard" >&2
-      return 1
-    fi
+    echo "FalkorDB Cluster has been initialized by another component, switching to scale-out flow."
   fi
-  return 0
+
+  if ! call_func_with_retry_when_ut_mode_false "$scale_out_retry_times" "$scale_out_retry_interval" repair_unassigned_slots_if_needed; then
+    echo "Failed to repair unassigned cluster slots before scale out." >&2
+    return 1
+  fi
+
+  if ! call_func_with_retry_when_ut_mode_false "$scale_out_retry_times" "$scale_out_retry_interval" sync_acl_for_redis_cluster_shard; then
+    echo "Warning: failed to sync ACL rules before scale out, continuing with best-effort scale out." >&2
+  fi
+
+  echo "FalkorDB Cluster already initialized, scaling out the shard..."
+  if call_func_with_retry_when_ut_mode_false "$scale_out_retry_times" "$scale_out_retry_interval" scale_out_redis_cluster_shard; then
+    echo "FalkorDB Cluster scale out shard successfully"
+    return 0
+  fi
+
+  # final convergence check in case retry failures were transient.
+  if scale_out_redis_cluster_shard; then
+    echo "FalkorDB Cluster scale out shard successfully"
+    return 0
+  fi
+
+  echo "Failed to scale out FalkorDB Cluster shard" >&2
+  return 1
 }
 
 # This is magic for shellspec ut framework.

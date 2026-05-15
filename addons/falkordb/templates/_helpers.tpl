@@ -120,6 +120,9 @@ falkordb-cluster-scripts-template-{{ .Chart.Version }}
 {{- define "metrics.image" -}}
 {{ .Values.metrics.image.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.metrics.image.repository}}:{{ .Values.metrics.image.tag }}
 {{- end }}}
+{{- define "graphMetrics.repository" -}}
+{{ .Values.graphMetrics.image.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.graphMetrics.image.repository}}
+{{- end }}}
 
 {{- define "apeDts.image" -}}
 {{ .Values.apeDtsImage.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.apeDtsImage.repository}}:{{ .Values.apeDtsImage.tag }}

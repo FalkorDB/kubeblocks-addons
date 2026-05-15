@@ -1701,9 +1701,6 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
     End
 
     Context "when FalkorDB Cluster is not initialized"
-      get_all_shards_pod_fqdns() {
-        echo "falkordb-shard-98x-0.namespace.svc.cluster.local,falkordb-shard-98x-1.namespace.svc.cluster.local,falkordb-shard-7hy-0.namespace.svc.cluster.local,falkordb-shard-7hy-1.namespace.svc.cluster.local,falkordb-shard-jwl-0.namespace.svc.cluster.local,falkordb-shard-jwl-1.namespace.svc.cluster.local"
-      }
 
       check_cluster_initialized() {
         return 1
@@ -1738,9 +1735,6 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
     End
 
     Context "when FalkorDB Cluster is already initialized"
-      get_all_shards_pod_fqdns() {
-        echo "falkordb-shard-98x-0.namespace.svc.cluster.local,falkordb-shard-98x-1.namespace.svc.cluster.local,falkordb-shard-7hy-0.namespace.svc.cluster.local,falkordb-shard-7hy-1.namespace.svc.cluster.local,falkordb-shard-jwl-0.namespace.svc.cluster.local,falkordb-shard-jwl-1.namespace.svc.cluster.local"
-      }
 
       check_cluster_initialized() {
         return 0
@@ -1787,6 +1781,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         return 1
       }
 
+      populate_pod_ip_name_list() {
+        return 0
+      }
+
       setup() {
         export KB_CLUSTER_POD_IP_LIST="172.42.0.1,172.42.0.2,172.42.0.3,172.42.0.4,172.42.0.5,172.42.0.6"
         export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
@@ -1803,7 +1801,93 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         When run initialize_or_scale_out_redis_cluster
         The status should be failure
         The stderr should include "Failed to initialize FalkorDB Cluster"
-        The stdout should include "FalkorDB Cluster not initialized, initializing.."
+        The stdout should include "FalkorDB Cluster not initialized, initializing..."
+      End
+    End
+
+    Context "when initialize retries fail but another component already initialized cluster"
+      check_cluster_initialized() {
+        check_cluster_initialized_call_count=$((check_cluster_initialized_call_count + 1))
+        if [ "$check_cluster_initialized_call_count" -eq 1 ]; then
+          return 1
+        fi
+        return 0
+      }
+
+      initialize_redis_cluster() {
+        return 1
+      }
+
+      sync_acl_for_redis_cluster_shard() {
+        return 0
+      }
+
+      scale_out_redis_cluster_shard() {
+        return 0
+      }
+
+      populate_pod_ip_name_list() {
+        return 0
+      }
+
+      setup() {
+        export check_cluster_initialized_call_count=0
+        export KB_CLUSTER_POD_IP_LIST="172.42.0.1,172.42.0.2,172.42.0.3,172.42.0.4,172.42.0.5,172.42.0.6"
+        export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset check_cluster_initialized_call_count
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      After "un_setup"
+
+      It "switches to scale-out flow when another component initializes first"
+        When run initialize_or_scale_out_redis_cluster
+        The status should be success
+        The stderr should include "Initialization retries failed, checking if another component has initialized the cluster..."
+        The stdout should include "FalkorDB Cluster has been initialized by another component, switching to scale-out flow."
+        The stdout should include "FalkorDB Cluster scale out shard successfully"
+      End
+    End
+
+    Context "when ACL sync fails before scale out"
+      check_cluster_initialized() {
+        return 0
+      }
+
+      sync_acl_for_redis_cluster_shard() {
+        return 1
+      }
+
+      scale_out_redis_cluster_shard() {
+        return 0
+      }
+
+      populate_pod_ip_name_list() {
+        return 0
+      }
+
+      setup() {
+        export KB_CLUSTER_POD_IP_LIST="172.42.0.1,172.42.0.2,172.42.0.3,172.42.0.4,172.42.0.5,172.42.0.6"
+        export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_POD_NAME_LIST
+      }
+      After "un_setup"
+
+      It "continues with best-effort scale out when ACL sync fails"
+        When run initialize_or_scale_out_redis_cluster
+        The status should be success
+        The stderr should include "Warning: failed to sync ACL rules before scale out, continuing with best-effort scale out."
+        The stdout should include "FalkorDB Cluster already initialized, scaling out the shard..."
+        The stdout should include "FalkorDB Cluster scale out shard successfully"
       End
     End
 
@@ -1811,9 +1895,16 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       check_cluster_initialized() {
         return 0
       }
+      sync_acl_for_redis_cluster_shard() {
+        return 0
+      }
 
       scale_out_redis_cluster_shard() {
         return 1
+      }
+
+      populate_pod_ip_name_list() {
+        return 0
       }
 
       setup() {

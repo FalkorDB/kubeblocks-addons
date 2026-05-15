@@ -333,14 +333,17 @@ check_node_in_cluster() {
   local cluster_node="$1"
   local cluster_node_port="$2"
   local node_name="$3"
+  local active_cluster_nodes_info
   cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port")
   status=$?
   if [ $status -ne 0 ]; then
     echo "Failed to get cluster nodes info in check_node_in_cluster" >&2
     return 1
   fi
-  # if the cluster_nodes_info contains multiple lines and the node_name is in the cluster_nodes_info, return true
-  if [ "$(echo "$cluster_nodes_info" | wc -l)" -gt 1 ] && echo "$cluster_nodes_info" | grep -q "$node_name"; then
+  # Ignore failed records to avoid stale fail entries being treated as healthy membership.
+  active_cluster_nodes_info=$(printf '%s\n' "$cluster_nodes_info" | awk '{if (index($3, "fail") == 0) print $0}')
+  # if the active_cluster_nodes_info contains multiple lines and the node_name is in the active_cluster_nodes_info, return true
+  if [ "$(printf '%s\n' "$active_cluster_nodes_info" | grep -c '.')" -gt 1 ] && printf '%s\n' "$active_cluster_nodes_info" | grep -Fq "$node_name"; then
     return 0
   else
     return 1
@@ -465,6 +468,37 @@ check_slots_covered() {
   fi
 }
 
+build_cluster_fix_command() {
+  local node_endpoint_wth_port="$1"
+  local cluster_service_port="$2"
+  unset_xtrace_when_ut_mode_false
+  if is_empty "$REDIS_DEFAULT_PASSWORD"; then
+    cluster_fix_command="redis-cli $REDIS_CLI_TLS_CMD --cluster fix $node_endpoint_wth_port -p $cluster_service_port --cluster-yes"
+    logging_mask_cluster_fix_command="$cluster_fix_command"
+  else
+    cluster_fix_command="redis-cli $REDIS_CLI_TLS_CMD --cluster fix $node_endpoint_wth_port -p $cluster_service_port --cluster-yes -a $REDIS_DEFAULT_PASSWORD"
+    logging_mask_cluster_fix_command=$(_mask_password "$cluster_fix_command")
+  fi
+  echo "cluster slot fix command: $logging_mask_cluster_fix_command" >&2
+  set_xtrace_when_ut_mode_false
+  echo "$cluster_fix_command"
+}
+
+fix_unassigned_slots() {
+  local node_endpoint_wth_port="$1"
+  local cluster_service_port="$2"
+  cluster_fix_command=$(build_cluster_fix_command "$node_endpoint_wth_port" "$cluster_service_port")
+  cluster_fix_output=$($cluster_fix_command)
+  status=$?
+  if [ $status -ne 0 ]; then
+    echo "$cluster_fix_output" >&2
+    echo "Failed to fix unassigned cluster slots using node $node_endpoint_wth_port" >&2
+    return 1
+  fi
+  echo "$cluster_fix_output"
+  return 0
+}
+
 # check if the cluster has been initialized
 check_cluster_initialized() {
   local cluster_pod_ip_list="$1"
@@ -476,6 +510,8 @@ check_cluster_initialized() {
 
   local pod_ip
   local service_port
+  local checked_cluster_info_count=0
+  local cluster_info_error_count=0
   for pod_name in $(echo "$cluster_pod_name_list" | tr ',' ' '); do
     pod_ip=$(parse_host_ip_from_built_in_envs "$pod_name" "$cluster_pod_name_list" "$cluster_pod_ip_list")
     if is_empty "$pod_ip"; then
@@ -487,15 +523,22 @@ check_cluster_initialized() {
     cluster_info=$(get_cluster_info_with_retry "$pod_ip" "$service_port")
     status=$?
     if [ $status -ne 0 ]; then
-      echo "Failed to get cluster info in check_cluster_initialized" >&2
-      return 1
+      echo "Failed to get cluster info from pod $pod_name in check_cluster_initialized, continue checking others" >&2
+      cluster_info_error_count=$((cluster_info_error_count + 1))
+      continue
     fi
+    checked_cluster_info_count=$((checked_cluster_info_count + 1))
     cluster_state=$(echo "$cluster_info" | awk -F: '/cluster_state/{print $2}' | tr -d '[:space:]')
     if is_empty "$cluster_state" || equals "$cluster_state" "ok"; then
       echo "FalkorDB Cluster already initialized"
       return 0
     fi
   done
+
+  if [ "$checked_cluster_info_count" -eq 0 ] && [ "$cluster_info_error_count" -gt 0 ]; then
+    echo "Failed to get cluster info from all candidate pods in check_cluster_initialized" >&2
+    return 1
+  fi
   echo "FalkorDB Cluster not initialized" >&2
   return 1
 }
