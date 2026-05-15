@@ -23,7 +23,7 @@ jobs:
           all_but_latest: true
           access_token: ${{ env.GITHUB_TOKEN }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           repository: ${{ github.event.pull_request.head.repo.full_name }}
