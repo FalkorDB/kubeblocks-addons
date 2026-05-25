@@ -24,6 +24,8 @@
 
 	appendonly?: string & "yes" | "no"
 
+	"aof-timestamp-enabled"?: string & "yes" | "no"
+
 	"cluster-enabled"?: string & "yes" | "no"
 
 	"cluster-allow-replica-migration"?: string & "yes" | "no"
@@ -84,7 +86,7 @@
 
 	"maxmemory-samples": int | *3
 
-	"maxmemory"?: int
+	"maxmemory"?: int @storeResource()
 
 	"min-replicas-max-lag": int | *10
 
@@ -280,6 +282,8 @@
      "auto-aof-rewrite-percentage": int | *100
 
      "auto-aof-rewrite-min-size": string | *"64mb"
+
+     "busy-reply-threshold": int | *5000
 
      "lua-time-limit": int | *5000
 

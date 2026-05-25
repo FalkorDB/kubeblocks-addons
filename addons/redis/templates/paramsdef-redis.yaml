@@ -1,16 +1,5 @@
 # reuse redis7-config-effect-scope.
-{{- $redisCeRepo := include "redis.ceRepository" . -}}
 {{- range .Values.redisVersions }}
-{{- $version := .major }}
-{{- if eq .major "8" }}
-  {{ $version = "7" }}
-{{- end }}
-{{- $redisImage := printf "%s/%s:%s" ( $.Values.image.registry | default "docker.io" ) $.Values.image.repository .defaultImageTag }}
-{{- $redisRepository := printf "%s/%s" ( $.Values.image.registry | default "docker.io" ) $.Values.image.repository }}
-{{- if or (eq .major "8") (eq .major "5") }}
-{{- $redisImage = printf "%s/%s:%s" ( $.Values.ceImage.registry | default ( $.Values.image.registry | default "docker.io" ) ) $redisCeRepo .defaultImageTag }}
-{{- $redisRepository = printf "%s/%s" ( $.Values.ceImage.registry | default ( $.Values.image.registry | default "docker.io" ) ) $redisCeRepo }}
-{{- end }}
 {{- $pd := $.Files.Get "config/redis-config-effect-scope.yaml" | fromYaml }}
 ---
 apiVersion: parameters.kubeblocks.io/v1alpha1
@@ -20,28 +9,11 @@ metadata:
   labels:
     {{- include "redis.labels" $ | nindent 4 }}
 spec:
-  reloadAction:
-    shellTrigger:
-      sync: true
-      command:
-        - "reload-parameter.sh"
-      scriptConfig:
-        scriptConfigMapRef: redis-reload-tools-script
-        namespace: {{ $.Release.Namespace }}
-      toolsSetup:
-        mountPoint: /kb_tools
-        toolConfigs:
-          - name: kb-tools
-            asContainerImage: true
-            image: {{ $redisImage }}
-            imageMappings:
-            {{- range .mirrorVersions }}
-            - serviceVersions:
-                - {{ .version }}
-              image: {{ $redisRepository }}:{{ .imageTag }}
-            {{- end }}
-
+  componentDef: {{ printf "%s-%s" .componentDef  $.Chart.Version }}
+  templateName: redis-replication-config
   fileName: redis.conf
+  fileFormatConfig:
+    format: redis
   # ConfigurationSchema that impose restrictions on engine parameter's rule
   parametersSchema:
     topLevelKey: RedisParameter

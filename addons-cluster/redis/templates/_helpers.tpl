@@ -61,7 +61,6 @@ Define redis cluster shardingSpec with ComponentDefinition.
         numDigits: 5
         numSymbols: 0
         letterCase: MixedCases
-        seed: {{ include "kblib.clusterName" . }}
       {{- end }}
     resources:
       limits:

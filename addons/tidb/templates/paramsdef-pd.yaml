@@ -7,34 +7,16 @@ metadata:
   labels:
     {{- include "tidb.labels" . | nindent 4 }}
 spec:
+  componentDef: {{ include "tidb.pd7.compDefName" . }}
+  templateName: pd-configuration
   fileName: pd.toml
+  fileFormatConfig:
+    format: toml
 
   parametersSchema:
     topLevelKey: PDParameter
     cue: |-
       {{- .Files.Get "config/pd-config-constraint.cue" | nindent 6 }}
-
-  reloadAction:
-    # execute action in one pod is enough
-    targetPodSelector:
-      matchLabels:
-        kubeblocks.io/role: leader
-    shellTrigger:
-      sync: true
-      command:
-        - "update-pd-config.sh"
-      scriptConfig:
-        scriptConfigMapRef: {{ include "tidb.cmScriptsName" . }}
-        namespace: {{ .Release.Namespace }}
-      toolsSetup:
-        mountPoint: /kb-tools
-        toolConfigs:
-          - name: init-pd-ctl
-            command:
-              - cp
-              - /pd-ctl
-              - /kb-tools/pd-ctl
-            image: "{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.pd.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
 
   dynamicParameters:
     - log.level

@@ -73,7 +73,6 @@ spec:
     - name: primary
       updatePriority: 2
       participatesInQuorum: false
-      isExclusive: true
     - name: secondary
       updatePriority: 1
       participatesInQuorum: false
@@ -92,6 +91,7 @@ spec:
       namespace: {{ $.Release.Namespace }}
       volumeName: redis-cluster-config
       externalManaged: true
+      {{- include "redis.config.reconfigureAction" $ | nindent 6 }}
   scripts:
     - name: redis-cluster-scripts
       template: {{ include "redisCluster.scriptsTemplate" $ }}
@@ -107,7 +107,6 @@ spec:
         numDigits: 5
         numSymbols: 0
         letterCase: MixedCases
-        seed: 5wM4uhmKV1Ohy087
   hostNetwork:
     containerPorts:
       - container: redis-cluster
@@ -469,6 +468,7 @@ spec:
           - redis
           - getrole
     postProvision:
+      timeoutSeconds: 900
       exec:
         container: redis-cluster
         command:

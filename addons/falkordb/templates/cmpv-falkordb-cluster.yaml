@@ -18,8 +18,9 @@ spec:
   {{- end }}
   releases:
   {{- range .Values.falkordbVersions }}
-  {{- $falkordbRepository := printf "%s/%s" ( $.Values.image.registry | default "docker.io" ) $.Values.image.repository }}
+  {{- $defaultRepository := .repository | default $.Values.image.repository -}}
   {{- range .mirrorVersions }}
+  {{- $falkordbRepository := printf "%s/%s" ( $.Values.image.registry | default "docker.io" ) ( .repository | default $defaultRepository ) }}
   - name: {{ .version }}
     serviceVersion: {{ .version }}
     images:

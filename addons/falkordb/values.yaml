@@ -16,6 +16,7 @@ falkordbVersions:
     sentinelComponentDef: "falkordb-sent-4"
     serviceVersion: "4.18.8"
     defaultImageTag: "v4.18.8"
+    repository: "falkordb/falkordb"
     mirrorVersions:
       - version: "4.18.8"
         imageTag: "v4.18.8"
@@ -42,13 +43,13 @@ image:
   apeDts:
     registry: ""
     repository: apecloud/ape-dts
-    tag: 2.0.24
-    reshardTag: redis.reshard.2.0.9
+    tag: 2.0.26-alpha.16
+    reshardTag: 2.0.26-alpha.16
 
 apeDtsImage:
   registry: ""
   repository: apecloud/ape-dts
-  tag: 2.0.24
+  tag: 2.0.26-alpha.16
 
 dbctlImage:
   registry: docker.io

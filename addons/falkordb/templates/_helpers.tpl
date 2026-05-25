@@ -115,20 +115,24 @@ falkordb-cluster-scripts-template-{{ .Chart.Version }}
 
 {{- define "falkordb.defaultImage" -}}
 {{- $defaultTag := .Values.image.tag.major4.minor18 -}}
+{{- $repository := .Values.image.repository -}}
 {{- with first .Values.falkordbVersions }}
 {{- $defaultTag = .defaultImageTag | default $defaultTag -}}
+{{- $repository = .repository | default $repository -}}
 {{- end -}}
-{{ include "falkordb.repository" . }}:{{ $defaultTag }}
+{{ .Values.image.registry | default "docker.io" }}/{{ $repository }}:{{ $defaultTag }}
 {{- end }}
 
 {{- define "falkordb.imageVersionMapping" -}}
 valueFrom:
   versionMapping:
   {{- range .Values.falkordbVersions }}
+  {{- $defaultRepository := .repository | default $.Values.image.repository -}}
   {{- range .mirrorVersions }}
+  {{- $falkordbRepository := printf "%s/%s" ( $.Values.image.registry | default "docker.io" ) ( .repository | default $defaultRepository ) }}
     - serviceVersions:
         - "{{ .version }}"
-      mappedValue: "{{ include "falkordb.repository" $ }}:{{ .imageTag }}"
+      mappedValue: "{{ $falkordbRepository }}:{{ .imageTag }}"
   {{- end }}
   {{- end }}
 {{- end }}
@@ -173,6 +177,23 @@ falkordb-account.sh: |-
 {{- end }}
 {{- end }}
 
+{{- define "falkordb.config.reconfigureAction" -}}
+reconfigure:
+  exec:
+    container: falkordb
+    targetPodSelector: All
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+
+        env | cut -d= -f1 | grep -E '^[a-z0-9_.-][a-z0-9_.-]*$' | sort -u | while IFS= read -r param; do
+          [ -n "${param}" ] || continue
+          /scripts/reload-parameter.sh "${param}" "$(printenv "${param}")"
+        done
+{{- end -}}
+
 {{- define "apeDts.reshard.image" -}}
 {{ .Values.image.apeDts.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.image.apeDts.repository}}:{{ .Values.image.apeDts.reshardTag }}
 {{- end }}}
@@ -212,4 +233,3 @@ policyRules:
   - get
   - list
 {{- end -}}
-

@@ -14,9 +14,12 @@ spec:
     maxShards: 64
   provisionStrategy: Parallel
   updateStrategy: Parallel
+  systemAccounts:
+    - name: default
+      shared: true
   lifecycleActions:
     shardRemove:
-      timeoutSeconds: 600
+      timeoutSeconds: 900
       exec:
         container: redis-cluster
         command:

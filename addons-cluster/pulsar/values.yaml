@@ -12,7 +12,6 @@ terminationPolicy: Delete
 
 ## Annotation configurations
 commonAnnotations:
-  resource.kubeblocks.io/ignore-constraint: "true"
 
 image:
   registry: docker.io
@@ -103,7 +102,7 @@ zookeeper:
       size: 8
     log:
       storageClassName:
-      size: 8
+      size: 2
 
   ## @param keeper.tolerations Tolerations for *Keeper pods assignment
   ## ref: https://kubernetes.io/docs/concepts/configuration/taint-and-toleration/
@@ -149,7 +148,7 @@ clusterDomain: ".cluster.local"
 # test suites
 tests:
   benchmark:
-    kafka2Kafka: true
+    kafka2Kafka: false
 
 # Service reference configuration, such as using an external ZooKeeper or a ZooKeeper service deployed in a separate cluster,
 # currently supports configuring the ZooKeeper service reference.

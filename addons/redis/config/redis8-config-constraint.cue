@@ -85,7 +85,7 @@
 
 	maxclients: int & >=1 & <=65000 | *65000
 
-	maxmemory?: int
+	maxmemory?: int @storeResource()
 
 	"min-replicas-max-lag": int | *10
 
@@ -280,6 +280,8 @@
     "auto-aof-rewrite-min-size": string | *"64mb"
 
     "busy-reply-threshold": int | *5000
+
+    "lua-time-limit": int | *5000
 
     // By default latency monitoring is disabled since it is mostly not needed
     // if you don't have latency issues, and collecting data has a performance

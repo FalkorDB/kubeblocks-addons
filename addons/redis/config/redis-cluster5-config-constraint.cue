@@ -22,6 +22,8 @@
 
 	"cluster-require-full-coverage"?: string & "yes" | "no"
 
+	"cluster-migration-barrier": int | *99999
+
 	"cluster-node-timeout": int | *0
 
 	"cluster-replica-validity-factor": int | *0
@@ -62,9 +64,11 @@
 
 	"lua-time-limit": int & 5000 | *5000
 
+	"busy-reply-threshold": int | *5000
+
 	maxclients: int & >=1 & <=65000 | *65000
 
-	maxmemory?: int
+	maxmemory?: int @storeResource()
 
 	"maxmemory-policy"?: string & "volatile-lru" | "allkeys-lru" | "volatile-lfu" | "allkeys-lfu" | "volatile-random" | "allkeys-random" | "volatile-ttl" | "noeviction"
 

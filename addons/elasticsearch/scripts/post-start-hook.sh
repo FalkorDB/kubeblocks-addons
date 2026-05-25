@@ -76,7 +76,11 @@ if grep '\- master\|master: true' config/elasticsearch.yml > /dev/null 2>&1; the
         touch ${CLUSTER_FORMED_FILE}
     fi
 else
-    exit 0
+	if grep 'type: single-node' config/elasticsearch.yml > /dev/null 2>&1; then
+		echo "single-node mode, skip cluster formation and user initialization"
+	else
+    	exit 0
+	fi
 fi
 
 # The following operations only need to be performed on master-0
@@ -138,7 +142,8 @@ fi
 # Store the certificate in an ES index for Kibana to access
 # https://github.com/apecloud/kubeblocks/issues/8278
 index_name=kubeblocks_ca_crt
-ca_crt=$(cat /usr/share/elasticsearch/config/ca.crt | base64 -w 0)
+# ca in /usr/share/elasticsearch/config is in PEM format, but we want to store it in CRT format for better compatibility with KB, so we just change the file extension but keep the content unchanged
+ca_crt=$(cat /usr/share/elasticsearch/config/ca.pem | base64 -w 0)
 echo "fill elastic ca into index ${index_name}"
 #{
 #  "_index" : "kubeblocks_ca_crt",

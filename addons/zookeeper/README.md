@@ -20,7 +20,7 @@ Apache Zookeeper is a centralized service for maintaining configuration informat
 
 | Versions |
 |----------|
-| 3.4.14,3.6.4,3.7.2,3.8.4,3.9.2 |
+|3.6.4,3.7.2,3.8.4,3.9.2 |
 
 ## Prerequisites
 
@@ -63,7 +63,7 @@ spec:
       componentDef: zookeeper
       # ServiceVersion specifies the version of the Service expected to be
       # provisioned by this Component.
-      # Valid options are: [3.4.14,3.6.4,3.7.2,3.8.4,3.9.2]
+      # Valid options are: [3.6.4,3.7.2,3.8.4,3.9.2]
       serviceVersion: "3.9.2"
       # Update `replicas` to your need.
       replicas: 3
@@ -136,8 +136,8 @@ spec:
     # Specifies the replica changes for scaling out components
     scaleOut:
       # Specifies the replica changes for the component.
-      # add one more replica to current component
-      replicaChanges: 1
+      # add two more replicas: 3 -> 5 (always keep an odd number for quorum)
+      replicaChanges: 2
 
 ```
 
@@ -191,8 +191,8 @@ spec:
     # Specifies the replica changes for scaling out components
     scaleIn:
       # Specifies the replica changes for the component.
-      # add one more replica to current component
-      replicaChanges: 1
+      # remove two replicas: 5 -> 3 (always keep an odd number for quorum)
+      replicaChanges: 2
 
 ```
 
