@@ -62,6 +62,23 @@ jobs:
           echo "version=${version}" >> $GITHUB_OUTPUT
           echo "Chart version: ${version}"
 
+      - name: Update Chart.yaml version
+        shell: bash
+        run: |
+          chart_file="${{ env.CHART_DIR }}/Chart.yaml"
+          version="${{ steps.version.outputs.version }}"
+          awk -v version="${version}" '
+            !updated && $1 == "version:" {
+              print "version: " version
+              updated = 1
+              next
+            }
+            { print }
+          ' "${chart_file}" > "${chart_file}.tmp"
+          mv "${chart_file}.tmp" "${chart_file}"
+          grep -qx "version: ${version}" "${chart_file}"
+          grep '^version:' "${chart_file}"
+
       - name: Helm Dependency
         run: helm dependency build ${{ env.CHART_DIR }}
 
