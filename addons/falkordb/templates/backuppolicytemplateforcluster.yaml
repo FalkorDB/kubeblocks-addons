@@ -16,6 +16,9 @@ spec:
   - name: datafile
     snapshotVolumes: false
     actionSetName: falkordb-cluster-br
+    env:
+      - name: IMAGE
+        {{- include "falkordb.imageVersionMapping" . | nindent 8 }}
     targetVolumes:
       volumeMounts:
         - name: data

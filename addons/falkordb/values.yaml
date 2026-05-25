@@ -21,6 +21,8 @@ falkordbVersions:
         imageTag: "v4.18.8"
       - version: "4.14.10"
         imageTag: "v4.14.10"
+      - version: "4.12.5"
+        imageTag: "v4.12.5"
 
 image:
   # refer: https://redis.io/docs/stack/

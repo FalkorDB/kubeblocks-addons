@@ -41,7 +41,7 @@ spec:
         podSpec:
           containers:
             - name: reset-master
-              image: {{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}:{{ .Values.image.tag.major4.minor12 }}
+              image: {{ include "falkordb.defaultImage" . }}
               imagePullPolicy: IfNotPresent
               command:
                 - bash

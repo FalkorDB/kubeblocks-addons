@@ -106,7 +106,31 @@ falkordb-cluster-scripts-template-{{ .Chart.Version }}
 {{- end -}}
 
 {{- define "falkordb4.image" -}}
-{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}:{{ .Values.image.tag.major4.minor14 }}
+{{ include "falkordb.defaultImage" . }}
+{{- end }}
+
+{{- define "falkordb.repository" -}}
+{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}
+{{- end }}
+
+{{- define "falkordb.defaultImage" -}}
+{{- $defaultTag := .Values.image.tag.major4.minor18 -}}
+{{- with first .Values.falkordbVersions }}
+{{- $defaultTag = .defaultImageTag | default $defaultTag -}}
+{{- end -}}
+{{ include "falkordb.repository" . }}:{{ $defaultTag }}
+{{- end }}
+
+{{- define "falkordb.imageVersionMapping" -}}
+valueFrom:
+  versionMapping:
+  {{- range .Values.falkordbVersions }}
+  {{- range .mirrorVersions }}
+    - serviceVersions:
+        - "{{ .version }}"
+      mappedValue: "{{ include "falkordb.repository" $ }}:{{ .imageTag }}"
+  {{- end }}
+  {{- end }}
 {{- end }}
 
 {{- define "busybox.image" -}}

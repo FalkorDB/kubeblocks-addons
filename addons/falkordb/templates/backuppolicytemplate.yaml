@@ -16,6 +16,9 @@ spec:
     - name: datafile
       snapshotVolumes: false
       actionSetName: falkordb-physical-br
+      env:
+        - name: IMAGE
+          {{- include "falkordb.imageVersionMapping" . | nindent 10 }}
       targetVolumes:
         volumeMounts:
           - name: data
@@ -23,6 +26,9 @@ spec:
     - name: aof
       snapshotVolumes: false
       actionSetName: falkordb-for-pitr
+      env:
+        - name: IMAGE
+          {{- include "falkordb.imageVersionMapping" . | nindent 10 }}
       targetVolumes:
         volumeMounts:
           - name: data
