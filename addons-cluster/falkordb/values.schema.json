@@ -101,14 +101,14 @@
           "default": ""
         },
         "customSecretName": {
-          "title": "the secret name for Sentinel default user's password",
-          "description": "the secret must contain keys named 'username' and 'password'",
+          "title": "deprecated Sentinel default user secret name",
+          "description": "deprecated: Sentinel uses the FalkorDB default user's customSecretName/customSecretNamespace",
           "type": "string",
           "default": ""
         },
         "customSecretNamespace": {
-          "title": "the secret namespace for Sentinel default user's password",
-          "description": "the secret must contain keys named 'username' and 'password'",
+          "title": "deprecated Sentinel default user secret namespace",
+          "description": "deprecated: Sentinel uses the FalkorDB default user's customSecretName/customSecretNamespace",
           "type": "string",
           "default": ""
         },

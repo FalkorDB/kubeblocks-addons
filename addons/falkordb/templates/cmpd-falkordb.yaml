@@ -99,6 +99,7 @@ spec:
         numDigits: 5
         numSymbols: 0
         letterCase: MixedCases
+        seed: 5wM4uhmKV1Ohy087
   tls:
     volumeName: tls
     mountPath: /etc/pki/tls

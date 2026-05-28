@@ -73,8 +73,7 @@ sentinel:
   storage: 20
   replicas: 3
   customMasterName: ""
-  # custom password of default user for sentinel by passing a secret
-  # the secret must contain keys named 'username' and 'password'
+  # deprecated: sentinel uses the FalkorDB default user's customSecretName/customSecretNamespace
   customSecretName: ""
   customSecretNamespace: ""
   storageClassName: ""

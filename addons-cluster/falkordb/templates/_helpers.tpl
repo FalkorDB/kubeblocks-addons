@@ -160,12 +160,12 @@ Define falkordb sentinel ComponentSpec with ComponentDefinition.
     value: "true"
   {{- end }}
   serviceVersion: {{ .Values.version }}
-  {{- if and .Values.sentinel.customSecretName .Values.sentinel.customSecretNamespace }}
+  {{- if and .Values.customSecretName .Values.customSecretNamespace }}
   systemAccounts:
     - name: default
       secretRef:
-        name: {{ .Values.sentinel.customSecretName }}
-        namespace: {{ .Values.sentinel.customSecretNamespace }}
+        name: {{ .Values.customSecretName }}
+        namespace: {{ .Values.customSecretNamespace }}
   {{- end }}
   resources:
     limits:
