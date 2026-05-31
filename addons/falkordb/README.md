@@ -1157,7 +1157,7 @@ kubectl apply -f examples/falkordb/pod-monitor.yaml
 
 Login to the Grafana dashboard and import the dashboard.
 
-The `redis_exporter` used here is provided by [redis_exporter](https://github.com/oliver006/redis_exporter)[^3], and more dashboards can be found in the Grafana dashboard store[^2].
+The `redis_exporter` used here is provided by [redis_exporter](https://github.com/FalkorDB/redis_exporter)[^3], and more dashboards can be found in the Grafana dashboard store[^2].
 
 > [!NOTE]
 > Make sure the labels are set correctly in the `PodMonitor` file to match the dashboard.
@@ -1482,4 +1482,4 @@ spec:
 
 [^1]: Sentinel: <https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/>
 [^2]: Grafana Dashboard Store: <https://grafana.com/grafana/dashboards/>
-[^3]: Redis Exporter Metrics: <https://github.com/oliver006/redis_exporter>
+[^3]: Redis Exporter Metrics: <https://github.com/FalkorDB/redis_exporter>

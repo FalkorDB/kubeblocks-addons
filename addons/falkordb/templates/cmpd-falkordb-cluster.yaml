@@ -596,6 +596,10 @@ spec:
             value: "true"
           - name: REDIS_EXPORTER_SKIP_TLS_VERIFICATION
             value: "true"
+          - name: REDIS_EXPORTER_IS_FALKORDB
+            value: "true"
+          - name: REDIS_EXPORTER_INCL_FALKORDB_GRAPH_MEMORY
+            value: "true"
         ports:
           - name: http-metrics
             containerPort: 9121
