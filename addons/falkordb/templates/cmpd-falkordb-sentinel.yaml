@@ -56,11 +56,13 @@ spec:
   volumes:
     - name: data
       needSnapshot: true
+  {{- if $.Values.logConfigs }}
   logConfigs:
     {{- range $name,$pattern := $.Values.logConfigs }}
     - name: {{ $name }}
       filePathPattern: {{ $pattern }}
     {{- end }}
+  {{- end }}
   scripts:
     - name: falkordb-scripts
       template: {{ include "falkordb.scriptsTemplate" $ }}

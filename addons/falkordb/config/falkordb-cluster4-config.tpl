@@ -7,7 +7,7 @@ daemonize no
 pidfile /var/run/redis_6379.pid
 {{ block "logsBlock" . }}
 loglevel notice
-logfile "/data/running.log"
+logfile ""
 {{ end }}
 databases 16
 always-show-logo no

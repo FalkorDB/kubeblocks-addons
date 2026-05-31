@@ -328,12 +328,16 @@ check_current_pod_is_primary() {
 
 start_redis_server() {
     module_path="/var/lib/falkordb/bin"
-    exec_cmd="exec redis-server /etc/redis/redis.conf"
+  exec_cmd="redis-server /etc/redis/redis.conf"
     if [ -f ${module_path}/falkordb.so ]; then
         exec_cmd="$exec_cmd --loadmodule ${module_path}/falkordb.so ${FALKORDB_ARGS}"
     fi
     echo "Starting falkordb server cmd: $exec_cmd"
-    eval "$exec_cmd"
+  if command -v script >/dev/null 2>&1; then
+    script -q -f -e -c "$exec_cmd" /dev/null 2>&1 | sed -u -E 's/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ /[falkordb] /; t; s/^/[falkordb] /'
+  else
+    eval "$exec_cmd" 2>&1 | sed -u -E 's/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ /[falkordb] /; t; s/^/[falkordb] /'
+  fi
 }
 
 # TODO: if instanceTemplate is specified, the pod service could not be parsed from the pod ordinal.

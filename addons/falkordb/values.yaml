@@ -79,8 +79,7 @@ metrics:
 # defined the data volume mount path of redis server
 dataMountPath: /data
 
-logConfigs:
-  running: /data/running.log
+logConfigs: {}
 
 # cluster domain without . prefix
 clusterDomain: "cluster.local"

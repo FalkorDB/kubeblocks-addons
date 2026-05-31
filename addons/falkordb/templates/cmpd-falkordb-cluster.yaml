@@ -68,11 +68,13 @@ spec:
     - name: secondary
       updatePriority: 1
       participatesInQuorum: false
+  {{- if $.Values.logConfigs }}
   logConfigs:
     {{- range $name,$pattern := $.Values.logConfigs }}
     - name: {{ $name }}
       filePathPattern: {{ $pattern }}
     {{- end }}
+  {{- end }}
   exporter:
     containerName: metrics
     scrapePath: /metrics
