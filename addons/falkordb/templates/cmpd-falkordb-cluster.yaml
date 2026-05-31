@@ -418,8 +418,8 @@ spec:
           memoryLimit: Required
   lifecycleActions:
     roleProbe:
-      periodSeconds: 1
-      timeoutSeconds: 1
+      periodSeconds: 3
+      timeoutSeconds: 3
       exec:
         container: falkordb-cluster
         env:

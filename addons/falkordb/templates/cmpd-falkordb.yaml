@@ -310,8 +310,8 @@ spec:
       value: {{ $.Values.tlsMountPath }}
   lifecycleActions:
     roleProbe:
-      periodSeconds: 1
-      timeoutSeconds: 1
+      periodSeconds: 3
+      timeoutSeconds: 3
       exec:
         env:
           - name: CURRENT_POD_NAME
