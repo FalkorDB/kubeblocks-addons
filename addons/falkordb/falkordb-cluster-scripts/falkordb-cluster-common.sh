@@ -420,6 +420,43 @@ check_node_in_cluster_with_retry() {
   return 0
 }
 
+check_secondary_replicated_to_primary() {
+  local cluster_node="$1"
+  local cluster_node_port="$2"
+  local secondary_node_name="$3"
+  local primary_cluster_id="$4"
+  cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port")
+  status=$?
+  if [ $status -ne 0 ]; then
+    echo "Failed to get cluster nodes info in check_secondary_replicated_to_primary" >&2
+    return 1
+  fi
+  secondary_node_info=$(echo "$cluster_nodes_info" | grep "$secondary_node_name" | head -n 1)
+  if is_empty "$secondary_node_info"; then
+    return 1
+  fi
+  secondary_node_role=$(echo "$secondary_node_info" | awk '{print $3}')
+  secondary_primary_cluster_id=$(echo "$secondary_node_info" | awk '{print $4}')
+  if { contains "$secondary_node_role" "slave" || contains "$secondary_node_role" "replica"; } && equals "$secondary_primary_cluster_id" "$primary_cluster_id"; then
+    return 0
+  fi
+  return 1
+}
+
+check_secondary_replicated_to_primary_with_retry() {
+  local cluster_node="$1"
+  local cluster_node_port="$2"
+  local secondary_node_name="$3"
+  local primary_cluster_id="$4"
+  check_result=$(call_func_with_retry $retry_times $retry_delay_second check_secondary_replicated_to_primary "$cluster_node" "$cluster_node_port" "$secondary_node_name" "$primary_cluster_id")
+  status=$?
+  if [ $status -ne 0 ]; then
+    echo "Failed to check the secondary node $secondary_node_name replicated to primary $primary_cluster_id in the cluster node $cluster_node:$cluster_node_port after retry" >&2
+    return 1
+  fi
+  return 0
+}
+
 check_redis_server_ready_with_retry() {
   local host="$1"
   local port="$2"

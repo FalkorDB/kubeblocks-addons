@@ -1327,6 +1327,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         return 1
       }
 
+      check_secondary_replicated_to_primary_with_retry() {
+        return 1
+      }
+
       setup() {
         export CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-98x"
         export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1"
@@ -1361,6 +1365,84 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         The error should include "Failed to scale out shard secondary node falkordb-shard-98x-1"
         The stdout should include "FalkorDB cluster scale out shard primary node falkordb-shard-98x-0 successfully"
         The stdout should include "primary_node_with_port: 10.42.0.1:6379, primary_node_fqdn: 10.42.0.1, mapping_primary_cluster_id: cluster_id_123"
+      End
+    End
+
+    Context "when secondary add-node fails but topology already converged"
+      init_current_comp_default_nodes_for_scale_out() {
+        declare -gA scale_out_shard_default_primary_node
+        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
+        declare -gA scale_out_shard_default_other_nodes
+        scale_out_shard_default_other_nodes["falkordb-shard-98x-1"]="10.42.0.2:6379"
+      }
+
+      get_cluster_id() {
+        echo "cluster_id_123"
+      }
+
+      check_slots_covered() {
+        return 1
+      }
+
+      find_exist_available_node() {
+        echo "10.42.0.3:6379"
+      }
+
+      scale_out_shard_primary_join_cluster() {
+        return 0
+      }
+
+      check_secondary_replicated_to_primary() {
+        return 1
+      }
+
+      secondary_replicated_to_primary() {
+        return 1
+      }
+
+      check_secondary_replicated_to_primary_with_retry() {
+        [ "$1" = "10.42.0.1" ] && [ "$2" = "6379" ] && [ "$3" = "falkordb-shard-98x-1" ] && [ "$4" = "cluster_id_123" ]
+      }
+
+      scale_out_shard_reshard() {
+        return 0
+      }
+
+      setup() {
+        export CURRENT_SHARD_COMPONENT_SHORT_NAME="falkordb-shard-98x"
+        export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1"
+        export KB_CLUSTER_POD_HOST_IP_LIST="10.42.0.1,10.42.0.2,10.42.0.3,10.42.0.4"
+        export KB_CLUSTER_COMPONENT_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1"
+        export KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST="10.42.0.1,10.42.0.2"
+        export KB_CLUSTER_POD_IP_LIST="10.42.0.1,10.42.0.2,10.42.0.3,10.42.0.4"
+        export KB_CLUSTER_COMPONENT_LIST="falkordb-shard-98x,falkordb-shard-7hy"
+        export KB_CLUSTER_COMPONENT_DELETING_LIST=""
+        export KB_CLUSTER_COMPONENT_UNDELETED_LIST="falkordb-shard-98x,falkordb-shard-7hy"
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        export SERVICE_PORT="6379"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_COMPONENT_SHORT_NAME
+        unset KB_CLUSTER_POD_NAME_LIST
+        unset KB_CLUSTER_POD_HOST_IP_LIST
+        unset KB_CLUSTER_COMPONENT_POD_NAME_LIST
+        unset KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST
+        unset KB_CLUSTER_POD_IP_LIST
+        unset KB_CLUSTER_COMPONENT_LIST
+        unset KB_CLUSTER_COMPONENT_DELETING_LIST
+        unset KB_CLUSTER_COMPONENT_UNDELETED_LIST
+        unset CURRENT_SHARD_COMPONENT_NAME
+        unset SERVICE_PORT
+      }
+      After "un_setup"
+
+      It "returns success and continues scale out"
+        When call scale_out_redis_cluster_shard
+        The status should be success
+        The output should include "Secondary node falkordb-shard-98x-1 already replicated to primary after add-node retry, treat as success"
+        The output should include "FalkorDB cluster scale out shard reshard successfully"
       End
     End
 

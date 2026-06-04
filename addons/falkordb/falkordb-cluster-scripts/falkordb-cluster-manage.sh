@@ -972,12 +972,14 @@ scale_out_redis_cluster_shard() {
   for secondary_pod_name in "${!scale_out_shard_default_other_nodes[@]}"; do
     scale_out_shard_secondary_node="${scale_out_shard_default_other_nodes[$secondary_pod_name]}"
     echo "primary_node_with_port: $primary_node_with_port, primary_node_fqdn: $primary_node_fqdn, mapping_primary_cluster_id: $mapping_primary_cluster_id"
-    if check_node_in_cluster "$primary_node_fqdn" "$primary_node_with_port" "$secondary_pod_name"; then
+    if check_secondary_replicated_to_primary "$primary_node_fqdn" "$primary_node_port" "$secondary_pod_name" "$mapping_primary_cluster_id"; then
       echo "Secondary node $secondary_pod_name already joined the cluster, skip replicating to primary"
       continue
     fi
     if secondary_replicated_to_primary "$scale_out_shard_secondary_node" "$primary_node_with_port" "$mapping_primary_cluster_id"; then
       echo "FalkorDB cluster scale out shard secondary node $secondary_pod_name successfully"
+    elif check_secondary_replicated_to_primary_with_retry "$primary_node_fqdn" "$primary_node_port" "$secondary_pod_name" "$mapping_primary_cluster_id"; then
+      echo "Secondary node $secondary_pod_name already replicated to primary after add-node retry, treat as success"
     else
       echo "Failed to scale out shard secondary node $secondary_pod_name" >&2
       return 1

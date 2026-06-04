@@ -196,6 +196,28 @@ Describe "FalkorDB Cluster Common Bash Script Tests"
     End
   End
 
+  Describe "check_secondary_replicated_to_primary()"
+    It "returns 0 when secondary is replicated to the expected primary"
+      get_cluster_nodes_info() {
+        echo "primary-id falkordb-shard-98x-0:6379@16379 master - 0 1590000000000 1 connected 0-5460"$'\n'"secondary-id falkordb-shard-98x-1:6379@16379 slave primary-id 0 1590000000000 2 connected"
+        return 0
+      }
+
+      When call check_secondary_replicated_to_primary "falkordb-shard-98x-0" "6379" "falkordb-shard-98x-1" "primary-id"
+      The status should be success
+    End
+
+    It "returns 1 when secondary is replicated to another primary"
+      get_cluster_nodes_info() {
+        echo "primary-id falkordb-shard-98x-0:6379@16379 master - 0 1590000000000 1 connected 0-5460"$'\n'"secondary-id falkordb-shard-98x-1:6379@16379 slave other-primary-id 0 1590000000000 2 connected"
+        return 0
+      }
+
+      When call check_secondary_replicated_to_primary "falkordb-shard-98x-0" "6379" "falkordb-shard-98x-1" "primary-id"
+      The status should be failure
+    End
+  End
+
   Describe "check_cluster_initialized()"
     Context "returns 0 when cluster is initialized"
       get_cluster_info() {
