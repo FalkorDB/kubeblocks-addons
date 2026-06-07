@@ -1,0 +1,23 @@
+{{- range .Values.falkordbVersions }}
+---
+apiVersion: parameters.kubeblocks.io/v1alpha1
+kind: ParamConfigRenderer
+metadata:
+  name: {{ printf "falkordb-cluster%s-pcr-%s" .major $.Chart.Version }}
+  annotations:
+    {{- include "falkordb.annotations" $ | nindent 4 }}
+  labels:
+    {{- include "falkordb.labels" $ | nindent 4 }}
+spec:
+  componentDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+  configs:
+    - fileFormatConfig:
+        format: redis
+      name: redis.conf
+      reRenderResourceTypes:
+        - vscale
+        - tls
+      templateName: falkordb-cluster-config
+  parametersDefs:
+    - {{ printf "falkordb-cluster%s-pd" .major }}
+{{- end }}
