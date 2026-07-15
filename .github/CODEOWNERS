@@ -70,6 +70,9 @@ addons-cluster/oceanbase-ce/ @Powerfooi @shanshanying @leon-ape @apecloud/kb-rev
 addons/opensearch/ @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 addons-cluster/opensearch/ @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 
+addons/openviking/ @OpenViking_Contributors @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
+addons-cluster/openviking/ @OpenViking_Contributors @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
+
 addons/orchestrator/ @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 addons-cluster/orchestrator/ @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 
@@ -100,11 +103,17 @@ addons-cluster/risingwave/ @RisingWave_Labs @leon-ape @apecloud/kb-reviewers @ap
 addons/rocketmq/ @kizuna-lek @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 addons-cluster/rocketmq/ @kizuna-lek @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 
+addons/rustfs/ @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
+addons-cluster/rustfs/ @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
+
 addons/starrocks-ce/ @yandongxiao @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 addons-cluster/starrocks-ce/ @yandongxiao @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 
 addons/tidb/ @cjc7373 @csuzhangxc @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 addons-cluster/tidb/ @cjc7373 @csuzhangxc @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
+
+addons/valkey/ @weicao @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
+addons-cluster/valkey/ @weicao @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 
 addons/vanilla-postgresql/ @kizuna-lek @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers
 addons-cluster/vanilla-postgresql/ @kizuna-lek @leon-ape @apecloud/kb-reviewers @apecloud/kb-addon-reviewers

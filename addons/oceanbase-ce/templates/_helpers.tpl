@@ -95,10 +95,8 @@ reconfigure:
       - |
         set -eu
 
-        env | cut -d= -f1 | grep -E '^[a-z0-9_.-][a-z0-9_.-]*$' | sort -u | while IFS= read -r param; do
-          [ -n "${param}" ] || continue
-          /scripts/{{ .script }} "${param}" "$(printenv "${param}")"
-        done
+        /scripts/{{ .script }} "$1" "$2"
+      - --
 {{- end -}}
 
 
@@ -161,11 +159,19 @@ oceanbase-ce-reloadscripts
 Define image
 */}}
 {{- define "oceanbase-ce.observer.repository" -}}
+{{- if .Values.image.observer.image -}}
+{{ .Values.image.observer.image }}
+{{- else -}}
 {{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.observer.repository }}
+{{- end -}}
 {{- end -}}
 
 {{- define "oceanbase-ce.metrics.repository" -}}
 {{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.metrics.repository }}
+{{- end -}}
+
+{{- define "oceanbase-ce.obtools.repository" -}}
+{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.obtools.repository }}
 {{- end -}}
 
 {{- define "oceanbase-ce.spec.vars" -}}

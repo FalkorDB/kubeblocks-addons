@@ -20,7 +20,7 @@ Apache Zookeeper is a centralized service for maintaining configuration informat
 
 | Versions |
 |----------|
-|3.6.4,3.7.2,3.8.4,3.9.2 |
+|3.6.4,3.7.2,3.8.4,3.8.6,3.9.2,3.9.4,3.9.5 |
 
 ## Prerequisites
 
@@ -63,7 +63,7 @@ spec:
       componentDef: zookeeper
       # ServiceVersion specifies the version of the Service expected to be
       # provisioned by this Component.
-      # Valid options are: [3.6.4,3.7.2,3.8.4,3.9.2]
+      # Valid options are: [3.6.4,3.7.2,3.8.4,3.8.6,3.9.2,3.9.4,3.9.5]
       serviceVersion: "3.9.2"
       # Update `replicas` to your need.
       replicas: 3
@@ -113,6 +113,18 @@ kubectl apply -f examples/zookeeper/cluster.yaml
 ```
 
 ### Horizontal scaling
+
+The Zookeeper component supports 1 to 6 replicas. Pods whose ordinal is `0`,
+`1`, or `2` are rendered and joined as voting `participant` members; ordinals
+`3` and above are rendered and joined as non-voting `observer` members.
+
+> [!NOTE]
+> For clusters created with older chart revisions that marked
+> `zookeeper-dynamic-config` as externally managed, verify the live Component
+> no longer carries a Component-level external config override before relying on
+> this chart's generated dynamic config during horizontal scaling. If such an
+> override remains, remove that stale override or recreate the Component through
+> the upgraded chart before treating horizontal scaling as validated.
 
 #### Scale-out
 
@@ -545,10 +557,15 @@ kind: Cluster
 metadata:
   name: zk-cluster-restore
   namespace: demo
-  annotations:
-    # zk-cluster-backup is the backup name.
-    kubeblocks.io/restore-from-backup: '{"zookeeper":{"name":"zk-cluster-backup","namespace":"demo","volumeRestorePolicy":"Parallel"}}'
 spec:
+  restore:
+    source:
+      apiGroup: dataprotection.kubeblocks.io
+      kind: Backup
+      name: zk-cluster-backup
+      namespace: demo
+    parameters:
+      dataprotection.kubeblocks.io/volume-restore-policy: Parallel
   terminationPolicy: Delete
   componentSpecs:
     - name: zookeeper

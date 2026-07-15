@@ -77,6 +77,42 @@ Define milvus standalone component definition regex pattern
 {{- end -}}
 
 {{/*
+Shared Milvus standalone ParametersDefinition contract.
+*/}}
+{{- define "milvus-standalone.parametersDefinitionSpec" -}}
+templateName: config
+fileName: user.yaml
+fileFormatConfig:
+  format: yaml
+parametersSchema:
+  topLevelKey: MilvusStandaloneParameter
+  cue: |-
+    #MilvusStandaloneParameter: {
+      ...
+      log?: {
+        ...
+        level?: string & ("debug" | "info" | "warn" | "error" | "panic" | "fatal") | *"info"
+      }
+      proxy?: {
+        ...
+        maxNameLength?: int & >=1 & <=32768 | *255
+        maxFieldNum?: int & >=1 & <=2048 | *64
+        maxDimension?: int & >=1 & <=32768 | *32768
+      }
+      common?: {
+        ...
+        gracefulTime?: int & >=0 & <=600000 | *5000
+      }
+    }
+staticParameters:
+  - log.level
+  - proxy.maxNameLength
+  - proxy.maxFieldNum
+  - proxy.maxDimension
+  - common.gracefulTime
+{{- end -}}
+
+{{/*
 Define milvus minio component definition name
 */}}
 {{- define "milvus-minio.cmpdName" -}}
@@ -181,11 +217,8 @@ Define milvus cluster configuration template name
 milvus-config-template-cluster-{{ .Chart.Version }}
 {{- end -}}
 
-{{/*
-Define milvus delegate run configuration template name
-*/}}
-{{- define "milvus-delegate-run.configTemplateName" -}}
-milvus-delegate-run-{{ .Chart.Version }}
+{{- define "milvus-scripts.configTemplateName" -}}
+milvus-scripts-{{ .Chart.Version }}
 {{- end -}}
 
 {{/*
@@ -328,10 +361,9 @@ Milvus volume mounts - user
   name: milvus-config
   readOnly: true
   subPath: user.yaml
-- mountPath: /milvus/tools/delegate-run.sh
-  name: milvus-delegate-run
+- mountPath: /milvus/scripts
+  name: scripts
   readOnly: true
-  subPath: delegate-run.sh
 {{- end }}
 
 {{/*
@@ -351,12 +383,13 @@ Milvus user config - standalone
   volumeName: milvus-config
   namespace: {{.Release.Namespace}}
   defaultMode: 420
+  externalManaged: true
   restartOnFileChange: true
-- name: delegate-run
-  template: {{ include "milvus-delegate-run.configTemplateName" . }}
-  volumeName: milvus-delegate-run
-  namespace: {{.Release.Namespace}}
-  defaultMode: 493
+- name: scripts
+  template: {{ include "milvus-scripts.configTemplateName" . }}
+  namespace: {{ .Release.Namespace }}
+  volumeName: scripts
+  defaultMode: 0555
 {{- end }}
 
 {{/*
@@ -369,11 +402,11 @@ Milvus user config - cluster
   namespace: {{.Release.Namespace}}
   defaultMode: 420
   restartOnFileChange: true
-- name: delegate-run
-  template: {{ include "milvus-delegate-run.configTemplateName" . }}
-  volumeName: milvus-delegate-run
-  namespace: {{.Release.Namespace}}
-  defaultMode: 493
+- name: scripts
+  template: {{ include "milvus-scripts.configTemplateName" . }}
+  namespace: {{ .Release.Namespace }}
+  volumeName: scripts
+  defaultMode: 0555
 {{- end }}
 
 {{/*

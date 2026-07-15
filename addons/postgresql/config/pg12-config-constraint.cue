@@ -95,7 +95,7 @@
 	bgwriter_flush_after?: int & >=0 & <=256 @storeResource(8KB)
 
 	// Background writer maximum number of LRU pages to flush per round.
-	bgwriter_lru_maxpages?: int & >=0 & <=1000
+	bgwriter_lru_maxpages?: int & >=0 & <=1073741823
 
 	// Multiple of the average buffer usage to free per round.
 	bgwriter_lru_multiplier?: float & >=0 & <=10
@@ -881,7 +881,7 @@
 	ssl_max_protocol_version?: string & "TLSv1" | "TLSv1.1" | "TLSv1.2"
 
 	// Sets the minimum SSL/TLS protocol version to use.
-	ssl_min_protocol_version?: string & "TLSv1" | "TLSv1.1" | "TLSv1.2"
+	ssl_min_protocol_version?: string & "TLSv1" | "TLSv1.1" | "TLSv1.2" | "TLSv1.3"
 
 	// Causes ... strings to treat backslashes literally.
 	standard_conforming_strings?: bool & false | true
