@@ -1515,31 +1515,29 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       setup() {
-        export CURRENT_SHARD_COMPONENT_SHORT_NAME="falkordb-shard-98x"
-        export KB_CLUSTER_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1"
-        export KB_CLUSTER_POD_HOST_IP_LIST="10.42.0.1,10.42.0.2,10.42.0.3,10.42.0.4"
-        export KB_CLUSTER_COMPONENT_POD_NAME_LIST="falkordb-shard-98x-0,falkordb-shard-98x-1"
-        export KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST="10.42.0.1,10.42.0.2"
-        export KB_CLUSTER_POD_IP_LIST="10.42.0.1,10.42.0.2,10.42.0.3,10.42.0.4"
-        export KB_CLUSTER_COMPONENT_LIST="falkordb-shard-98x,falkordb-shard-7hy"
-        export KB_CLUSTER_COMPONENT_DELETING_LIST=""
-        export KB_CLUSTER_COMPONENT_UNDELETED_LIST="falkordb-shard-98x,falkordb-shard-7hy"
+        export CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-98x"
         export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        export ALL_SHARDS_POD_NAME_LIST_COMBINED="falkordb-shard-98x-0,falkordb-shard-98x-1"
+        export ALL_SHARDS_POD_FQDN_LIST_COMBINED="10.42.0.1,10.42.0.2"
+        export CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE="falkordb-shard-98x-0,falkordb-shard-98x-1"
+        export CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE="10.42.0.1,10.42.0.2"
+        export ALL_SHARDS_COMPONENT_LIST="falkordb-shard-98x"
+        export ALL_SHARDS_DELETING_COMPONENT_LIST=""
+        export ALL_SHARDS_UNDELETED_COMPONENT_LIST="falkordb-shard-98x"
         export SERVICE_PORT="6379"
       }
       Before "setup"
 
       un_setup() {
         unset CURRENT_SHARD_COMPONENT_SHORT_NAME
-        unset KB_CLUSTER_POD_NAME_LIST
-        unset KB_CLUSTER_POD_HOST_IP_LIST
-        unset KB_CLUSTER_COMPONENT_POD_NAME_LIST
-        unset KB_CLUSTER_COMPONENT_POD_HOST_IP_LIST
-        unset KB_CLUSTER_POD_IP_LIST
-        unset KB_CLUSTER_COMPONENT_LIST
-        unset KB_CLUSTER_COMPONENT_DELETING_LIST
-        unset KB_CLUSTER_COMPONENT_UNDELETED_LIST
         unset CURRENT_SHARD_COMPONENT_NAME
+        unset ALL_SHARDS_POD_NAME_LIST_COMBINED
+        unset ALL_SHARDS_POD_FQDN_LIST_COMBINED
+        unset CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE
+        unset CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE
+        unset ALL_SHARDS_COMPONENT_LIST
+        unset ALL_SHARDS_DELETING_COMPONENT_LIST
+        unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
         unset SERVICE_PORT
       }
       After "un_setup"
