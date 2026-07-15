@@ -4,9 +4,9 @@ description: "FalkorDB is an in-memory graph database based on Redis."
 
 type: application
 
-version: 1.4.1
+version: 1.5.0
 
-appVersion: "4.18.8"
+appVersion: "4.20.1"
 
 # Add a dependency to the kubeblocks definition library chart
 dependencies:
