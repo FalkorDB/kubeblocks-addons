@@ -114,7 +114,7 @@ falkordb-cluster-scripts-template-{{ .Chart.Version }}
 {{- end }}
 
 {{- define "falkordb.defaultImage" -}}
-{{- $defaultTag := .Values.image.tag.major4.minor18 -}}
+{{- $defaultTag := .Values.image.tag.major4.minor20.patch1 -}}
 {{- $repository := .Values.image.repository -}}
 {{- with first .Values.falkordbVersions }}
 {{- $defaultTag = .defaultImageTag | default $defaultTag -}}
