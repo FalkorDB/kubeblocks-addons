@@ -14,10 +14,14 @@ falkordbVersions:
     componentDef: "falkordb-4"
     clusterComponentDef: "falkordb-cluster-4"
     sentinelComponentDef: "falkordb-sent-4"
-    serviceVersion: "4.18.8"
-    defaultImageTag: "v4.18.8"
+    serviceVersion: "4.20.1"
+    defaultImageTag: "v4.20.1"
     repository: "falkordb/falkordb"
     mirrorVersions:
+      - version: "4.20.1"
+        imageTag: "v4.20.1"
+      - version: "4.18.11"
+        imageTag: "v4.18.11"
       - version: "4.18.8"
         imageTag: "v4.18.8"
       - version: "4.14.10"
@@ -36,9 +40,16 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag:
     major4:
-      minor18: v4.18.8
-      minor14: v4.14.10
-      minor12: v4.12.5
+      minor20:
+        patch1: v4.20.1
+      minor18:
+        patch11: v4.18.11
+      minor8:
+        patch8: v4.18.8
+      minor14:
+        patch10: v4.14.10
+      minor12:
+        patch5: v4.12.5
 
   apeDts:
     registry: ""
