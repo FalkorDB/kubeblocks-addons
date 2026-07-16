@@ -496,8 +496,10 @@ spec:
         command:
           - /bin/bash
           - -c
-          - /scripts/sync-acl.sh
+          - /scripts/falkordb-cluster-member-join.sh > /tmp/member-join.log 2>&1
         targetPodSelector: Any
+      retryPolicy:
+        maxRetries: 10
   runtime:
     initContainers:
       - name: init-dbctl
