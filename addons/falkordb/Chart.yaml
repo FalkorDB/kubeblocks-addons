@@ -4,7 +4,7 @@ description: "FalkorDB is an in-memory graph database based on Redis."
 
 type: application
 
-version: 1.5.0
+version: 1.6.0
 
 appVersion: "4.20.1"
 
