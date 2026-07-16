@@ -315,22 +315,80 @@ get_cluster_announce_ip() {
   return 0
 }
 
+# usage: check_node_in_cluster <cluster_node> <cluster_node_port> <node_name> [expected_node_id]
+# entries flagged as fail are ignored: when a pod is recreated it gets a new cluster node ID,
+# and the surviving nodes keep a stale entry (same pod fqdn, old node ID) in fail state.
+# Matching such an entry would wrongly report the new node as already in the cluster and
+# skip the rejoin (CLUSTER MEET/REPLICATE).
+# when expected_node_id is provided, the matched healthy entry must also carry that node ID.
 check_node_in_cluster() {
   local cluster_node="$1"
   local cluster_node_port="$2"
   local node_name="$3"
+  local expected_node_id="$4"
   cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port")
   status=$?
   if [ $status -ne 0 ]; then
     echo "Failed to get cluster nodes info in check_node_in_cluster" >&2
     return 1
   fi
-  # if the cluster_nodes_info contains multiple lines and the node_name is in the cluster_nodes_info, return true
-  if [ "$(echo "$cluster_nodes_info" | wc -l)" -gt 1 ] && echo "$cluster_nodes_info" | grep -q "$node_name"; then
-    return 0
-  else
+  # if the cluster_nodes_info contains only one line, the cluster is not initialized
+  if [ "$(echo "$cluster_nodes_info" | wc -l)" -le 1 ]; then
     return 1
   fi
+  # the 3rd field is the flags field, e.g. "myself,master", "slave,fail", "master,fail?"
+  matched_healthy_nodes=$(echo "$cluster_nodes_info" | grep "$node_name" | awk '$3 !~ /fail/')
+  if is_empty "$matched_healthy_nodes"; then
+    return 1
+  fi
+  if ! is_empty "$expected_node_id"; then
+    if echo "$matched_healthy_nodes" | awk '{print $1}' | grep -qx "$expected_node_id"; then
+      return 0
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# usage: forget_stale_nodes_for_pod <cluster_node> <cluster_node_port> <pod_match> <current_node_id>
+# forget the stale cluster entries that reference the given pod (matched by pod name or fqdn)
+# but carry a different node ID than the current one. Such entries are left behind when a pod
+# is recreated and comes back with a new cluster node ID; if they are not forgotten, they can
+# be mistaken for the current node and leave the recreated pod as an isolated empty master.
+forget_stale_nodes_for_pod() {
+  local cluster_node="$1"
+  local cluster_node_port="$2"
+  local pod_match="$3"
+  local current_node_id="$4"
+
+  if is_empty "$current_node_id"; then
+    echo "current node id is empty, skip forgetting stale nodes for pod $pod_match" >&2
+    return 0
+  fi
+
+  cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port")
+  status=$?
+  if [ $status -ne 0 ]; then
+    echo "Failed to get cluster nodes info in forget_stale_nodes_for_pod" >&2
+    return 1
+  fi
+
+  stale_node_ids=$(echo "$cluster_nodes_info" | grep "$pod_match" | awk -v self="$current_node_id" '$1 != self {print $1}')
+  if is_empty "$stale_node_ids"; then
+    return 0
+  fi
+
+  for stale_node_id in $stale_node_ids; do
+    echo "Forgetting stale node id $stale_node_id of pod $pod_match on all cluster nodes"
+    unset_xtrace_when_ut_mode_false
+    if is_empty "$REDIS_DEFAULT_PASSWORD"; then
+      redis-cli $REDIS_CLI_TLS_CMD -p "$cluster_node_port" --cluster call "$cluster_node:$cluster_node_port" cluster forget "$stale_node_id" || true
+    else
+      redis-cli $REDIS_CLI_TLS_CMD -p "$cluster_node_port" --cluster call "$cluster_node:$cluster_node_port" cluster forget "$stale_node_id" -a "$REDIS_DEFAULT_PASSWORD" || true
+    fi
+    set_xtrace_when_ut_mode_false
+  done
+  return 0
 }
 
 send_cluster_meet_with_retry() {
@@ -409,8 +467,9 @@ check_node_in_cluster_with_retry() {
   local cluster_node="$1"
   local cluster_node_port="$2"
   local node_name="$3"
+  local expected_node_id="$4"
   # call the execute_check_node_in_cluster_command function with call_func_with_retry function and get the output
-  check_result=$(call_func_with_retry $retry_times $retry_delay_second check_node_in_cluster "$cluster_node" "$cluster_node_port" "$node_name")
+  check_result=$(call_func_with_retry $retry_times $retry_delay_second check_node_in_cluster "$cluster_node" "$cluster_node_port" "$node_name" "$expected_node_id")
   status=$?
   if [ $status -ne 0 ]; then
     echo "Failed to check the node $node_name in the cluster node $cluster_node:$cluster_node_port after retry" >&2

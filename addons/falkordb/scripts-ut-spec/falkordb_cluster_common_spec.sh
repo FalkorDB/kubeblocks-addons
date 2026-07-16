@@ -194,6 +194,89 @@ Describe "FalkorDB Cluster Common Bash Script Tests"
       The status should be failure
       The stderr should include "Failed to get cluster nodes info in check_node_in_cluster"
     End
+
+    It "returns 1 when the only matching entry is a stale fail entry"
+      get_cluster_nodes_info() {
+        echo "old-node-id shard-njx-1.headless:6379@16379 slave,fail primary-id 0 1590000000000 1 connected"$'\n'"primary-id shard-njx-0.headless:6379@16379 master - 0 1590000000000 2 connected 0-5460"
+        return 0
+      }
+
+      When call check_node_in_cluster "172.0.0.1" "6379" "shard-njx-1"
+      The status should be failure
+    End
+
+    It "returns 0 when a healthy entry matches the expected node id"
+      get_cluster_nodes_info() {
+        echo "new-node-id shard-njx-1.headless:6379@16379 slave primary-id 0 1590000000000 1 connected"$'\n'"primary-id shard-njx-0.headless:6379@16379 master - 0 1590000000000 2 connected 0-5460"
+        return 0
+      }
+
+      When call check_node_in_cluster "172.0.0.1" "6379" "shard-njx-1" "new-node-id"
+      The status should be success
+    End
+
+    It "returns 1 when the healthy matching entry carries a different node id"
+      get_cluster_nodes_info() {
+        echo "old-node-id shard-njx-1.headless:6379@16379 slave primary-id 0 1590000000000 1 connected"$'\n'"primary-id shard-njx-0.headless:6379@16379 master - 0 1590000000000 2 connected 0-5460"
+        return 0
+      }
+
+      When call check_node_in_cluster "172.0.0.1" "6379" "shard-njx-1" "new-node-id"
+      The status should be failure
+    End
+  End
+
+  Describe "forget_stale_nodes_for_pod()"
+    It "skips when current node id is empty"
+      When call forget_stale_nodes_for_pod "172.0.0.1" "6379" "shard-njx-1" ""
+      The status should be success
+      The stderr should include "current node id is empty, skip forgetting stale nodes for pod shard-njx-1"
+    End
+
+    It "returns 1 when failed to get cluster nodes info"
+      get_cluster_nodes_info() {
+        echo "Error"
+        return 1
+      }
+
+      When call forget_stale_nodes_for_pod "172.0.0.1" "6379" "shard-njx-1" "new-node-id"
+      The status should be failure
+      The stderr should include "Failed to get cluster nodes info in forget_stale_nodes_for_pod"
+    End
+
+    It "does nothing when no stale entries exist for the pod"
+      get_cluster_nodes_info() {
+        echo "new-node-id shard-njx-1.headless:6379@16379 slave primary-id 0 1590000000000 1 connected"$'\n'"primary-id shard-njx-0.headless:6379@16379 master - 0 1590000000000 2 connected 0-5460"
+        return 0
+      }
+
+      redis-cli() {
+        echo "should not be called"
+        return 1
+      }
+
+      When call forget_stale_nodes_for_pod "172.0.0.1" "6379" "shard-njx-1" "new-node-id"
+      The status should be success
+      The output should not include "Forgetting stale node id"
+    End
+
+    It "forgets stale node ids of a previous incarnation of the pod"
+      get_cluster_nodes_info() {
+        echo "old-node-id shard-njx-1.headless:6379@16379 slave,fail primary-id 0 1590000000000 1 connected"$'\n'"new-node-id shard-njx-1.headless:6379@16379 master - 0 1590000000000 3 connected"$'\n'"primary-id shard-njx-0.headless:6379@16379 master - 0 1590000000000 2 connected 0-5460"
+        return 0
+      }
+
+      redis-cli() {
+        echo "cluster forget called with: $*"
+        return 0
+      }
+
+      When call forget_stale_nodes_for_pod "172.0.0.1" "6379" "shard-njx-1" "new-node-id"
+      The status should be success
+      The output should include "Forgetting stale node id old-node-id of pod shard-njx-1 on all cluster nodes"
+      The output should include "cluster forget old-node-id"
+      The output should not include "Forgetting stale node id new-node-id"
+    End
   End
 
   Describe "check_secondary_replicated_to_primary()"

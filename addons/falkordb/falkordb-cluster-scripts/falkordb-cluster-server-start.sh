@@ -327,9 +327,14 @@ scale_redis_cluster_replica() {
     echo "the nodes.conf file after redis server start is not exist"
   fi
 
+  current_shard_pod_count=$(echo "${CURRENT_SHARD_POD_NAME_LIST}" | tr ',' '\n' | wc -l)
   for target_node_name in $(echo "${CURRENT_SHARD_POD_NAME_LIST}" | tr ',' '\n'); do
-     if [ -f /data/rebuild.flag ] && [ "${CURRENT_POD_NAME}" == "${target_node_name}" ]; then
-       continue
+     if [ "${CURRENT_POD_NAME}" == "${target_node_name}" ]; then
+       # prefer the cluster view of the other pods: after a pod recreation the local node
+       # may only know itself (isolated empty master), which would hide the real topology
+       if [ -f /data/rebuild.flag ] || [ "${current_shard_pod_count}" -gt 1 ]; then
+         continue
+       fi
      fi
      target_node_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$CURRENT_SHARD_POD_FQDN_LIST" "$target_node_name")
      if is_empty "$target_node_fqdn"; then
@@ -371,8 +376,14 @@ scale_redis_cluster_replica() {
      echo "Node $CURRENT_POD_NAME is already in the cluster, skipping scale out replica..."
      exit 0
   fi
-  # if the current pod is not a rebuild-instance and is already in the cluster, skip scale out replica
-  if ! is_rebuild_instance && check_node_in_cluster_with_retry "$primary_node_endpoint" "$primary_node_port" "$CURRENT_POD_NAME"; then
+  # get the node ID of the current (new) incarnation of this pod from the local server,
+  # so membership checks are done by node ID instead of pod name/fqdn only. A recreated pod
+  # gets a new node ID while the surviving nodes may still keep a stale entry with the old
+  # node ID (in fail state) for the same pod fqdn.
+  current_node_id=$(get_cluster_id_with_retry "127.0.0.1" "$service_port")
+  # if the current pod is not a rebuild-instance and is already in the cluster with its
+  # current node ID, skip scale out replica
+  if ! is_rebuild_instance && check_node_in_cluster_with_retry "$primary_node_endpoint" "$primary_node_port" "$CURRENT_POD_NAME" "$current_node_id"; then
     # if current pod is primary node, check the others primary info, if the others primary node info is expired, send cluster meet command again
     echo "Current pod $CURRENT_POD_NAME is a secondary node, check and meet current primary node..."
     check_and_meet_current_primary_node "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port"
@@ -391,14 +402,11 @@ scale_redis_cluster_replica() {
   fi
   # current_node_with_port do not use advertised svc and port, because advertised svc and port are not ready when Pod is not Ready.
   current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$CURRENT_SHARD_POD_FQDN_LIST" "$CURRENT_POD_NAME")
-  if is_rebuild_instance; then
-    echo "Current instance is a rebuild-instance, forget node id in the cluster firstly."
-    node_id=$(get_cluster_id_with_retry "$primary_node_endpoint" "$primary_node_port" "$current_pod_fqdn")
-    if [ -z ${REDIS_DEFAULT_PASSWORD} ]; then
-      redis-cli $REDIS_CLI_TLS_CMD -p $service_port --cluster call $primary_node_endpoint_with_port cluster forget ${node_id}
-    else
-      redis-cli $REDIS_CLI_TLS_CMD -p $service_port --cluster call $primary_node_endpoint_with_port cluster forget ${node_id} -a ${REDIS_DEFAULT_PASSWORD}
-    fi
+  # forget any stale entries left behind by a previous incarnation of this pod (same fqdn,
+  # different node ID, usually in fail state). If they are not forgotten before rejoining,
+  # they defeat the rejoin logic and the recreated pod stays an isolated empty master.
+  if ! forget_stale_nodes_for_pod "$primary_node_endpoint" "$primary_node_port" "$current_pod_fqdn" "$current_node_id"; then
+    echo "Failed to forget stale nodes for pod $current_pod_fqdn, continue to rejoin anyway..." >&2
   fi
   current_node_with_port="$current_pod_fqdn:$service_port"
   replicated_output=$(secondary_replicated_to_primary "$current_node_with_port" "$primary_node_endpoint_with_port" "$primary_node_cluster_id")
@@ -441,7 +449,7 @@ scale_redis_cluster_replica() {
 
     # meet current component primary node if not met yet
     if ! $current_primary_met; then
-      if scale_out_replica_send_meet "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port" "$CURRENT_POD_NAME"; then
+      if scale_out_replica_send_meet "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port" "$CURRENT_POD_NAME" "$current_node_id"; then
         echo "Successfully meet the primary node $primary_node_endpoint_with_port in scale_redis_cluster_replica"
         current_primary_met=true
       else
@@ -458,7 +466,7 @@ scale_redis_cluster_replica() {
         node_port=$(echo "$node_endpoint_with_port" | awk -F ':' '{print $2}')
         node_bus_port=$(echo "$node_info" | awk -F '@' '{print $2}')
 
-        if scale_out_replica_send_meet "$node_endpoint" "$node_port" "$node_bus_port" "$CURRENT_POD_NAME"; then
+        if scale_out_replica_send_meet "$node_endpoint" "$node_port" "$node_bus_port" "$CURRENT_POD_NAME" "$current_node_id"; then
           echo "Successfully meet the primary node $node_endpoint_with_port in scale_redis_cluster_replica"
           other_primary_met["$node_info"]=true
         else
@@ -483,8 +491,11 @@ scale_out_replica_send_meet() {
   local node_port_to_meet="$2"
   local node_bus_port_to_meet="$3"
   local node_to_join="$4"
+  local node_to_join_id="$5"
 
-  if check_node_in_cluster "$node_endpoint_to_meet" "$node_port_to_meet" "$node_to_join"; then
+  # the node is considered joined only if a healthy (non-fail) entry with the current
+  # node ID exists; stale fail entries of a previous incarnation are ignored
+  if check_node_in_cluster "$node_endpoint_to_meet" "$node_port_to_meet" "$node_to_join" "$node_to_join_id"; then
     echo "Node $CURRENT_POD_NAME is successfully added to the cluster."
     return 0
   fi

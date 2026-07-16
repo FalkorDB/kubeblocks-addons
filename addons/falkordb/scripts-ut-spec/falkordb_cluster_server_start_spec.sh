@@ -677,6 +677,10 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         echo "4958e6dca033cd1b321922508553fab869a29d"
       }
 
+      forget_stale_nodes_for_pod() {
+        return 0
+      }
+
       secondary_replicated_to_primary() {
         echo "OK"
         return 0
@@ -716,6 +720,112 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         When run scale_redis_cluster_replica
         The status should be success
         The stdout should include "Node falkordb-shard-sxj-1 is successfully added to the cluster."
+      End
+    End
+
+    Context "when current pod was recreated and a stale fail entry exists"
+      check_redis_server_ready_with_retry() {
+        return 0
+      }
+
+      get_target_pod_fqdn_from_pod_fqdn_vars() {
+        echo "$2.falkordb-shard-sxj-headless.default.svc"
+      }
+
+      get_current_comp_nodes_for_scale_out_replica() {
+        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+      }
+
+      get_cluster_id_with_retry() {
+        if [ "$1" = "127.0.0.1" ]; then
+          echo "new-node-id"
+        else
+          echo "primary-cluster-id"
+        fi
+      }
+
+      check_node_in_cluster_with_retry() {
+        echo "membership check with node id: $4"
+        # the stale fail entry of the previous incarnation must not satisfy the check
+        return 1
+      }
+
+      forget_stale_nodes_for_pod() {
+        echo "forget_stale_nodes_for_pod called with pod: $3, current node id: $4"
+        return 0
+      }
+
+      secondary_replicated_to_primary() {
+        echo "OK"
+        return 0
+      }
+
+      scale_out_replica_send_meet() {
+        return 0
+      }
+
+      setup() {
+        export CURRENT_SHARD_POD_NAME_LIST="falkordb-shard-sxj-0,falkordb-shard-sxj-1"
+        export CURRENT_SHARD_POD_FQDN_LIST="falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc"
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+        export service_port="6379"
+        ut_mode="true"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_POD_NAME_LIST
+        unset CURRENT_SHARD_POD_FQDN_LIST
+        unset CURRENT_POD_NAME
+        unset service_port
+      }
+      After "un_setup"
+
+      It "forgets the stale entry and rejoins the cluster as replica"
+        When run scale_redis_cluster_replica
+        The status should be success
+        The stdout should include "membership check with node id: new-node-id"
+        The stdout should include "forget_stale_nodes_for_pod called with pod: falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc, current node id: new-node-id"
+        The stdout should include "All primary nodes have been successfully met"
+      End
+    End
+
+    Context "when getting the cluster topology"
+      check_redis_server_ready_with_retry() {
+        return 0
+      }
+
+      get_target_pod_fqdn_from_pod_fqdn_vars() {
+        echo "$2.falkordb-shard-sxj-headless.default.svc"
+      }
+
+      get_current_comp_nodes_for_scale_out_replica() {
+        echo "queried cluster view of: $1"
+      }
+
+      setup() {
+        export CURRENT_SHARD_POD_NAME_LIST="falkordb-shard-sxj-0,falkordb-shard-sxj-1"
+        export CURRENT_SHARD_POD_FQDN_LIST="falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc"
+        export CURRENT_POD_NAME="falkordb-shard-sxj-0"
+        export service_port="6379"
+        ut_mode="true"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_POD_NAME_LIST
+        unset CURRENT_SHARD_POD_FQDN_LIST
+        unset CURRENT_POD_NAME
+        unset service_port
+      }
+      After "un_setup"
+
+      It "prefers the cluster view of other pods over its own"
+        When run scale_redis_cluster_replica
+        The status should be success
+        The stdout should include "queried cluster view of: falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc"
+        The stdout should not include "queried cluster view of: falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc"
+        The stdout should include "current_comp_primary_node is empty, skip scale out replica"
       End
     End
 
@@ -797,6 +907,10 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         echo "4958e6dca033cd1b321922508553fab869a29d"
       }
 
+      forget_stale_nodes_for_pod() {
+        return 0
+      }
+
       secondary_replicated_to_primary() {
         echo "Error"
         return 1
@@ -853,6 +967,10 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
 
       get_cluster_id_with_retry() {
         echo "4958e6dca033cd1b321922508553fab869a29d"
+      }
+
+      forget_stale_nodes_for_pod() {
+        return 0
       }
 
       secondary_replicated_to_primary() {
