@@ -459,12 +459,12 @@ spec:
       - name: metrics
         imagePullPolicy: {{ $.Values.metrics.image.pullPolicy | quote }}
         securityContext:
-          runAsUser: 59000
-          runAsGroup: 59000
+          runAsNonRoot: true
           allowPrivilegeEscalation: false
+          seccompProfile:
+            type: RuntimeDefault
           capabilities:
-            drop:
-            - ALL
+            drop: ["ALL"]
         env:
           - name: REDIS_ADDR
             value: "$(REDIS_METRICS_ADDR)"
