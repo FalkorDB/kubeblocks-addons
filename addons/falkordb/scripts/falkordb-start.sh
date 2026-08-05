@@ -328,9 +328,10 @@ check_current_pod_is_primary() {
 
 start_redis_server() {
     module_path="/var/lib/falkordb/bin"
+    extra_module_args="${FALKORDB_EXTRA_MODULES_ARGS:-''}"
   exec_cmd="redis-server /etc/redis/redis.conf"
     if [ -f ${module_path}/falkordb.so ]; then
-        exec_cmd="$exec_cmd --loadmodule ${module_path}/falkordb.so ${FALKORDB_ARGS}"
+        exec_cmd="$exec_cmd --loadmodule ${module_path}/falkordb.so ${extra_module_args} ${FALKORDB_ARGS}"
     fi
     echo "Starting falkordb server cmd: $exec_cmd"
   if command -v script >/dev/null 2>&1; then
