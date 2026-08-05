@@ -725,7 +725,7 @@ start_redis_server() {
     extra_module_args="${FALKORDB_EXTRA_MODULES_ARGS:-''}"
   exec_cmd="redis-server /etc/redis/redis.conf"
     if [ -f ${module_path}/falkordb.so ]; then
-        exec_cmd="$exec_cmd --loadmodule ${module_path}/falkordb.so ${extra_module_args} ${FALKORDB_ARGS}"
+        exec_cmd="$exec_cmd --loadmodule ${module_path}/falkordb.so ${FALKORDB_ARGS} ${extra_module_args}"
     fi
     echo "Starting falkordb server cmd: $exec_cmd"
   if command -v script >/dev/null 2>&1; then
