@@ -1,0 +1,150 @@
+name: Add FalkorDB Version
+
+# Registers a released FalkorDB image as a supported version of the falkordb addon,
+# bumps the chart version and releases the chart.
+#
+# Triggered manually, or remotely from the FalkorDB core repo with:
+#   curl -X POST \
+#     -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $TOKEN" \
+#     https://api.github.com/repos/${{ github.repository }}/dispatches \
+#     -d '{"event_type":"falkordb-release","client_payload":{"version":"4.20.2"}}'
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released FalkorDB version (e.g. 4.20.2)"
+        required: true
+        type: string
+      image_tag:
+        description: "Image tag of the release (defaults to v<version>)"
+        required: false
+        type: string
+      set_default:
+        description: "Make this the default serviceVersion for its major version"
+        required: false
+        type: boolean
+        default: true
+      create_pr:
+        description: "Open a pull request instead of committing directly (chart is released once the PR is merged)"
+        required: false
+        type: boolean
+        default: false
+  repository_dispatch:
+    types:
+      - falkordb-release
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  add-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.add-version.outputs.changed }}
+      version: ${{ steps.add-version.outputs.version }}
+      image_tag: ${{ steps.add-version.outputs.image_tag }}
+      chart_version: ${{ steps.add-version.outputs.chart_version }}
+      is_default: ${{ steps.add-version.outputs.is_default }}
+      pushed: ${{ steps.commit.outputs.pushed }}
+    steps:
+      - name: Resolve inputs
+        id: inputs
+        env:
+          VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag || github.event.client_payload.image_tag }}
+          SET_DEFAULT: ${{ github.event.inputs.set_default || github.event.client_payload.set_default || 'true' }}
+          CREATE_PR: ${{ github.event.inputs.create_pr || github.event.client_payload.create_pr || 'false' }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::invalid version '$VERSION', expected MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG:-v$version}" >> "$GITHUB_OUTPUT"
+          echo "set_default=$SET_DEFAULT" >> "$GITHUB_OUTPUT"
+          echo "create_pr=$CREATE_PR" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install ruamel.yaml
+
+      - name: Verify image exists
+        env:
+          REPOSITORY: falkordb/falkordb
+          IMAGE_TAG: ${{ steps.inputs.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          url="https://hub.docker.com/v2/repositories/${REPOSITORY}/tags/${IMAGE_TAG}"
+          code=$(curl -sSL -o /dev/null -w '%{http_code}' "$url")
+          if [[ "$code" != "200" ]]; then
+            echo "::error::image ${REPOSITORY}:${IMAGE_TAG} not found on Docker Hub (HTTP $code)"
+            exit 1
+          fi
+
+      - name: Add version and bump chart version
+        id: add-version
+        run: |
+          python3 hack/falkordb-add-version.py \
+            --version "${{ steps.inputs.outputs.version }}" \
+            --image-tag "${{ steps.inputs.outputs.image_tag }}" \
+            --bump-chart \
+            ${{ steps.inputs.outputs.set_default == 'true' && '--set-default' || '' }}
+
+      - name: Lint chart
+        if: steps.add-version.outputs.changed == 'true'
+        run: helm lint addons/falkordb --dependency-update
+
+      - name: Commit and push
+        id: commit
+        if: steps.add-version.outputs.changed == 'true' && steps.inputs.outputs.create_pr != 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add addons/falkordb/values.yaml addons/falkordb/Chart.yaml
+          git commit -m "chore(falkordb): support FalkorDB ${{ steps.add-version.outputs.version }}"
+          git push origin HEAD:${{ github.ref_name }}
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        if: steps.add-version.outputs.changed == 'true' && steps.inputs.outputs.create_pr == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+          branch: falkordb/add-version-${{ steps.add-version.outputs.version }}
+          base: ${{ github.ref_name }}
+          commit-message: "chore(falkordb): support FalkorDB ${{ steps.add-version.outputs.version }}"
+          title: "chore(falkordb): support FalkorDB ${{ steps.add-version.outputs.version }}"
+          body: |
+            Adds FalkorDB `${{ steps.add-version.outputs.version }}` (image tag `${{ steps.add-version.outputs.image_tag }}`) to the supported versions of the `falkordb` addon.
+
+            - default serviceVersion for its major: `${{ steps.add-version.outputs.is_default }}`
+            - chart version: `${{ steps.add-version.outputs.chart_version }}`
+
+            The chart is released once this PR is merged.
+
+            Triggered by `${{ github.event_name }}`.
+          delete-branch: true
+
+  release-chart:
+    needs: add-version
+    if: needs.add-version.outputs.changed == 'true' && needs.add-version.outputs.pushed == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release-chart.yml
+    with:
+      VERSION: ${{ needs.add-version.outputs.chart_version }}
