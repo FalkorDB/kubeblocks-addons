@@ -5,3 +5,4 @@ staticParameters:
   - maxclients
   - io-threads
   - io-threads-do-reads
+  - falkordbe.offload-path

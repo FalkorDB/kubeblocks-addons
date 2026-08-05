@@ -1095,4 +1095,44 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       End
     End
   End
+
+  Describe "build_redis_server_start_cmd()"
+    module_dir="./falkordb-cluster-module"
+
+    module_setup() {
+      mkdir -p "$module_dir"
+      touch "$module_dir/falkordb.so"
+    }
+    Before 'module_setup'
+
+    module_un_setup() {
+      rm -rf "$module_dir"
+      unset FALKORDB_ARGS
+      unset FALKORDB_EXTRA_MODULES_ARGS
+    }
+    After 'module_un_setup'
+
+    It "appends the extra module args when FALKORDB_EXTRA_MODULES_ARGS is set"
+      export FALKORDB_ARGS="THREAD_COUNT 4"
+      export FALKORDB_EXTRA_MODULES_ARGS="CACHE_SIZE 50"
+      When call build_redis_server_start_cmd "$module_dir"
+      The status should be success
+      The stdout should include "--loadmodule $module_dir/falkordb.so THREAD_COUNT 4 CACHE_SIZE 50"
+    End
+
+    It "passes no extra module args when FALKORDB_EXTRA_MODULES_ARGS is unset"
+      export FALKORDB_ARGS="THREAD_COUNT 4"
+      When call build_redis_server_start_cmd "$module_dir"
+      The status should be success
+      The stdout should include "--loadmodule $module_dir/falkordb.so THREAD_COUNT 4"
+      The stdout should not include "''"
+    End
+
+    It "starts without the module when falkordb.so is not present"
+      rm -f "$module_dir/falkordb.so"
+      When call build_redis_server_start_cmd "$module_dir"
+      The status should be success
+      The stdout should eq "redis-server /etc/redis/redis.conf"
+    End
+  End
 End

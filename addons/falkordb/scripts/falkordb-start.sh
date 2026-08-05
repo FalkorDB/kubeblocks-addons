@@ -326,14 +326,20 @@ check_current_pod_is_primary() {
   return 1
 }
 
+build_redis_server_start_cmd() {
+  local module_path="${1:-/var/lib/falkordb/bin}"
+  local extra_module_args="${FALKORDB_EXTRA_MODULES_ARGS:-}"
+  local exec_cmd="redis-server /etc/redis/redis.conf"
+  if [ -f "${module_path}/falkordb.so" ]; then
+    exec_cmd="$exec_cmd --loadmodule ${module_path}/falkordb.so ${FALKORDB_ARGS} ${extra_module_args}"
+  fi
+  echo "$exec_cmd"
+}
+
 start_redis_server() {
-    module_path="/var/lib/falkordb/bin"
-    extra_module_args="${FALKORDB_EXTRA_MODULES_ARGS:-''}"
-  exec_cmd="redis-server /etc/redis/redis.conf"
-    if [ -f ${module_path}/falkordb.so ]; then
-        exec_cmd="$exec_cmd --loadmodule ${module_path}/falkordb.so ${FALKORDB_ARGS} ${extra_module_args}"
-    fi
-    echo "Starting falkordb server cmd: $exec_cmd"
+  local exec_cmd
+  exec_cmd=$(build_redis_server_start_cmd)
+  echo "Starting falkordb server cmd: $exec_cmd"
   if command -v script >/dev/null 2>&1; then
     script -q -f -e -c "$exec_cmd" /dev/null 2>&1 | sed -u -E 's/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ /[falkordb] /; t; s/^/[falkordb] /'
   else

@@ -57,11 +57,48 @@
 
 	"cluster-allow-reads-when-down"?: string & "yes" | "no"
 
+	// Cluster nodes are able to automatically migrate to orphaned masters,
+	// i.e. masters that are left without working replicas.
+	"cluster-allow-replica-migration"?: string & "yes" | "no"
+
+	// The file where the cluster configuration is persisted. It is created and
+	// updated by the node itself and must never be edited by hand.
+	"cluster-config-file": string | *"/data/nodes.conf"
+
 	"cluster-enabled"?: string & "yes" | "no"
+
+	// Cluster node timeout in milliseconds, the amount of time a node must be
+	// unreachable for it to be considered in failure state.
+	"cluster-node-timeout": int & >=1 | *5000
 
 	"cluster-preferred-endpoint-type"?: string & "tls-dynamic" | "ip"
 
+	// A replica of a failing master is not promoted if its data looks too old.
+	// The replica is considered valid if the disconnection time is lower than
+	// (node-timeout * cluster-replica-validity-factor) + repl-ping-replica-period.
+	// A value of 0 means replicas always try to failover the master.
+	"cluster-replica-validity-factor": int & >=0 | *0
+
 	"cluster-require-full-coverage"?: string & "yes" | "no"
+
+	// Minimum number of replicas a master will retain before one of them
+	// migrates to another orphaned master.
+	"cluster-migration-barrier": int & >=0 | *1
+
+	// Announced cluster bus port, useful when the node is behind NAT or port forwarding.
+	"cluster-announce-bus-port"?: int
+
+	// Announced client port, useful when the node is behind NAT or port forwarding.
+	"cluster-announce-port"?: int
+
+	// Announced IP address, useful when the node is behind NAT or port forwarding.
+	"cluster-announce-ip"?: string
+
+	// Announced human readable hostname, used by clients that request it.
+	"cluster-announce-human-nodename"?: string
+
+	// Announced hostname, used by clients that prefer hostname based endpoints.
+	"cluster-announce-hostname"?: string
 
 	databases: int & >=1 & <=10000 | *16
 
@@ -796,7 +833,7 @@
     "falkordbe.ldap_group_acl_rules_map": string | *""
 
     "falkordbe.ldap_group_acl_user_map": string | *""
-    ...
+	...
 }
 
 configuration: #FalkorDBParameter & {
