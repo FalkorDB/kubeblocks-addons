@@ -388,6 +388,9 @@ spec:
           - /scripts/sync-acl.sh
         targetPodSelector: Any
   runtime:
+    {{- if $.Values.imagePullSecrets }}
+    {{- include "falkordb.imagePullSecrets" $ | nindent 4 }}
+    {{- end }}
     initContainers:
       - name: init-dbctl
         command:

@@ -113,6 +113,24 @@ falkordb-cluster-scripts-template-{{ .Chart.Version }}
 {{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}
 {{- end }}
 
+{{/*
+Render the imagePullSecrets list, e.g.
+  imagePullSecrets:
+    - name: my-registry-secret
+*/}}
+{{- define "falkordb.imagePullSecrets" -}}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- range . }}
+  {{- if kindIs "string" . }}
+  - name: {{ . }}
+  {{- else }}
+  - name: {{ .name }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}
+
 {{- define "falkordb.defaultImage" -}}
 {{- $defaultTag := .Release.AppVersion | default .Values.image.tag.major4.minor20.patch1 -}}
 {{- $repository := .Values.image.repository -}}

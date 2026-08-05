@@ -501,6 +501,9 @@ spec:
       retryPolicy:
         maxRetries: 10
   runtime:
+    {{- if $.Values.imagePullSecrets }}
+    {{- include "falkordb.imagePullSecrets" $ | nindent 4 }}
+    {{- end }}
     initContainers:
       - name: init-dbctl
         command:

@@ -39,6 +39,9 @@ spec:
         podInfoExtractorName: reset-master
         backoffLimit: 0
         podSpec:
+          {{- if .Values.imagePullSecrets }}
+          {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
+          {{- end }}
           containers:
             - name: reset-master
               image: {{ include "falkordb.defaultImage" . }}

@@ -57,6 +57,9 @@ spec:
         podInfoExtractorName: master-connection
         backoffLimit: 0
         podSpec:
+          {{- if .Values.imagePullSecrets }}
+          {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
+          {{- end }}
           containers:
             - name: falkordb-account-ops
               image: {{ include "falkordb.defaultImage" . }}
@@ -126,6 +129,9 @@ spec:
         podInfoExtractorName: sentinel-connection
         backoffLimit: 0
         podSpec:
+          {{- if .Values.imagePullSecrets }}
+          {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
+          {{- end }}
           containers:
             - name: falkordb-account-ops
               image: {{ include "falkordb.defaultImage" . }}
@@ -211,6 +217,9 @@ spec:
         podInfoExtractorName: shard-connection
         backoffLimit: 0
         podSpec:
+          {{- if .Values.imagePullSecrets }}
+          {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
+          {{- end }}
           containers:
             - name: falkordb-account-ops
               image: {{ include "falkordb.defaultImage" . }}

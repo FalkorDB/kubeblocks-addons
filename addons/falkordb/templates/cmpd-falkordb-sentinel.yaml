@@ -232,6 +232,9 @@ spec:
                 apiVersion: v1
                 fieldPath: status.hostIP
   runtime:
+    {{- if $.Values.imagePullSecrets }}
+    {{- include "falkordb.imagePullSecrets" $ | nindent 4 }}
+    {{- end }}
     containers:
     - name: falkordb-sent
       imagePullPolicy: IfNotPresent

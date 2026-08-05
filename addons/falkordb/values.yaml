@@ -6,6 +6,13 @@ nameOverride: ""
 
 fullnameOverride: ""
 
+## Optionally specify an array of secrets used to pull the images from private registries.
+## Entries may be plain secret names or objects with a `name` field, e.g.
+## imagePullSecrets:
+##   - my-registry-secret
+##   - name: another-registry-secret
+imagePullSecrets: []
+
 ## FalkorDB versions configuration
 ## Array of major versions, each containing minor versions with specific image tags
 ## @param serviceVersion define default serviceVersion of each Component

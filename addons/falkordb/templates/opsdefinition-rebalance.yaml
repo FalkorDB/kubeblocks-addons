@@ -38,6 +38,9 @@ spec:
         type: Job
         podInfoExtractorName: falkordbUrl
         podSpec:
+          {{- if .Values.imagePullSecrets }}
+          {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
+          {{- end }}
           containers:
           - name: busybox-init
             image: {{ include "busybox.image" . }}
