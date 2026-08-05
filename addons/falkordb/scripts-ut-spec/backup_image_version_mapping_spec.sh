@@ -17,11 +17,12 @@ Describe "FalkorDB backup image version mapping"
     When call render_template backupactionset.yaml
     The status should be success
     The output should not include 'image: $(FALKORDB_IMAGE)'
+    The output should not include 'registry.example.com/team/falkordb:'
     The output should satisfy awk '
       /^  name: falkordb-physical-br$/ { physical++ }
       /^  name: falkordb-cluster-br$/ { cluster++ }
       /^  name: falkordb-for-pitr$/ { pitr++ }
-      /image: registry.example.com\/team\/falkordb:v4.12.5/ { legacy++ }
+      /image: \$\(IMAGE\)/ { legacy++ }
       END {
         exit physical == 1 && cluster == 1 && pitr == 1 && legacy == 9 ? 0 : 1
       }
