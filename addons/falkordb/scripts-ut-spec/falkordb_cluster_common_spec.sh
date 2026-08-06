@@ -301,6 +301,145 @@ Describe "FalkorDB Cluster Common Bash Script Tests"
     End
   End
 
+  Describe "check_slots_covered()"
+    Context "when all slots are covered and the cluster is stable"
+      redis-cli() {
+        echo "[OK] All 16384 slots covered."
+      }
+
+      It "returns success"
+        When call check_slots_covered "10.42.0.1:6379" "6379"
+        The status should be success
+      End
+    End
+
+    Context "when all slots are covered but slots are still open"
+      redis-cli() {
+        echo "[WARNING] The following slots are open: 5461"
+        echo "[OK] All 16384 slots covered."
+      }
+
+      It "returns failure so the caller can repair the cluster"
+        When call check_slots_covered "10.42.0.1:6379" "6379"
+        The status should be failure
+        The stderr should include "FalkorDB Cluster slots are covered but cluster check is not stable"
+      End
+    End
+
+    Context "when slots are not covered"
+      redis-cli() {
+        echo "[ERR] Not all 16384 slots are covered by nodes."
+      }
+
+      It "returns failure"
+        When call check_slots_covered "10.42.0.1:6379" "6379"
+        The status should be failure
+        The stderr should include "FalkorDB Cluster slots are not fully covered"
+      End
+    End
+  End
+
+  Describe "fix_cluster_slots()"
+    Context "when the cluster fix succeeds"
+      redis-cli() {
+        echo "redis-cli $*"
+        return 0
+      }
+
+      It "runs cluster fix and returns success"
+        When call fix_cluster_slots "10.42.0.1:6379" "6379"
+        The status should be success
+        The stdout should include "--cluster fix 10.42.0.1:6379 -p 6379 --cluster-yes"
+        The stderr should include "fix FalkorDB Cluster slots command:"
+      End
+    End
+
+    Context "when a default password is set"
+      redis-cli() {
+        return 0
+      }
+
+      setup() {
+        export REDIS_DEFAULT_PASSWORD="topsecret"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset REDIS_DEFAULT_PASSWORD
+      }
+      After "un_setup"
+
+      It "masks the password in the logged command"
+        When call fix_cluster_slots "10.42.0.1:6379" "6379"
+        The status should be success
+        The stderr should include "********"
+        The stderr should not include "topsecret"
+      End
+    End
+
+    Context "when the cluster fix fails"
+      redis-cli() {
+        return 1
+      }
+
+      It "returns failure"
+        When call fix_cluster_slots "10.42.0.1:6379" "6379"
+        The status should be failure
+        The stderr should include "Failed to fix FalkorDB Cluster slots for 10.42.0.1:6379"
+      End
+    End
+  End
+
+  Describe "count_node_slots()"
+    Context "when the node owns single slots and slot ranges"
+      get_cluster_nodes_info() {
+        echo "node-id-1 10.42.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 5462 5470-5472"
+        echo "node-id-2 10.42.0.2:6379@16379 master - 0 0 2 connected 5473-10922"
+      }
+
+      It "sums single slots and ranges"
+        When call count_node_slots "10.42.0.1" "6379" "node-id-1"
+        The status should be success
+        The output should equal "5465"
+      End
+    End
+
+    Context "when the node owns no slots"
+      get_cluster_nodes_info() {
+        echo "node-id-1 10.42.0.1:6379@16379 myself,slave node-id-2 0 0 1 connected"
+      }
+
+      It "returns zero"
+        When call count_node_slots "10.42.0.1" "6379" "node-id-1"
+        The status should be success
+        The output should equal "0"
+      End
+    End
+
+    Context "when the node id is not part of the cluster"
+      get_cluster_nodes_info() {
+        echo "node-id-2 10.42.0.2:6379@16379 master - 0 0 2 connected 0-16383"
+      }
+
+      It "returns failure"
+        When run count_node_slots "10.42.0.1" "6379" "node-id-1"
+        The status should be failure
+      End
+    End
+
+    Context "when the cluster nodes info cannot be fetched"
+      get_cluster_nodes_info() {
+        return 1
+      }
+
+      It "returns failure"
+        When run count_node_slots "10.42.0.1" "6379" "node-id-1"
+        The status should be failure
+        The stderr should include "Failed to get cluster nodes info in count_node_slots"
+      End
+    End
+  End
+
   Describe "check_cluster_initialized()"
     Context "returns 0 when cluster is initialized"
       get_cluster_info() {

@@ -1135,7 +1135,71 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
     End
   End
 
+  Describe "fix_unstable_cluster_and_defer()"
+    Context "when the cluster slots are already covered"
+      check_slots_covered() {
+        return 0
+      }
+
+      fix_cluster_slots() {
+        echo "fix_cluster_slots should not be called"
+        return 0
+      }
+
+      It "returns success without running cluster fix"
+        When call fix_unstable_cluster_and_defer "10.42.0.1:6379"
+        The status should be success
+        The output should equal ""
+      End
+    End
+
+    Context "when the cluster is unstable and the fix succeeds"
+      check_slots_covered() {
+        return 1
+      }
+
+      fix_cluster_slots() {
+        echo "fixing $1 on port $2"
+        return 0
+      }
+
+      It "runs cluster fix and still defers the lifecycle action"
+        When call fix_unstable_cluster_and_defer "10.42.0.1:6379"
+        The status should be failure
+        The stdout should include "fixing 10.42.0.1:6379 on port 6379"
+        The stderr should include "FalkorDB Cluster is not stable; run cluster fix and defer lifecycle action for retry."
+        The stderr should include "FalkorDB Cluster fix completed"
+      End
+    End
+
+    Context "when the cluster is unstable and the fix fails"
+      check_slots_covered() {
+        return 1
+      }
+
+      fix_cluster_slots() {
+        return 1
+      }
+
+      It "defers the lifecycle action for an operator-visible retry"
+        When call fix_unstable_cluster_and_defer "10.42.0.1:6379"
+        The status should be failure
+        The stderr should include "FalkorDB Cluster fix failed; defer current lifecycle action for operator-visible retry."
+      End
+    End
+  End
+
   Describe "scale_out_redis_cluster_shard()"
+    # the self-heal pre-check and slot accounting are covered by their own Describe
+    # blocks; stub them here so each Context exercises only its own scenario.
+    fix_unstable_cluster_and_defer() {
+      return 0
+    }
+
+    count_node_slots() {
+      echo "0"
+    }
+
     Context "when required environment variables are not set"
       setup() {
         export CURRENT_SHARD_COMPONENT_SHORT_NAME=""
@@ -1622,6 +1686,12 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
   End
 
   Describe "scale_in_redis_cluster_shard()"
+    # the self-heal pre-check is covered by its own Describe block; stub it here so
+    # each Context exercises only its own scenario.
+    fix_unstable_cluster_and_defer() {
+      return 0
+    }
+
     Context "when required environment variables are not set"
       setup() {
         export CURRENT_SHARD_COMPONENT_SHORT_NAME=""
