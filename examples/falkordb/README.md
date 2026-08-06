@@ -139,6 +139,30 @@ spec:
       disableExporter: false
 ```
 
+#### Scaling shards in `sharding` topology
+
+In the `sharding` topology the two operations above change the number of replicas *inside* each shard. To change the number of shards themselves, set `shards` instead.
+
+##### [Scale-out shards](scale-out-sharding.yaml)
+
+```bash
+kubectl apply -f examples/falkordb/scale-out-sharding.yaml
+```
+
+KubeBlocks provisions the new shard and the addon then migrates a share of the 16384 hash slots onto it. On a cluster holding a lot of data this rebalance can take a while — watch it with:
+
+```bash
+kubectl describe -n demo ops falkordb-scale-out-sharding
+```
+
+##### [Scale-in shards](scale-in-sharding.yaml)
+
+```bash
+kubectl apply -f examples/falkordb/scale-in-sharding.yaml
+```
+
+The slots owned by the removed shard are migrated to the remaining shards before it is torn down, so no keys are lost. A FalkorDB cluster requires at least 3 shards, so `shards` must not go below 3.
+
 ### [Vertical scaling](verticalscale.yaml)
 
 Vertical scaling involves increasing or decreasing resources to an existing database cluster.
@@ -456,6 +480,28 @@ kubectl apply -f examples/falkordb/rebuild-instance.yaml
 ```
 
 Set `backupName` to an existing backup and `instances[*].name` to the pod you want to rebuild. Set `inPlace: false` to create a replacement pod instead of reusing the existing one.
+
+### Switchover
+
+Promote a replica to primary. In `replication` topology the promotion is driven by Sentinel; in `sharding` topology it is driven by `CLUSTER FAILOVER`.
+
+#### [Switchover](switchover.yaml)
+
+Hand over the role held by `instanceName`, letting the addon pick the new primary:
+
+```bash
+kubectl apply -f examples/falkordb/switchover.yaml
+```
+
+#### [Switchover to a specified instance](switchover-specified-instance.yaml)
+
+Set `candidateName` to promote a specific pod:
+
+```bash
+kubectl apply -f examples/falkordb/switchover-specified-instance.yaml
+```
+
+`candidateName` must name a pod in the same component that is currently a healthy replica. If the switchover fails, the addon restores the original `replica-priority` of every replica, so the next Sentinel-driven failover is unaffected.
 
 ### Expose
 

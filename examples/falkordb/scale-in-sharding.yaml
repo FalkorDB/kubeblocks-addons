@@ -1,0 +1,22 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: falkordb-scale-in-sharding
+  namespace: demo
+spec:
+  # Specifies the name of the Cluster resource that this operation is targeting.
+  clusterName: falkordb-sharding
+  type: HorizontalScaling
+  # Lists HorizontalScaling objects, each specifying scaling requirements for a Component,
+  # including desired replica changes, configurations for new instances,
+  # modifications for existing instances, and take offline/online the specified instances.
+  horizontalScaling:
+    # Specifies the name of the sharding.
+  - componentName: shard
+    # Specifies the desired number of shards.
+    # This parameter is mutually exclusive with other parameters.
+    # This will scale in from 4 shards to 3 shards.
+    # Before the shard is removed the addon migrates its hash slots to the remaining
+    # shards, so no keys are lost. A FalkorDB cluster needs at least 3 shards, so this
+    # value must not go below 3.
+    shards: 3
