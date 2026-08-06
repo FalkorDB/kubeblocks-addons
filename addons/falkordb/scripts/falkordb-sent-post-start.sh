@@ -26,13 +26,38 @@ load_common_library() {
   source "${common_library_file}"
 }
 
+sentinel_cli() {
+  # the password is passed through REDISCLI_AUTH and the command through stdin so
+  # that neither shows up in the process arguments.
+  local command="$1"
+  (
+    export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    # shellcheck disable=SC2086
+    printf '%s\n' "$command" | redis-cli $REDIS_CLI_TLS_CMD -h localhost -p "$sentinel_service_port"
+  )
+}
+
+wait_for_sentinel() {
+  local max_retries=${SENTINEL_PING_MAX_RETRIES:-60}
+  local retry=0
+  while [ "$retry" -lt "$max_retries" ]; do
+    if sentinel_cli "ping" >/dev/null 2>&1; then
+      return 0
+    fi
+    retry=$((retry + 1))
+    sleep 1
+  done
+  echo "Error: sentinel did not answer PING after $max_retries attempts." >&2
+  return 1
+}
+
 acl_set_user_for_redis_sentinel() {
   # set default user password and replication user password
   if [ -n "$SENTINEL_PASSWORD" ]; then
     sentinel_service_port=${SENTINEL_SERVICE_PORT:-26379}
-    until redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $sentinel_service_port -a $SENTINEL_PASSWORD ping; do sleep 1; done
-    redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $sentinel_service_port -a $SENTINEL_PASSWORD ACL SETUSER $SENTINEL_USER ON \>$SENTINEL_PASSWORD allchannels +@all
-    redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $sentinel_service_port -a $SENTINEL_PASSWORD ACL SAVE
+    wait_for_sentinel || return 1
+    sentinel_cli "ACL SETUSER $SENTINEL_USER ON >$SENTINEL_PASSWORD allchannels +@all"
+    sentinel_cli "ACL SAVE"
     echo "redis sentinel user and password set successfully."
   fi
 }
@@ -45,10 +70,11 @@ acl_set_extra_user_for_redis_sentinel() {
 
   local acl_rules
   acl_rules=${FALKORDB_SENT_EXTRA_USER_ACL:-"~* +@all"}
+  sentinel_service_port=${SENTINEL_SERVICE_PORT:-26379}
 
-  until redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ping; do sleep 1; done
-  redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SETUSER $FALKORDB_SENT_EXTRA_USER_USERNAME ON \>$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules
-  redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $SENTINEL_SERVICE_PORT -a $SENTINEL_PASSWORD ACL SAVE
+  wait_for_sentinel || return 1
+  sentinel_cli "ACL SETUSER $FALKORDB_SENT_EXTRA_USER_USERNAME ON >$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules"
+  sentinel_cli "ACL SAVE"
   echo "extra sentinel user $FALKORDB_SENT_EXTRA_USER_USERNAME set successfully."
 }
 

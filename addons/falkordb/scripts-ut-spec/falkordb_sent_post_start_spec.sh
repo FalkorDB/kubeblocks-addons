@@ -141,7 +141,9 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
       BeforeEach 'set_acl'
 
       redis-cli() {
+        # the command is fed through stdin so that no secret ends up in argv
         echo "args:$*"
+        cat
         return 0
       }
 
@@ -149,6 +151,25 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
         When call acl_set_extra_user_for_redis_sentinel
         The status should be success
         The output should include "~monitor:* +@read"
+        The output should include "args:-h localhost -p 26379"
+      End
+    End
+
+    Context "when checking that secrets never reach the process arguments"
+      BeforeEach 'setup_env'
+      AfterEach 'cleanup_env'
+
+      redis-cli() {
+        echo "args:$*"
+        cat >/dev/null
+        return 0
+      }
+
+      It "does not pass any password on the command line"
+        When call acl_set_extra_user_for_redis_sentinel
+        The status should be success
+        The output should not include "extrapass"
+        The output should not include "sentinelpass"
       End
     End
 
