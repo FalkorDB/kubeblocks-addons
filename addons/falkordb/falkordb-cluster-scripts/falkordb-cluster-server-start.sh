@@ -676,6 +676,21 @@ build_redis_cluster_service_port() {
   echo "cluster-port $cluster_bus_port" >> $redis_real_conf
 }
 
+build_redis_tls_config() {
+  if [ "$TLS_ENABLED" == "true" ]; then
+    TLS_MOUNT_PATH=${TLS_MOUNT_PATH:-/etc/pki/tls}
+    {
+      echo "tls-cert-file $TLS_MOUNT_PATH/tls.crt"
+      echo "tls-key-file $TLS_MOUNT_PATH/tls.key"
+      echo "tls-ca-cert-file $TLS_MOUNT_PATH/ca.crt"
+      echo "tls-auth-clients no"
+      echo "tls-replication yes"
+      echo "tls-cluster yes"
+      echo "port 0"
+    } >> $redis_real_conf
+  fi
+}
+
 parse_redis_cluster_shard_announce_addr() {
   # The value format of CURRENT_SHARD_ADVERTISED_PORT and CURRENT_SHARD_ADVERTISED_BUS_PORT are "pod1Svc:advertisedPort1,pod2Svc:advertisedPort2,..."
   if is_empty "$CURRENT_SHARD_ADVERTISED_PORT" || is_empty "$CURRENT_SHARD_ADVERTISED_BUS_PORT"; then
@@ -745,6 +760,7 @@ start_redis_server() {
 build_redis_conf() {
   load_redis_template_conf
   build_redis_cluster_service_port
+  build_redis_tls_config
   build_announce_ip_and_port
   build_cluster_announce_info
   rebuild_redis_acl_file

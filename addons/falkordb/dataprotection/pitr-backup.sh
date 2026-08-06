@@ -23,8 +23,11 @@ function get_base_file_ctime() {
   local base_file=${1}
   if [ "$BASE_FILE_SUFFIX" = "base.rdb" ]; then
     # use the creation time of the base file as the start time
-    echo $(redis-check-rdb "$base_file" | grep 'ctime' | awk -F"'" '{print $2}')
-    return
+    ctime=$(redis-check-rdb "$base_file" | grep 'ctime' | awk -F"'" '{print $2}')
+    if [ -n "$ctime" ]; then
+      echo $ctime
+      return
+    fi
   fi
 
   # for aof base file

@@ -137,10 +137,14 @@ do_switchover() {
     return 1
   fi
   primaries=$(get_all_shards_master "$current_shard_primary_host" $current_shard_primary_port)
+  # match the candidate by its cluster node id rather than by pod name: the endpoint
+  # field of CLUSTER NODES holds an IP when hostname announce is disabled, so a pod
+  # name never matches there, and pod name prefixes collide for ordinals >= 10.
+  candidate_node_id=$(get_cluster_id "$candidate_pod_fqdn" $service_port)
   for primary in $primaries; do
     primary_host=$(echo "$primary" | cut -d':' -f1)
     primary_port=$(echo "$primary" | cut -d':' -f2)
-    if ! check_node_in_cluster_with_retry "$primary_host" $primary_port "$candidate_pod"; then
+    if ! check_node_in_cluster_with_retry "$primary_host" $primary_port "$candidate_node_id"; then
       echo "Error: Candidate $candidate_pod is not known by shard $primary" >&2
       return 1
     fi

@@ -192,16 +192,58 @@ Describe "FalkorDB Start Bash Script Tests"
   End
 
   Describe "build_redis_service_port()"
+    # `service_port` is resolved from SERVICE_PORT once, when the script is
+    # sourced, so the test has to override the resolved variable itself.
+    reset_service_port() {
+      service_port=${SERVICE_PORT:-6379}
+    }
+    AfterEach 'reset_service_port'
+
     It "builds redis service port correctly when SERVICE_PORT env is set"
-      export  export service_por="6380"
+      service_port="6380"
       When call build_redis_service_port
-      The contents of file "$redis_real_conf" should include "port $SERVICE_PORT"
+      The contents of file "$redis_real_conf" should include "port 6380"
     End
 
     It "builds redis service port with default value when SERVICE_PORT env is not set"
       unset SERVICE_PORT
+      service_port=6379
       When call build_redis_service_port
       The contents of file "$redis_real_conf" should include "port 6379"
+    End
+  End
+
+  Describe "build_redis_tls_config()"
+    cleanup_tls_env() {
+      unset TLS_ENABLED
+      unset TLS_MOUNT_PATH
+    }
+    AfterEach 'cleanup_tls_env'
+
+    It "writes nothing when TLS is disabled"
+      TLS_ENABLED="false"
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should not include "tls-cert-file"
+    End
+
+    It "writes the full TLS config when TLS is enabled"
+      TLS_ENABLED="true"
+      TLS_MOUNT_PATH="/etc/pki/tls"
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should include "tls-cert-file /etc/pki/tls/tls.crt"
+      The contents of file "$redis_real_conf" should include "tls-key-file /etc/pki/tls/tls.key"
+      The contents of file "$redis_real_conf" should include "tls-ca-cert-file /etc/pki/tls/ca.crt"
+      The contents of file "$redis_real_conf" should include "tls-auth-clients no"
+      The contents of file "$redis_real_conf" should include "tls-replication yes"
+      # the plaintext port must be disabled, otherwise redis keeps listening in clear text
+      The contents of file "$redis_real_conf" should include "port 0"
+    End
+
+    It "falls back to the default TLS mount path when TLS_MOUNT_PATH is unset"
+      TLS_ENABLED="true"
+      unset TLS_MOUNT_PATH
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should include "tls-cert-file /etc/pki/tls/tls.crt"
     End
   End
 

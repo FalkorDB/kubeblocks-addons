@@ -23,7 +23,7 @@ FalkorDB is an open source (SSPL licensed) in-memory graph database based on Red
 
 | Major Versions | Description |
 |---------------|-------------|
-| 4.0           | 4.18.8, 4.14.10, 4.12.5 |
+| 4.0           | 4.20.1, 4.18.11, 4.18.8, 4.14.12, 4.14.10, 4.12.5 |
 
 ## Prerequisites
 
@@ -447,6 +447,16 @@ To restore a new cluster from a Backup:
 kubectl apply -f examples/falkordb/restore.yaml
 ```
 
+### [Rebuild Instance](rebuild-instance.yaml)
+
+To rebuild a broken instance in place from a backup taken with the `backup-for-rebuild-instance` method:
+
+```bash
+kubectl apply -f examples/falkordb/rebuild-instance.yaml
+```
+
+Set `backupName` to an existing backup and `instances[*].name` to the pod you want to rebuild. Set `inPlace: false` to create a replacement pod instead of reusing the existing one.
+
 ### Expose
 
 Expose a cluster with a new endpoint
@@ -618,6 +628,17 @@ The `redis_exporter` used here is provided by [redis_exporter](https://github.co
 
 Sometimes the default dashboard may not work as expected, you may need to adjust the dashboard to match the labels the metrics are scraped with, in particular, the `job` label. In our case, the `job` variable should be set to `monitoring/falkordb-replication-pod-monitor` in the dashboard.
 
+##### Step 4. Create Alert Rules (optional)
+
+Apply the `PrometheusRule` file to get alerted on the most common FalkorDB failure modes (instance down, replication broken, memory pressure, rejected connections, etc.):
+
+```bash
+kubectl apply -f examples/falkordb/alert-rules.yaml
+```
+
+> [!NOTE]
+> Adjust `metadata.labels.release` to match the label your Prometheus Operator instance uses to select rules.
+
 ### Delete
 
 If you want to delete the cluster and all its resource, you can modify the termination policy and then delete the cluster:
@@ -667,6 +688,52 @@ spec:
 # irrelevant lines commited
 ```
 Service `falkordb-advertised` and `falkordb-sent` are defined in `ComponentDefinition` name `falkordb-4` and `falkordb-sent-4`.  They are used to to parse the advertised endpoints of the FalkorDB pods and Sentinel Pods.
+
+#### Create FalkorDB Replication with TLS
+
+To encrypt client and replication traffic, set `tls: true` and pick a certificate issuer on each component:
+
+```bash
+kubectl apply -f examples/falkordb/cluster-tls.yaml
+```
+
+```yaml
+# snippet of cluster-tls.yaml
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+spec:
+  componentSpecs:
+    - name: falkordb
+      tls: true
+      issuer:
+        name: KubeBlocks  # let KubeBlocks generate a self-signed CA and certificate
+```
+
+Use `issuer.name: UserProvided` together with `issuer.secretRef` to supply your own certificate instead.
+
+#### Create FalkorDB with a Custom Password
+
+By default KubeBlocks generates the password of the `default` system account. To use your own credentials, create a Secret and reference it from `systemAccounts`:
+
+```bash
+kubectl apply -f examples/falkordb/custom-secret.yaml
+```
+
+```yaml
+# snippet of custom-secret.yaml
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+spec:
+  componentSpecs:
+    - name: falkordb
+      systemAccounts:
+        - name: default
+          secretRef:
+            name: falkordb-custom-account
+            namespace: demo
+```
+
+The referenced Secret must contain the `username` and `password` keys and must exist before the cluster is created.
 
 #### Create FalkorDB Standalone with Extra Configuration
 

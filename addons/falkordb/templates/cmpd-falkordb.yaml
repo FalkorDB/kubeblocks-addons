@@ -102,12 +102,6 @@ spec:
         numSymbols: 0
         letterCase: MixedCases
         seed: 5wM4uhmKV1Ohy087
-  tls:
-    volumeName: tls
-    mountPath: /etc/pki/tls
-    caFile: ca.crt
-    certFile: tls.crt
-    keyFile: tls.key
   hostNetwork:
     containerPorts:
       - container: falkordb
@@ -371,8 +365,14 @@ spec:
           - sh
           - -c
         args:
-          - /scripts/redis-account-provision.sh
+          - /scripts/falkordb-account-provision.sh
+        targetPodSelector: All
     switchover:
+      # falkordb-switchover.sh waits up to 300s for sentinel to elect and
+      # propagate the new primary. Disable the kbagent action timeout so the
+      # script is not killed mid-failover; the OpsRequest layer still enforces
+      # its own deadline.
+      timeoutSeconds: -1
       exec:
         container: falkordb
         command:

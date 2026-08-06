@@ -1,0 +1,18 @@
+# Rebuilds one or more instances from a backup taken with the
+# `backup-for-rebuild-instance` method of the falkordb BackupPolicyTemplate.
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  generateName: falkordb-rebuildinstance-
+  namespace: demo
+spec:
+  type: RebuildInstance
+  clusterName: falkordb-replication
+  force: true
+  rebuildFrom:
+    - componentName: falkordb
+      backupName: <FALKORDB_BACKUP_NAME>
+      inPlace: true
+      instances:
+        - name: falkordb-replication-falkordb-0
+          targetNodeName: <NODE_NAME>
