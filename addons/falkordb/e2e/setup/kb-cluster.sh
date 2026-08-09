@@ -33,6 +33,19 @@ KB_WAIT="${E2E_KB_WAIT:-10m}"
 # CRDs for the CSI snapshot API, which k3d does not ship.
 SNAPSHOTTER_VERSION="${E2E_SNAPSHOTTER_VERSION:-v8.2.0}"
 SNAPSHOTTER_CRD_BASE="${E2E_SNAPSHOTTER_CRD_BASE:-https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/$SNAPSHOTTER_VERSION/client/config/crd}"
+SNAPSHOTTER_DEPLOY_BASE="${E2E_SNAPSHOTTER_DEPLOY_BASE:-https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/$SNAPSHOTTER_VERSION/deploy/kubernetes/snapshot-controller}"
+# A CSI driver that can actually take snapshots, for the volume-snapshot backup
+# method. The deploy manifests are published per Kubernetes minor version, so
+# CSI_HOSTPATH_K8S_DIR has to be kept in step with K3S_IMAGE.
+CSI_HOSTPATH_VERSION="${E2E_CSI_HOSTPATH_VERSION:-v1.17.1}"
+CSI_HOSTPATH_K8S_DIR="${E2E_CSI_HOSTPATH_K8S_DIR:-kubernetes-1.31}"
+CSI_HOSTPATH_REPO="${E2E_CSI_HOSTPATH_REPO:-https://github.com/kubernetes-csi/csi-driver-host-path}"
+# Storage class backed by that driver. Scenarios that need snapshots ask for it
+# by name; everything else stays on the default local-path class.
+SNAPSHOT_STORAGE_CLASS="${E2E_SNAPSHOT_STORAGE_CLASS:-csi-hostpath-sc}"
+# Domain used by the external-hostname scenarios. Nothing outside the cluster
+# owns it; see install_external_dns_zone for how it is served.
+EXTERNAL_DNS_SUFFIX="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
 # Backup repository used by the dataprotection scenarios. The pvc provider needs
 # no credentials and no object storage, which suits a throwaway local cluster.
 BACKUP_REPO="${E2E_BACKUP_REPO:-falkordb-e2e-repo}"
@@ -94,6 +107,80 @@ install_snapshot_crds() {
     kubectl apply --server-side -f \
       "$SNAPSHOTTER_CRD_BASE/snapshot.storage.k8s.io_${crd}.yaml"
   done
+}
+
+install_snapshot_controller() {
+  # The CRDs on their own are enough to keep the dataprotection controller alive,
+  # but a VolumeSnapshot only ever becomes ready if something acts on it. Without
+  # this controller the volume-snapshot backup method creates a VolumeSnapshot
+  # that sits unbound forever and the Backup never leaves Running.
+  log "installing the CSI snapshot controller $SNAPSHOTTER_VERSION"
+  kubectl apply -f "$SNAPSHOTTER_DEPLOY_BASE/rbac-snapshot-controller.yaml"
+  kubectl apply -f "$SNAPSHOTTER_DEPLOY_BASE/setup-snapshot-controller.yaml"
+  kubectl -n kube-system rollout status deploy/snapshot-controller --timeout="$KB_WAIT"
+}
+
+install_csi_hostpath() {
+  # local-path, the provisioner k3d defaults to, has no CSI snapshot support at
+  # all, so the volume-snapshot backup method cannot be exercised against it.
+  # The hostpath CSI driver is the reference implementation the Kubernetes
+  # project uses for its own storage tests and is the lightest way to get real
+  # VolumeSnapshots on a throwaway local cluster.
+  if kubectl get storageclass "$SNAPSHOT_STORAGE_CLASS" >/dev/null 2>&1; then
+    log "storage class '$SNAPSHOT_STORAGE_CLASS' already exists, skipping the CSI driver"
+    return
+  fi
+  log "installing the hostpath CSI driver $CSI_HOSTPATH_VERSION"
+  local dir
+  dir="$(mktemp -d)"
+  # The upstream deploy script resolves the matching sidecar RBAC for each
+  # release, which is why the repo is cloned rather than the manifests applied
+  # one by one.
+  git clone --quiet --depth 1 --branch "$CSI_HOSTPATH_VERSION" "$CSI_HOSTPATH_REPO" "$dir"
+  "$dir/deploy/$CSI_HOSTPATH_K8S_DIR/deploy.sh"
+  kubectl apply -f "$dir/examples/csi-storageclass.yaml"
+  rm -rf "$dir"
+}
+
+install_external_dns_zone() {
+  # A production deployment that exposes FalkorDB outside the cluster points a
+  # real DNS record at each pod's external endpoint and hands that name to the
+  # addon through ANNOUNCE_HOSTNAME_OVERRIDE. There is no external DNS here, so
+  # CoreDNS is taught to serve the zone itself: a name under the suffix is
+  # rewritten onto the equivalent in-cluster name and the reply is rewritten
+  # back, so clients only ever see the external name. That is enough to prove
+  # the addon announces, gossips and reconnects using those names.
+  log "serving the simulated external DNS zone '$EXTERNAL_DNS_SUFFIX'"
+  # k3s ships CoreDNS with 'import /etc/coredns/custom/*.server' already in its
+  # Corefile, backed by this optional ConfigMap, so no core config is touched.
+  kubectl -n kube-system create configmap coredns-custom \
+    --from-literal="falkordb-e2e-external.server=$(external_dns_server_block)" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  # The reload plugin would pick this up on its own, but a restart makes the
+  # zone usable immediately instead of up to a minute later.
+  kubectl -n kube-system rollout restart deploy/coredns
+  kubectl -n kube-system rollout status deploy/coredns --timeout="$KB_WAIT"
+}
+
+external_dns_server_block() {
+  # <pod>-<ordinal>.<namespace>.$EXTERNAL_DNS_SUFFIX maps onto the pod's record
+  # under its governing headless service. Deriving the service name from the
+  # pod name is what keeps this namespace- and cluster-agnostic, which matters
+  # for sharding: KubeBlocks gives every shard a generated component name, so
+  # the headless service is not known when the override is written.
+  cat <<EOF
+${EXTERNAL_DNS_SUFFIX#*.}:53 {
+    errors
+    rewrite stop {
+      name regex (.*)-(\\d+)\\.([^.]*)\\.${EXTERNAL_DNS_SUFFIX//./\\.} {1}-{2}.{1}-headless.{3}.svc.cluster.local
+      answer name (.*)\\.(.*)-headless\\.([^.]*)\\.svc\\.cluster\\.local {1}.{3}.$EXTERNAL_DNS_SUFFIX
+    }
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+      pods insecure
+    }
+    cache 30
+}
+EOF
 }
 
 install_kubeblocks() {
@@ -166,9 +253,12 @@ EOF
 }
 
 up() {
-  require k3d kubectl helm
+  require k3d kubectl helm git
   create_cluster
   install_snapshot_crds
+  install_snapshot_controller
+  install_csi_hostpath
+  install_external_dns_zone
   install_kubeblocks
   install_addon
   install_backup_repo
@@ -189,6 +279,9 @@ status() {
   require kubectl
   echo "--- nodes"
   kubectl get nodes
+  echo "--- storage"
+  kubectl get storageclass
+  kubectl get volumesnapshotclass 2>/dev/null || echo "(no volume snapshot classes)"
   echo "--- kubeblocks"
   kubectl -n "$KB_NAMESPACE" get deploy
   echo "--- component definitions"

@@ -1,0 +1,12 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-expand-data
+spec:
+  clusterName: fdb-expand
+  type: VolumeExpansion
+  volumeExpansion:
+    - componentName: falkordb
+      volumeClaimTemplates:
+        - name: data
+          storage: 2Gi

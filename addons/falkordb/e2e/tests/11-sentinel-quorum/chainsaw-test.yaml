@@ -55,11 +55,25 @@ spec:
                 --wait=false >/dev/null
               echo "[e2e] deleted every sentinel pod"
 
-              for pod in $(fdb_pods "$NAMESPACE" fdb-quorum falkordb-sent); do
-                kubectl wait --for=create pod -n "$NAMESPACE" "$pod" --timeout=5m >/dev/null
-                kubectl wait --for=condition=Ready pod -n "$NAMESPACE" "$pod" --timeout=10m >/dev/null
-                echo "[e2e] sentinel $pod is Ready again"
-              done
+              # The replacements reuse the old names, so waiting on a name can
+              # latch onto the pod that is still terminating and then die with
+              # NotFound the moment it goes away. Poll the set instead: three
+              # sentinels present, none terminating, all Ready.
+              sentinel_selector="app.kubernetes.io/instance=fdb-quorum,apps.kubeblocks.io/component-name=falkordb-sent"
+              quorum_is_back() {
+                local total terminating ready
+                total="$(kubectl get pod -n "$NAMESPACE" -l "$sentinel_selector" \
+                  --no-headers 2>/dev/null | grep -c . || true)"
+                terminating="$(kubectl get pod -n "$NAMESPACE" -l "$sentinel_selector" \
+                  -o jsonpath='{.items[*].metadata.deletionTimestamp}' 2>/dev/null \
+                  | wc -w | tr -d ' ')"
+                ready="$(kubectl get pod -n "$NAMESPACE" -l "$sentinel_selector" \
+                  -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null \
+                  | tr ' ' '\n' | grep -c '^True$' || true)"
+                [ "$total" -eq 3 ] && [ "$terminating" -eq 0 ] && [ "$ready" -eq 3 ]
+              }
+              fdb_retry "all three sentinels to come back Ready" quorum_is_back
+              echo "[e2e] every sentinel is Ready again"
       catch:
         - events: {}
         - podLogs:

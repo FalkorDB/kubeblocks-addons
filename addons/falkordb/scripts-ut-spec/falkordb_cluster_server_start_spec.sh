@@ -215,6 +215,20 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The contents of file "$redis_real_conf" should include "cluster-announce-ip $CURRENT_POD_IP"
       The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for cluster announce"
     End
+
+    It "expands \$(POD_NAME) so each cluster node announces a hostname of its own"
+      unset redis_announce_host_value
+      unset redis_announce_port_value
+      unset redis_announce_bus_port_value
+      export CURRENT_POD_IP="172.0.0.6"
+      export CURRENT_POD_NAME="redis-redis-1"
+      export CURRENT_SHARD_POD_FQDN_LIST="redis-redis-0.redis-redis.default.svc.cluster.local,redis-redis-1.redis-redis.default.svc.cluster.local"
+      export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).redis.example.com'
+      When call build_cluster_announce_info
+      The contents of file "$redis_real_conf" should include "cluster-announce-hostname redis-redis-1.redis.example.com"
+      The contents of file "$redis_real_conf" should not include 'POD_NAME'
+      The stdout should include "announce hostname override is set, using redis-redis-1.redis.example.com for cluster announce"
+    End
   End
 
   Describe "build_redis_cluster_service_port()"

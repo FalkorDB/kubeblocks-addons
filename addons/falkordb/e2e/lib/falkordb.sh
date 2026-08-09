@@ -344,6 +344,25 @@ fdb_assert_config() {
   fdb_log "$pod has $parameter '$expected'"
 }
 
+# fdb_assert_external_hostname <description> <value> <suffix>
+# Fails unless the value is a name under the given DNS suffix.
+#
+# The point of an external hostname is that it is what a client outside the
+# cluster is handed, so an IP address or an in-cluster FQDN appearing here means
+# the announce path silently fell back to its default.
+fdb_assert_external_hostname() {
+  local description="$1" value="$2" suffix="$3"
+  case "$value" in
+    *".$suffix")
+      fdb_log "$description is $value"
+      ;;
+    *)
+      fdb_fail "$description is '${value:-<empty>}', expected a name under .$suffix"
+      return 1
+      ;;
+  esac
+}
+
 # fdb_kill_pod <namespace> <pod>
 # Deletes a pod and blocks until a pod of the same name is Ready again.
 #
@@ -371,6 +390,21 @@ fdb_assert_pod_count() {
     return 1
   fi
   fdb_log "$cluster/$component has $expected pods"
+}
+
+# fdb_pvc_capacity_is <namespace> <pvc> <expected>
+# Fails unless the claim reports the expected size in status.capacity.
+#
+# status.capacity is written by the resizer once the volume has really been
+# expanded. spec.resources.requests only records what was asked for, so it
+# reaches the new size immediately and would make any expansion look successful.
+fdb_pvc_capacity_is() {
+  local namespace="$1" pvc="$2" expected="$3" actual
+  actual="$(kubectl get pvc -n "$namespace" "$pvc" -o jsonpath='{.status.capacity.storage}')"
+  if [ "$actual" != "$expected" ]; then
+    fdb_fail "pvc $pvc reports capacity '$actual', expected $expected"
+    return 1
+  fi
 }
 
 # fdb_assert_role_counts <namespace> <cluster> <component> <primaries> <secondaries>
@@ -412,6 +446,75 @@ fdb_graph_roundtrip() {
     return 1
   fi
   fdb_log "graph module round-trip succeeded on $pod"
+}
+
+# fdb_primary_service <namespace> <cluster> <component>
+# Prints the name of the Service that KubeBlocks pins to the primary.
+#
+# The name is derived from the componentDefinition, so it is not worth
+# hard-coding in every scenario. What identifies it unambiguously is the
+# roleSelector, which lands in the Service as a kubeblocks.io/role selector.
+fdb_primary_service() {
+  local namespace="$1" cluster="$2" component="$3" svc role
+  for svc in $(kubectl get svc -n "$namespace" \
+    -l "app.kubernetes.io/instance=$cluster,apps.kubeblocks.io/component-name=$component" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+    role="$(kubectl get svc -n "$namespace" "$svc" \
+      -o jsonpath='{.spec.selector.kubeblocks\.io/role}')"
+    if [ "$role" = primary ]; then
+      echo "$svc"
+      return 0
+    fi
+  done
+  fdb_fail "no Service in $namespace selects the primary of $cluster/$component"
+  return 1
+}
+
+# fdb_service_endpoints <namespace> <service>
+# Prints the ready pods currently behind a Service, one per line.
+fdb_service_endpoints() {
+  local namespace="$1" service="$2"
+  # An endpoint with no ready condition at all counts as ready, so only an
+  # explicit "false" may be filtered out.
+  kubectl get endpointslices -n "$namespace" \
+    -l "kubernetes.io/service-name=$service" \
+    -o jsonpath='{range .items[*].endpoints[*]}{.targetRef.name}{" "}{.conditions.ready}{"\n"}{end}' |
+    awk 'NF && $2 != "false" {print $1}' | sort
+}
+
+# fdb_assert_service_primary <namespace> <cluster> <component> <pod>
+# Fails unless the primary Service routes to exactly the given pod and a client
+# connecting through it reaches a writable server.
+#
+# Applications connect to this Service, never to a pod, so a failover that
+# promotes the right pod but leaves the Service pointing at the old one is a
+# full outage: every write comes back READONLY. Asserting roles on pods cannot
+# see that, because it never goes through the selector.
+fdb_assert_service_primary() {
+  local namespace="$1" cluster="$2" component="$3" want="$4"
+  local svc port got role client
+  svc="$(fdb_primary_service "$namespace" "$cluster" "$component")" || return 1
+
+  got="$(fdb_service_endpoints "$namespace" "$svc" | tr '\n' ' ' | sed 's/ *$//')"
+  if [ "$got" != "$want" ]; then
+    fdb_fail "service $svc routes to '$got' but $want is the primary"
+    return 1
+  fi
+
+  # Matching endpoints only prove the selector caught up. Dialling the Service
+  # by name from another pod also proves DNS, the port mapping and the
+  # credentials line up, which is the part an application actually depends on.
+  client="$(fdb_pods_with_role "$namespace" "$cluster" "$component" secondary | head -1)"
+  [ -n "$client" ] || client="$want"
+  port="$(kubectl get svc -n "$namespace" "$svc" -o jsonpath='{.spec.ports[0].port}')"
+  role="$(kubectl exec -n "$namespace" "$client" -c "$FDB_CONTAINER" -- \
+    sh -c 'REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" exec redis-cli -h "$1" -p "$2" '"$FDB_CLI_FLAGS"' INFO replication' \
+    _ "$svc" "$port" | tr -d '\r' | awk -F: '/^role:/ {print $2; exit}')"
+  if [ "$role" != master ]; then
+    fdb_fail "connecting to service $svc from $client reached a server reporting role '$role'"
+    return 1
+  fi
+  fdb_log "service $svc routes to the primary $want and answers as master"
 }
 
 # fdb_assert_graph_node <namespace> <pod> <graph name>

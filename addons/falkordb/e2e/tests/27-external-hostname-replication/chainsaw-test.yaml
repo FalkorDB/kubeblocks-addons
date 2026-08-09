@@ -1,0 +1,362 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: external-hostname-replication
+spec:
+  description: >-
+    Run a replication cluster that advertises itself under an external DNS zone
+    instead of its in-cluster pod FQDNs, and reach it from outside its namespace.
+
+    Anyone running FalkorDB for clients that live outside Kubernetes has to make
+    the servers announce names those clients can resolve. Redis replication and
+    Sentinel both hand the address they were given straight to the client, so if
+    a pod announces its in-cluster FQDN the client discovers an address it cannot
+    reach, and the deployment is unusable however healthy it looks from inside.
+
+    The addon exposes this through ANNOUNCE_HOSTNAME_OVERRIDE, which takes a
+    $(POD_NAME) template so that every pod announces a name of its own. A single
+    flat value would make every replica claim the same address and Sentinel could
+    not tell them apart, so the per-pod expansion is the part that matters.
+
+    Nothing here trusts the cluster phase. The assertions are that each pod
+    announces a distinct external name, that Sentinel discovered the primary,
+    the replica and its peers by those names rather than by IP, that a client in
+    a different namespace can connect using only the external name, and that a
+    failover promotes to another external name and stays reachable.
+  steps:
+    - name: create a cluster that announces external hostnames
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+
+              # The zone embeds the namespace, which chainsaw only picks at run
+              # time, so the manifest cannot be a static file. $(POD_NAME) is
+              # escaped because the addon expands it, not the shell here.
+              cat <<EOF | kubectl apply -f -
+              apiVersion: apps.kubeblocks.io/v1
+              kind: Cluster
+              metadata:
+                name: fdb-ext
+                namespace: $NAMESPACE
+              spec:
+                terminationPolicy: WipeOut
+                clusterDef: falkordb
+                topology: replication
+                componentSpecs:
+                  - name: falkordb
+                    disableExporter: true
+                    replicas: 2
+                    env:
+                      - name: ANNOUNCE_HOSTNAME_OVERRIDE
+                        value: \$(POD_NAME).$NAMESPACE.$suffix
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 512Mi
+                      requests:
+                        cpu: '0.2'
+                        memory: 512Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+                  - name: falkordb-sent
+                    replicas: 3
+                    env:
+                      - name: ANNOUNCE_HOSTNAME_OVERRIDE
+                        value: \$(POD_NAME).$NAMESPACE.$suffix
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 256Mi
+                      requests:
+                        cpu: '0.1'
+                        memory: 256Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+              EOF
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ext
+            tail: 100
+
+    - name: every pod announces a distinct external hostname
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+
+              # A single shared value would satisfy a "contains the suffix"
+              # check while breaking Sentinel, so the names are collected and
+              # counted rather than inspected one at a time.
+              seen=""
+              count=0
+              for pod in $(fdb_pods "$NAMESPACE" fdb-ext falkordb); do
+                announced="$(fdb_config_get "$NAMESPACE" "$pod" replica-announce-ip)"
+                fdb_assert_external_hostname "$pod" "$announced" "$suffix"
+                if [ "$announced" != "$pod.$NAMESPACE.$suffix" ]; then
+                  echo "$pod announced '$announced', expected $pod.$NAMESPACE.$suffix" >&2
+                  exit 1
+                fi
+                seen="$seen $announced"
+                count=$((count + 1))
+              done
+
+              if [ "$count" -ne 2 ]; then
+                echo "expected 2 data pods, found $count" >&2
+                exit 1
+              fi
+              if [ "$(printf '%s' "$seen" | tr ' ' '\n' | grep -c .)" -ne \
+                 "$(printf '%s' "$seen" | tr ' ' '\n' | grep . | sort -u | wc -l | tr -d ' ')" ]; then
+                echo "the data pods did not announce distinct hostnames:$seen" >&2
+                exit 1
+              fi
+              fdb_log "both data pods announce their own name under .$suffix"
+
+              # Sentinel refuses to hand a hostname to a client unless it has
+              # been told hostnames are allowed, so these two are what make the
+              # announced names usable rather than merely present.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-ext falkordb-sent); do
+                conf="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-sent -- \
+                  cat /data/sentinel/redis-sentinel.conf)"
+                for setting in resolve-hostnames announce-hostnames; do
+                  if ! printf '%s' "$conf" | grep -q "sentinel $setting yes"; then
+                    echo "$pod is missing 'sentinel $setting yes'" >&2
+                    exit 1
+                  fi
+                done
+              done
+              fdb_log "every sentinel resolves and announces hostnames"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ext
+            tail: 100
+
+    - name: sentinel discovered the topology by hostname
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+              master=fdb-ext-falkordb
+              sentinel="$(fdb_pods "$NAMESPACE" fdb-ext falkordb-sent | head -1)"
+
+              fdb_retry "sentinel $sentinel to monitor $master" \
+                fdb_assert_sentinel_monitoring "$NAMESPACE" "$sentinel"
+
+              # This is the address a client library is given when it asks
+              # Sentinel where to write, so it is the one that has to be
+              # resolvable from outside the cluster.
+              addr="$(fdb_sentinel_cli "$NAMESPACE" "$sentinel" \
+                SENTINEL get-master-addr-by-name "$master" | tr -d '\r' | head -1)"
+              fdb_assert_external_hostname "the address sentinel reports for $master" \
+                "$addr" "$suffix"
+
+              # SENTINEL replicas and SENTINEL sentinels report what was learned
+              # over the wire rather than what is in any config file, so a
+              # hostname here means the announcement really propagated.
+              replicas="$(fdb_sentinel_cli "$NAMESPACE" "$sentinel" \
+                SENTINEL replicas "$master" | tr -d '\r')"
+              if ! printf '%s' "$replicas" | grep -q "\.$NAMESPACE\.$suffix"; then
+                echo "sentinel knows no replica under .$suffix:" >&2
+                printf '%s' "$replicas" >&2
+                exit 1
+              fi
+              fdb_log "sentinel tracks the replica by its external hostname"
+
+              peers=""
+              found=0
+              attempt=0
+              # Sentinels only learn about each other from the hello messages
+              # the primary relays, so a fresh cluster reports no peers at all
+              # for the first few seconds.
+              while [ "$attempt" -lt 36 ]; do
+                peers="$(fdb_sentinel_cli "$NAMESPACE" "$sentinel" \
+                  SENTINEL sentinels "$master" | tr -d '\r')"
+                found="$(printf '%s\n' "$peers" \
+                  | grep -c "^fdb-ext-falkordb-sent-[0-9]*\.$NAMESPACE\.$suffix$" || true)"
+                [ "$found" -eq 2 ] && break
+                attempt=$((attempt + 1))
+                sleep 5
+              done
+              if [ "$found" -ne 2 ]; then
+                echo "expected 2 sentinel peers under .$suffix, found $found" >&2
+                printf '%s\n' "$peers" >&2
+                exit 1
+              fi
+              fdb_log "the sentinels found each other by external hostname"
+
+              # The primary's own view of its replica has to agree, otherwise
+              # a client following INFO instead of Sentinel gets an address it
+              # cannot reach.
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ext falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-ext falkordb)"
+              slave_ip="$(fdb_cli "$NAMESPACE" "$primary" INFO replication | tr -d '\r' \
+                | sed -n 's/^slave0:ip=\([^,]*\),.*/\1/p')"
+              fdb_assert_external_hostname "the replica as seen by $primary" \
+                "$slave_ip" "$suffix"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ext
+            tail: 100
+
+    - name: a client in another namespace reaches the primary by hostname
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+              client_ns="$NAMESPACE-ext"
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ext falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-ext falkordb)"
+              host="$primary.$NAMESPACE.$suffix"
+
+              # Running the client somewhere else proves the name is not being
+              # completed by the test namespace's DNS search path.
+              kubectl create namespace "$client_ns" >/dev/null
+
+              # The credentials have to travel with it, and passing them through
+              # a file keeps the password out of any command line.
+              kubectl get secret -n "$NAMESPACE" fdb-ext-falkordb-account-default \
+                -o jsonpath='{.data.password}' | base64 -d > "$(fdb_state_dir)/password"
+              kubectl create secret generic fdb-ext-account -n "$client_ns" \
+                --from-file=password="$(fdb_state_dir)/password" >/dev/null
+
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ext-client
+                namespace: $client_ns
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: client
+                    image: falkordb/falkordb:v4.20.1
+                    env:
+                      - name: REDISCLI_AUTH
+                        valueFrom:
+                          secretKeyRef:
+                            name: fdb-ext-account
+                            key: password
+                      - name: HOST
+                        value: $host
+                    command:
+                      - sh
+                      - -c
+                      - |
+                        set -e
+                        redis-cli -h "\$HOST" SET e2e-ext-client reachable
+                        redis-cli -h "\$HOST" GET e2e-ext-client
+                        redis-cli -h "\$HOST" GRAPH.QUERY e2e-ext-graph "CREATE (:Person {name:'alice'})"
+              EOF
+
+              kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/ext-client \
+                -n "$client_ns" --timeout=5m
+              output="$(kubectl logs -n "$client_ns" ext-client)"
+              if ! printf '%s' "$output" | grep -q reachable; then
+                echo "the external client did not read its own write back:" >&2
+                printf '%s' "$output" >&2
+                exit 1
+              fi
+              fdb_log "a pod in $client_ns wrote and read through $host"
+
+              # And the write really landed in the database rather than being
+              # answered by something else that happened to respond.
+              value="$(fdb_cli "$NAMESPACE" "$primary" GET e2e-ext-client | tr -d '\r')"
+              if [ "$value" != reachable ]; then
+                echo "the primary holds '$value' for e2e-ext-client, expected reachable" >&2
+                exit 1
+              fi
+              fdb_assert_graph_node "$NAMESPACE" "$primary" e2e-ext-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ext
+            tail: 100
+
+    - name: failover promotes to another external hostname
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+              master=fdb-ext-falkordb
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ext falkordb 1 1
+              old_primary="$(fdb_primary "$NAMESPACE" fdb-ext falkordb)"
+              fdb_write_keys "$NAMESPACE" "$old_primary" e2e-ext 50
+
+              # Sentinel will not run a second failover for two minutes by
+              # default, which is longer than this step is willing to wait.
+              fdb_sentinel_relax_failover_cooldown "$NAMESPACE" fdb-ext falkordb-sent "$master"
+
+              fdb_kill_pod "$NAMESPACE" "$old_primary"
+              fdb_retry "the roles to settle after the failover" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ext falkordb 1 1
+
+              new_primary="$(fdb_primary "$NAMESPACE" fdb-ext falkordb)"
+              sentinel="$(fdb_pods "$NAMESPACE" fdb-ext falkordb-sent | head -1)"
+
+              # Promotion rewrites the address Sentinel hands out. If the new
+              # primary registered itself by IP the clients outside the cluster
+              # would be cut off at exactly the moment failover was meant to
+              # save them.
+              expected="$new_primary.$NAMESPACE.$suffix"
+              addr=""
+              attempt=0
+              while [ "$attempt" -lt 60 ]; do
+                addr="$(fdb_sentinel_cli "$NAMESPACE" "$sentinel" \
+                  SENTINEL get-master-addr-by-name "$master" | tr -d '\r' | head -1)"
+                [ "$addr" = "$expected" ] && break
+                attempt=$((attempt + 1))
+                sleep 5
+              done
+              fdb_assert_external_hostname "the promoted primary" "$addr" "$suffix"
+              if [ "$addr" != "$expected" ]; then
+                echo "sentinel publishes '$addr' for $master, expected $expected" >&2
+                exit 1
+              fi
+
+              fdb_verify_keys "$NAMESPACE" "$new_primary" e2e-ext 50
+              fdb_retry "the old primary to follow the new one" \
+                fdb_assert_replication_up "$NAMESPACE" "$old_primary"
+              fdb_write_keys "$NAMESPACE" "$new_primary" e2e-ext-after 20
+              fdb_retry "writes to replicate after the failover" \
+                fdb_verify_keys "$NAMESPACE" "$old_primary" e2e-ext-after 20
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ext
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              kubectl delete namespace "$NAMESPACE-ext" --wait=false --ignore-not-found >/dev/null
+              fdb_clean_state_dir

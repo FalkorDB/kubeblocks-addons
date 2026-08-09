@@ -48,11 +48,15 @@ extract_lb_host_by_svc_name() {
 
 get_announce_hostname_override_or_default() {
   local default_value="$1"
-  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
-    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
+  local pod_name="$2"
+  if is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "$default_value"
     return
   fi
-  echo "$default_value"
+  # Each sentinel has to announce a name of its own, so the override is a
+  # template rather than a literal. See falkordb-start.sh for why $(POD_NAME)
+  # reaches the script unexpanded.
+  echo "${ANNOUNCE_HOSTNAME_OVERRIDE//\$(POD_NAME)/$pod_name}"
 }
 
 # TODO: if instanceTemplate is specified, the pod service could not be parsed from the pod ordinal.
@@ -229,7 +233,7 @@ build_redis_sentinel_conf() {
     enable_hostname_resolution=true
   fi
 
-  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value")
+  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value" "$CURRENT_POD_NAME")
   if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
     echo "announce hostname override is set, using $announce_host_value for sentinel announce"
     enable_hostname_resolution=true

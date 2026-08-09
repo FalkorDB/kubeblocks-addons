@@ -10,6 +10,10 @@ spec:
     nothing coordinates it, the old primary comes back with stale data and has to
     be demoted, and the start script has to work out that it is no longer the
     primary before it accepts writes.
+
+    It also checks the read-write Service, not just the pod roles: applications
+    connect by Service name, so a promotion the Service never follows is an
+    outage no matter how correct the labels are.
   steps:
     - name: create the cluster
       try:
@@ -48,6 +52,13 @@ spec:
 
               fdb_retry "the replication link on $survivor" \
                 fdb_assert_replication_up "$NAMESPACE" "$survivor"
+
+              # Record where clients are being sent before anything breaks, so
+              # the post-failover check is comparing against a known-good state
+              # rather than assuming the Service was ever correct.
+              fdb_retry "the primary service to route to $primary" \
+                fdb_assert_service_primary "$NAMESPACE" fdb-failover falkordb "$primary"
+
               fdb_write_keys "$NAMESPACE" "$primary" e2e-failover 20
               fdb_retry "data to reach $survivor" \
                 fdb_verify_keys "$NAMESPACE" "$survivor" e2e-failover 20
@@ -94,6 +105,12 @@ spec:
               fdb_retry "$old_primary to resync with $survivor" \
                 fdb_assert_replication_up "$NAMESPACE" "$old_primary"
               fdb_assert_role_counts "$NAMESPACE" fdb-failover falkordb 1 1
+
+              # Promoting the right pod is only half the job. Until the Service
+              # follows, every client is still being routed to the demoted pod
+              # and every write it sends comes back READONLY.
+              fdb_retry "the primary service to follow the failover to $survivor" \
+                fdb_assert_service_primary "$NAMESPACE" fdb-failover falkordb "$survivor"
       catch:
         - events: {}
         - podLogs:

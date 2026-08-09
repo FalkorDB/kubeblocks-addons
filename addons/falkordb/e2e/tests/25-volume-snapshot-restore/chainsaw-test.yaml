@@ -1,0 +1,246 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: volume-snapshot-restore
+spec:
+  description: >-
+    Take a volume-snapshot backup of a live cluster and restore it into a new one.
+
+    This method is shipped in the backup policy template alongside datafile and
+    aof but works completely differently: there is no ActionSet and no job that
+    reads the dataset, KubeBlocks just asks the CSI driver to snapshot the data
+    volume. That means it depends on a VolumeSnapshotClass, on the needSnapshot
+    marker on the data volume, and on the restore side attaching the snapshot as
+    a PVC dataSource -- none of which the datafile scenarios touch.
+
+    Nothing is flushed to disk on purpose before the backup. The addon config
+    sets appendonly yes with appendfsync everysec, so recent writes reach the AOF
+    within a second and a snapshot taken afterwards has to contain them. Since
+    the method has no pre-backup hook, that AOF is the only thing making the
+    snapshot consistent, and this is what proves it.
+  steps:
+    - name: create the source cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-snap
+            tail: 100
+
+    - name: seed keys and a graph without flushing them to disk
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-snap falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-snap falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-snap falkordb secondary)"
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-snap 100
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-snap-graph
+
+              # The backup policy targets the secondary, so its volume is the one
+              # that gets snapshotted. Data that has not replicated yet would be
+              # missing from the snapshot for reasons that have nothing to do
+              # with snapshots, so wait for the replica to catch up first.
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_retry "the seeded data to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-snap 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-snap
+            tail: 100
+
+    - name: snapshot the data volume
+      try:
+        - apply:
+            file: backup.yaml
+        - assert:
+            file: assert-backup-completed.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: dataprotection.kubeblocks.io/v1alpha1
+            kind: Backup
+            name: fdb-snap-volume-snapshot
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-snap
+            tail: 200
+
+    - name: a real CSI snapshot was taken
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # A Backup can reach Completed without anything having been
+              # snapshotted, so check the CSI objects rather than the phase.
+              snaps="$(kubectl get volumesnapshot -n "$NAMESPACE" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -c . || true)"
+              if [ "$snaps" -eq 0 ]; then
+                echo "the backup completed without creating any VolumeSnapshot" >&2
+                kubectl get backup,volumesnapshot -n "$NAMESPACE" >&2
+                exit 1
+              fi
+              fdb_log "the backup created $snaps VolumeSnapshot(s)"
+
+              for snap in $(kubectl get volumesnapshot -n "$NAMESPACE" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                ready="$(kubectl get volumesnapshot -n "$NAMESPACE" "$snap" \
+                  -o jsonpath='{.status.readyToUse}')"
+                if [ "$ready" != "true" ]; then
+                  echo "VolumeSnapshot $snap is not ready to use (readyToUse=$ready)" >&2
+                  kubectl describe volumesnapshot -n "$NAMESPACE" "$snap" >&2
+                  exit 1
+                fi
+                source_pvc="$(kubectl get volumesnapshot -n "$NAMESPACE" "$snap" \
+                  -o jsonpath='{.spec.source.persistentVolumeClaimName}')"
+                fdb_log "$snap is ready and was taken from $source_pvc"
+              done
+      catch:
+        - events: {}
+
+    - name: restore the snapshot into a new cluster
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The restore source names the chainsaw namespace, which is only
+              # known at run time, so this cluster cannot be a static file. The
+              # annotation is used rather than Cluster.spec.restore for the same
+              # reason as the datafile scenario: spec.restore routes through the
+              # volume populator, which does not exist on the pinned KubeBlocks.
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: apps.kubeblocks.io/v1
+              kind: Cluster
+              metadata:
+                name: fdb-snap-restored
+                annotations:
+                  kubeblocks.io/restore-from-backup: '{"falkordb":{"name":"fdb-snap-volume-snapshot","namespace":"$NAMESPACE","volumeRestorePolicy":"Parallel"}}'
+              spec:
+                terminationPolicy: WipeOut
+                clusterDef: falkordb
+                topology: replication
+                componentSpecs:
+                  - name: falkordb
+                    disableExporter: true
+                    replicas: 2
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 512Mi
+                      requests:
+                        cpu: '0.2'
+                        memory: 512Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          # A snapshot can only be restored by the driver that
+                          # took it, so the restored volumes have to come from
+                          # the same storage class.
+                          storageClassName: csi-hostpath-sc
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+                  - name: falkordb-sent
+                    replicas: 3
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 256Mi
+                      requests:
+                        cpu: '0.1'
+                        memory: 256Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+              EOF
+        - assert:
+            file: assert-restored-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-snap-restored
+            tail: 200
+
+    - name: the restored volumes came from the snapshot
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # If KubeBlocks quietly fell back to copying files, the restored
+              # data would still be correct and every other assertion here would
+              # pass while the snapshot path went untested. The PVC dataSource is
+              # what distinguishes the two.
+              restored=0
+              for pvc in $(kubectl get pvc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-snap-restored,apps.kubeblocks.io/component-name=falkordb" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                kind="$(kubectl get pvc -n "$NAMESPACE" "$pvc" -o jsonpath='{.spec.dataSource.kind}')"
+                name="$(kubectl get pvc -n "$NAMESPACE" "$pvc" -o jsonpath='{.spec.dataSource.name}')"
+                if [ "$kind" = VolumeSnapshot ]; then
+                  fdb_log "$pvc was provisioned from VolumeSnapshot $name"
+                  restored=$((restored + 1))
+                else
+                  fdb_log "$pvc has no VolumeSnapshot dataSource (kind='$kind')"
+                fi
+              done
+              if [ "$restored" -eq 0 ]; then
+                echo "no restored PVC was provisioned from a VolumeSnapshot" >&2
+                kubectl get pvc -n "$NAMESPACE" -o wide >&2
+                exit 1
+              fi
+      catch:
+        - events: {}
+
+    - name: the restored cluster holds everything the source did
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the restored cluster to elect a primary" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-snap-restored falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-snap-restored falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-snap-restored falkordb secondary)"
+
+              # Nothing was flushed by hand before the backup, so these keys only
+              # exist if the snapshot captured the AOF.
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-snap 100
+              fdb_assert_graph_node "$NAMESPACE" "$primary" e2e-snap-graph
+
+              # A restored volume is not the same thing as a working cluster.
+              fdb_retry "the restored replica to link up" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_retry "the restored data to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-snap 100
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-snap-after 20
+              fdb_retry "the restored cluster to replicate new writes" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-snap-after 20
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-snap-restored
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

@@ -328,9 +328,8 @@ spec:
             value: "$(SERVICE_PORT)"
         container: falkordb
         command:
-          - /tools/dbctl
-          - redis
-          - getrole
+          - /bin/bash
+          - /scripts/falkordb-role-probe.sh
     postProvision:
       exec:
         container: falkordb

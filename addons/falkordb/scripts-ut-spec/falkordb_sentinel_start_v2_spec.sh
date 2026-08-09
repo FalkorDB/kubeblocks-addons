@@ -116,6 +116,15 @@ Describe "FalkorDB Start Sentinel Bash Script Tests"
       The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for sentinel announce"
     End
 
+    It "expands \$(POD_NAME) so each sentinel announces a hostname of its own"
+      export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).sentinel.example.com'
+      When call build_redis_sentinel_conf
+      The status should be success
+      The contents of file "$redis_sentinel_real_conf" should include "sentinel announce-ip $CURRENT_POD_NAME.sentinel.example.com"
+      The contents of file "$redis_sentinel_real_conf" should not include 'POD_NAME'
+      The stdout should include "announce hostname override is set, using $CURRENT_POD_NAME.sentinel.example.com for sentinel announce"
+    End
+
     It "announces the advertised nodeport address exactly once"
       redis_sentinel_announce_host_value="172.20.0.3"
       redis_sentinel_announce_port_value="31467"

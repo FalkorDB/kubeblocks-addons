@@ -180,6 +180,18 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for replica announce"
     End
 
+    It "expands \$(POD_NAME) in the override so each replica announces its own name"
+      unset redis_announce_host_value
+      unset redis_announce_port_value
+      export CURRENT_POD_NAME="redis-redis-1"
+      export REDIS_POD_FQDN_LIST="redis-redis-0.redis-redis.default.svc.cluster.local,redis-redis-1.redis-redis.default.svc.cluster.local"
+      export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).redis.example.com'
+      When call build_announce_ip_and_port
+      The contents of file "$redis_real_conf" should include "replica-announce-ip redis-redis-1.redis.example.com"
+      The contents of file "$redis_real_conf" should not include 'POD_NAME'
+      The stdout should include "announce hostname override is set, using redis-redis-1.redis.example.com for replica announce"
+    End
+
     It "exits with error when failed to get current pod fqdn"
       unset redis_announce_host_value
       unset redis_announce_port_value
@@ -360,6 +372,36 @@ Describe "FalkorDB Start Bash Script Tests"
         When call check_current_pod_is_primary
         The status should be success
         The stdout should include "current pod is primary with advertised svc mapping"
+      End
+    End
+
+    Context 'mapping with the announce hostname override'
+      setup() {
+        export CURRENT_POD_NAME="redis-redis-0"
+        export REDIS_COMPONENT_NAME="redis-redis"
+        export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).redis.example.com'
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_POD_NAME
+        unset REDIS_COMPONENT_NAME
+        unset ANNOUNCE_HOSTNAME_OVERRIDE
+        unset primary
+      }
+      After 'un_setup'
+
+      It "returns true when the primary is this pod under its override hostname"
+        primary="redis-redis-0.redis.example.com"
+        When call check_current_pod_is_primary
+        The status should be success
+        The stdout should include "current pod is primary with announce hostname mapping"
+      End
+
+      It "returns false when the primary is another pod's override hostname"
+        primary="redis-redis-1.redis.example.com"
+        When call check_current_pod_is_primary
+        The status should be failure
       End
     End
   End

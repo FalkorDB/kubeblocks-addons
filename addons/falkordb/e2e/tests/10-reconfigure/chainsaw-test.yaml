@@ -78,6 +78,10 @@ spec:
 
     - name: restart the component
       try:
+        # KubeBlocks rejects a Restart while the cluster is still Updating from
+        # the reconfigure above, so settle first rather than racing it.
+        - assert:
+            file: assert-running.yaml
         - apply:
             file: restart.yaml
         - assert:

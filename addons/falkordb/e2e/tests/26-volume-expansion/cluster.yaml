@@ -1,0 +1,48 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-expand
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  topology: replication
+  componentSpecs:
+    - name: falkordb
+      disableExporter: true
+      replicas: 2
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 512Mi
+        requests:
+          cpu: '0.2'
+          memory: 512Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            # local-path, the k3d default, has allowVolumeExpansion: false, so a
+            # VolumeExpansion against it is rejected before anything is tested.
+            # The hostpath CSI class the e2e setup installs allows it.
+            storageClassName: csi-hostpath-sc
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+    - name: falkordb-sent
+      replicas: 3
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 256Mi
+        requests:
+          cpu: '0.1'
+          memory: 256Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi

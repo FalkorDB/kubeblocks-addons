@@ -5,8 +5,9 @@ metadata:
 spec:
   description: >-
     Promote the replica to primary with a Switchover OpsRequest and prove the roles
-    really swapped, no data was lost, and the temporary replica-priority values the
-    switchover script sets were restored afterwards.
+    really swapped, no data was lost, the read-write Service was moved onto the new
+    primary, and the temporary replica-priority values the switchover script sets
+    were restored afterwards.
   steps:
     - name: create the cluster
       try:
@@ -39,6 +40,12 @@ spec:
 
               fdb_retry "the replication link on $candidate" \
                 fdb_assert_replication_up "$NAMESPACE" "$candidate"
+
+              # Record where clients are being sent before the switchover, so
+              # the check afterwards compares against a known-good state.
+              fdb_retry "the primary service to route to $primary" \
+                fdb_assert_service_primary "$NAMESPACE" fdb-switch falkordb "$primary"
+
               fdb_write_keys "$NAMESPACE" "$primary" e2e-switchover 20
               fdb_retry "replicated data on $candidate" \
                 fdb_verify_keys "$NAMESPACE" "$candidate" e2e-switchover 20
@@ -102,6 +109,12 @@ spec:
 
               fdb_verify_keys "$NAMESPACE" "$candidate" e2e-switchover 20
               fdb_verify_keys "$NAMESPACE" "$old_primary" e2e-switchover 20
+
+              # An orchestrated switchover is meant to be a controlled handover,
+              # so the Service has to end up on the new primary. If it does not,
+              # clients keep writing to the demoted pod and get READONLY.
+              fdb_retry "the primary service to follow the switchover to $candidate" \
+                fdb_assert_service_primary "$NAMESPACE" fdb-switch falkordb "$candidate"
 
     - name: replica-priority was restored on every pod
       try:
