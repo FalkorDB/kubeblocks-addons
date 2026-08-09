@@ -1,0 +1,18 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-rops-sent-account
+spec:
+  clusterName: fdb-rops
+  type: Custom
+  custom:
+    opsDefinitionName: falkordb-sent-account-ops
+    components:
+      # The sentinel OpsDefinition remaps SENTINEL_* env onto the same script,
+      # so it has to be pointed at the sentinel component, not at falkordb.
+      - componentName: falkordb-sent
+        parameters:
+          - name: ACL_COMMAND
+            value: "ACL SETUSER e2e-sent on >sent-pass ~* &* +@all"
+          - name: REPLICAS
+            value: "3"

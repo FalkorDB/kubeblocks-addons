@@ -1,0 +1,213 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: shard-primary-failover
+spec:
+  description: >-
+    Stall the primary of one shard in a sharded cluster with two replicas per
+    shard and prove the replica is promoted while the shard keeps its slots.
+
+    Every other sharded scenario runs a single replica per shard, so the whole
+    in-shard promotion path was untested. It is also a genuinely different code
+    path from the sentinel failover the replication scenarios cover: there is no
+    sentinel here at all, the surviving nodes have to agree on the promotion
+    among themselves and KubeBlocks has to relabel the pod afterwards.
+
+    Two failure modes hide behind a Running cluster. The replica can be promoted
+    inside FalkorDB while the `kubeblocks.io/role` label still points at the dead
+    pod, which breaks everything that routes by label - backups, switchover, the
+    account ops. Or the promotion never happens and the shard's slots simply go
+    dark, which only shows up as reads failing for the fraction of keys that
+    hash into that shard.
+
+    The failure is injected with DEBUG SLEEP rather than by deleting the pod.
+    Deleting it does not work: the component's preStop hook keeps the server
+    answering cluster bus pings for the full 30s grace period, and the pod is
+    then back within about twelve seconds carrying the same node id and volume.
+    With `cluster-node-timeout` at 5s that window is too marginal to reliably
+    reach a FAIL verdict, so the test would be measuring pod restart latency
+    rather than failover. Freezing the server thread stops the cluster bus dead
+    while leaving the container alone, which is both deterministic and a fair
+    model of the hung primary this feature exists to survive.
+  steps:
+    - name: create the sharded cluster with replicas per shard
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shfo
+            tail: 200
+
+    - name: every shard has a primary and a replica
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-shfo shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shfo shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              # 3 shards x 2 replicas, and the roles have to be labelled before
+              # anything below can pick a victim by role.
+              fdb_retry "six pods carrying a role label" bash -c '
+                total=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/sharding-name=shard" \
+                  --no-headers 2>/dev/null | wc -l | tr -d " ")
+                primaries=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/sharding-name=shard,kubeblocks.io/role=primary" \
+                  --no-headers 2>/dev/null | wc -l | tr -d " ")
+                secondaries=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/sharding-name=shard,kubeblocks.io/role=secondary" \
+                  --no-headers 2>/dev/null | wc -l | tr -d " ")
+                echo "pods=$total primaries=$primaries secondaries=$secondaries"
+                [ "$total" = "6" ] || { echo "expected 6 pods" >&2; exit 1; }
+                [ "$primaries" = "3" ] || { echo "expected 3 primaries" >&2; exit 1; }
+                [ "$secondaries" = "3" ] || { echo "expected 3 secondaries" >&2; exit 1; }
+              '
+
+              # Enough keys that the killed shard is guaranteed to own some.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shfo 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shfo 200
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shfo
+            tail: 200
+
+    - name: stall the primary of one shard
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              victim="$(kubectl get pods -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/sharding-name=shard,kubeblocks.io/role=primary" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort | head -1)"
+              [ -n "$victim" ] || { fdb_fail "no primary pod to stall"; exit 1; }
+
+              # The victim's component is one shard; the replica that must take
+              # over is the other pod of that same component.
+              comp="$(kubectl get pod -n "$NAMESPACE" "$victim" \
+                -o jsonpath='{.metadata.labels.apps\.kubeblocks\.io/component-name}')"
+              heir="$(kubectl get pods -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/component-name=$comp,kubeblocks.io/role=secondary" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort | head -1)"
+              [ -n "$heir" ] || { fdb_fail "shard $comp has no secondary to promote"; exit 1; }
+
+              # Assertions are read through a pod in a different shard, so the
+              # entry point is never the one being disrupted. Pods are named
+              # <cluster>-<component>-<ordinal>, so the component prefix is what
+              # has to be filtered out.
+              survivor="$(fdb_sharding_pods "$NAMESPACE" fdb-shfo shard |
+                grep -v "^fdb-shfo-$comp-" | head -1)"
+              [ -n "$survivor" ] || { fdb_fail "no pod outside shard $comp"; exit 1; }
+
+              printf '%s\n' "$victim" > "$state/victim"
+              printf '%s\n' "$heir" > "$state/heir"
+              printf '%s\n' "$comp" > "$state/comp"
+              printf '%s\n' "$survivor" > "$state/survivor"
+              fdb_log "stalling primary $victim of shard $comp; expecting $heir to take over"
+              fdb_log "asserting through $survivor"
+
+              # DEBUG SLEEP blocks the server thread, so the cluster bus goes
+              # silent and the peers reach a FAIL verdict. The call returns only
+              # once the sleep is over, by which point the promotion has already
+              # happened and the old primary is rejoining as a replica.
+              fdb_cli "$NAMESPACE" "$victim" DEBUG SLEEP 40 >/dev/null
+              fdb_log "$victim is responsive again"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shfo
+            tail: 200
+
+    - name: the replica is promoted and the shard keeps its slots
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              victim="$(cat "$state/victim")"
+              heir="$(cat "$state/heir")"
+              comp="$(cat "$state/comp")"
+              survivor="$(cat "$state/survivor")"
+
+              # FalkorDB's own view first: the heir has to actually be a master.
+              fdb_retry "$heir to report itself a master" bash -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                role="$(fdb_server_role "'"$NAMESPACE"'" "'"$heir"'")"
+                [ "$role" = "master" ] || { echo "$role" >&2; exit 1; }
+              '
+
+              # Then KubeBlocks': the role label has to follow, or every
+              # label-driven operation keeps aiming at the wrong pod.
+              fdb_retry "the role labels to follow the promotion" bash -c '
+                current="$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/component-name='"$comp"',kubeblocks.io/role=primary" \
+                  -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}")"
+                [ "$current" = "'"$heir"'" ] || {
+                  echo "shard '"$comp"' labels ${current:-<none>} as primary, expected '"$heir"'" >&2
+                  exit 1
+                }
+              '
+
+              # The shard must not have lost its slots in the process.
+              fdb_retry "the slot map to stay complete" \
+                fdb_assert_slots_covered "$NAMESPACE" "$survivor"
+              fdb_assert_shard_count "$NAMESPACE" fdb-shfo shard 3
+
+              fdb_retry "every key to still be readable" \
+                fdb_verify_keys "$NAMESPACE" "$survivor" e2e-shfo 200
+
+              # The unfrozen pod has to rejoin as a replica of the new primary
+              # rather than coming back believing it is still the master, which
+              # would leave the shard with a split view of its own slots.
+              fdb_retry "$victim to rejoin the shard" \
+                fdb_assert_slots_covered "$NAMESPACE" "$victim"
+              fdb_retry "the shard to settle at one primary and one secondary" bash -c '
+                primaries=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/component-name='"$comp"',kubeblocks.io/role=primary" \
+                  --no-headers 2>/dev/null | wc -l | tr -d " ")
+                secondaries=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-shfo,apps.kubeblocks.io/component-name='"$comp"',kubeblocks.io/role=secondary" \
+                  --no-headers 2>/dev/null | wc -l | tr -d " ")
+                echo "shard '"$comp"' primaries=$primaries secondaries=$secondaries"
+                [ "$primaries" = "1" ] || { echo "expected one primary" >&2; exit 1; }
+                [ "$secondaries" = "1" ] || { echo "expected one secondary" >&2; exit 1; }
+              '
+
+              # And writes have to work again on the promoted shard.
+              fdb_write_keys "$NAMESPACE" "$survivor" e2e-shfo-after 100
+              fdb_verify_keys "$NAMESPACE" "$survivor" e2e-shfo-after 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shfo
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

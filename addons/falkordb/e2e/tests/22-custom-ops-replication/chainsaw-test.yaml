@@ -1,0 +1,218 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: custom-ops-replication
+spec:
+  description: >-
+    Exercise the three custom OpsDefinitions that target a replication cluster:
+    falkordb-master-account-ops, falkordb-sent-account-ops and
+    falkordb-reset-master.
+
+    None of them had ever run. `type: Custom` appeared nowhere in the suite, so
+    the podInfoExtractor env wiring was unverified - and the sentinel variant
+    remaps SENTINEL_* onto the same script through envRef aliases, which is
+    precisely the kind of indirection that breaks silently.
+
+    reset-master is the interesting one. `SENTINEL RESET` throws away everything
+    a sentinel knows about a master: its replicas, its peer sentinels and its
+    per-master config. If the addon's monitor settings are not re-applied
+    afterwards, the sentinels look healthy - they answer SENTINEL masters and
+    report the right address - while quietly having lost the credentials they
+    need to talk to the server. The only assertion that catches that is a real
+    failover after the reset.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rops
+            tail: 200
+
+    - name: the cluster is replicating and monitored
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rops falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-rops falkordb)"
+              fdb_retry "the replica to link up" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-rops falkordb
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rops falkordb-sent); do
+                fdb_retry "$pod to monitor the master" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-rops 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rops
+            tail: 200
+
+    - name: run the master account custom ops
+      try:
+        - apply:
+            file: master-account.yaml
+        - assert:
+            file: assert-master-account-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rops-master-account
+
+    - name: the server account exists on every replica and can log in
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The ops is only meaningful if it reached *both* servers. An ACL
+              # applied to the primary alone survives until the first failover
+              # and then vanishes, which is the worst possible time to find out.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rops falkordb); do
+                users="$(fdb_cli "$NAMESPACE" "$pod" ACL USERS | tr -d '\r')"
+                case "$users" in
+                  *e2e-master*) fdb_log "$pod knows e2e-master" ;;
+                  *)
+                    fdb_fail "$pod does not know e2e-master, users are: $users"
+                    exit 1
+                    ;;
+                esac
+              done
+
+              # Listing the user does not prove the credentials work; a user
+              # created without `on` shows up but cannot authenticate.
+              primary="$(fdb_primary "$NAMESPACE" fdb-rops falkordb)"
+              out="$(kubectl exec -n "$NAMESPACE" "$primary" -c falkordb -- \
+                redis-cli --user e2e-master --pass master-pass --no-auth-warning PING \
+                2>&1 | tr -d '\r')"
+              case "$out" in
+                *PONG*) fdb_log "e2e-master authenticated against $primary" ;;
+                *)
+                  fdb_fail "e2e-master could not authenticate against $primary: $out"
+                  exit 1
+                  ;;
+              esac
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rops
+            tail: 200
+
+    - name: run the sentinel account custom ops
+      try:
+        - apply:
+            file: sent-account.yaml
+        - assert:
+            file: assert-sent-account-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rops-sent-account
+
+    - name: the sentinel account exists on every sentinel
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rops falkordb-sent); do
+                users="$(fdb_sentinel_cli "$NAMESPACE" "$pod" ACL USERS | tr -d '\r')"
+                case "$users" in
+                  *e2e-sent*) fdb_log "$pod knows e2e-sent" ;;
+                  *)
+                    fdb_fail "$pod does not know e2e-sent, users are: $users"
+                    exit 1
+                    ;;
+                esac
+              done
+
+              # Applying ACLs to a sentinel must not disturb what it monitors.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rops falkordb-sent); do
+                fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rops
+            tail: 200
+
+    - name: run the reset-master custom ops
+      try:
+        - apply:
+            file: reset-master.yaml
+        - assert:
+            file: assert-reset-master-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rops-reset-master
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rops
+            tail: 200
+
+    - name: the sentinels recover from the reset and can still fail over
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # SENTINEL RESET drops the master and everything learned about it.
+              # Rediscovery is asynchronous, so retry rather than reading once.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rops falkordb-sent); do
+                fdb_retry "$pod to monitor the master again" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+
+              # Monitoring the master again is necessary but not sufficient: the
+              # reset also wipes auth-user/auth-pass, and a sentinel without
+              # credentials still reports the master perfectly while being unable
+              # to promote anything. Killing the primary is the only check that
+              # cannot be faked.
+              fdb_sentinel_relax_failover_cooldown "$NAMESPACE" fdb-rops falkordb-sent fdb-rops-falkordb
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-rops falkordb)"
+              fdb_log "killing $primary to force an election after the reset"
+              fdb_kill_pod "$NAMESPACE" "$primary"
+
+              fdb_retry "a new primary to be elected" bash -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                new="$(fdb_primary "'"$NAMESPACE"'" fdb-rops falkordb)"
+                [ -n "$new" ] || { echo "no primary yet" >&2; exit 1; }
+                [ "$new" != "'"$primary"'" ] || { echo "$new is still the primary" >&2; exit 1; }
+                echo "$new was promoted"
+              '
+
+              fdb_retry "the cluster to settle back to one primary and one replica" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rops falkordb 1 1
+              fdb_retry "the replica to link up again" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-rops falkordb
+
+              # The data has to have survived the whole sequence.
+              new_primary="$(fdb_primary "$NAMESPACE" fdb-rops falkordb)"
+              fdb_retry "the keys to be readable on the new primary" \
+                fdb_verify_keys "$NAMESPACE" "$new_primary" e2e-rops 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rops
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

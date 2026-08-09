@@ -1,0 +1,14 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-cops-rebalance
+spec:
+  clusterName: fdb-cops
+  type: Custom
+  custom:
+    # `shard` is the sharding name, not a component name. CustomOpsHandler
+    # resolves it through Cluster.spec.shardings when it is not found in
+    # componentSpecs, which is the only way to target every shard at once.
+    opsDefinitionName: falkordb-cluster-rebalance
+    components:
+      - componentName: shard

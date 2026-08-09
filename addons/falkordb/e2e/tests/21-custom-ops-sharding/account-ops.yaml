@@ -1,0 +1,24 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-cops-account
+spec:
+  clusterName: fdb-cops
+  type: Custom
+  custom:
+    opsDefinitionName: falkordb-shard-account-ops
+    components:
+      - componentName: shard
+        parameters:
+          - name: ACL_COMMAND
+            value: "ACL SETUSER e2e-shardops on >shardops-pass ~* &* +@all"
+          # SHARD_MODE is what makes falkordb-account.sh discover its peers with
+          # CLUSTER NODES instead of reading REDIS_POD_FQDN_LIST, which a
+          # sharded cluster does not have.
+          - name: SHARD_MODE
+            value: "TRUE"
+          # The script only reports success when the number of hosts it reached
+          # equals REPLICAS, so this has to match the real node count:
+          # 3 shards x 1 replica.
+          - name: REPLICAS
+            value: "3"
