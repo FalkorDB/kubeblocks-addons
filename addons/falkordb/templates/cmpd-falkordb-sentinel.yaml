@@ -180,17 +180,11 @@ spec:
     ## the username of falkordb for falkordb sentinel connection which is only used to recover falkordb servers when scale-out falkordb sentinel.
     - name: REDIS_SENTINEL_USER
       value: "kbreplicator-sentinel"
-    ## the password of falkordb for falkordb sentinel connection, which is only used to recover falkordb servers when scale-out falkordb sentinel.
-    ## TODO: Obtaining the falkordb password here will cause a circular dependency issue, which will lead to the abnormal restart of the falkordb Sentinel pod, details refer to falkordb-sent-member-join.sh
-{{/*    - name: REDIS_SENTINEL_PASSWORD*/}}
-{{/*      valueFrom:*/}}
-{{/*        credentialVarRef:*/}}
-{{/*          compDef: {{ include "falkordb4.cmpdName" . }}*/}}
-{{/*          name: default*/}}
-{{/*          optional: true*/}}
-{{/*          password: Required*/}}
-{{/*          multipleClusterObjectOption:*/}}
-{{/*            strategy: individual*/}}
+    ## The falkordb password is deliberately not exposed here. A credentialVarRef
+    ## from the sentinel back to the falkordb component creates a start-up cycle
+    ## that restarts the sentinel pods. The memberJoin action does not need it:
+    ## it runs on a sentinel that is already monitoring, which holds the password
+    ## in the config file redis rewrites for itself.
   lifecycleActions:
     accountProvision:
       exec:
@@ -210,6 +204,34 @@ spec:
           - /scripts/falkordb-sent-member-leave.sh > /tmp/member-leave.log 2>&1
         targetPodSelector: Any
         ## all lifecycle actions share the same env
+        env:
+          - name: CURRENT_POD_NAME
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: metadata.name
+          - name: CURRENT_POD_IP
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: status.podIP
+          - name: CURRENT_POD_HOST_IP
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: status.hostIP
+    ## Sentinels do not exchange `sentinel monitor` between themselves, so a
+    ## sentinel added after the cluster was created monitors nothing and can
+    ## never vote in a failover. This copies the configuration from a sentinel
+    ## that is already monitoring onto the new one.
+    memberJoin:
+      exec:
+        container: falkordb-sent
+        command:
+          - /bin/bash
+          - -c
+          - /scripts/falkordb-sent-member-join.sh
+        targetPodSelector: Any
         env:
           - name: CURRENT_POD_NAME
             valueFrom:

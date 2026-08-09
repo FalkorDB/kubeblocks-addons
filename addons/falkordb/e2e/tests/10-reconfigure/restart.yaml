@@ -1,0 +1,9 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-config-restart
+spec:
+  clusterName: fdb-config
+  type: Restart
+  restart:
+    - componentName: falkordb

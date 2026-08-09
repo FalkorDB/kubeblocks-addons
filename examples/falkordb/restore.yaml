@@ -3,22 +3,18 @@ kind: Cluster
 metadata:
   name: falkordb-replication-restore
   namespace: demo
+  annotations:
+    # The backup to restore from, keyed by component name. `sourceTargetName`
+    # picks the backup target when the backup policy has more than one, and can
+    # be omitted otherwise.
+    kubeblocks.io/restore-from-backup: '{"falkordb":{"name":"falkordb-backup-datafile","namespace":"demo","volumeRestorePolicy":"Parallel","sourceTargetName":"falkordb"}}'
 spec:
-  restore:
-    source:
-      apiGroup: dataprotection.kubeblocks.io
-      kind: Backup
-      name: falkordb-backup-datafile
-      namespace: demo
-    parameters:
-      dataprotection.kubeblocks.io/source-target-name: falkordb
-      dataprotection.kubeblocks.io/volume-restore-policy: Parallel
   terminationPolicy: Delete
   clusterDef: falkordb
   topology: replication
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       disableExporter: false
       replicas: 2
       resources:
@@ -38,7 +34,7 @@ spec:
               requests:
                 storage: 20Gi
     - name: falkordb-sent
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       replicas: 3
       resources:
         limits:

@@ -1,4 +1,4 @@
-## All parameters need to be restarted
+## Parameters that only take effect after the server is restarted.
 staticParameters:
   - cluster-enabled
   - databases
@@ -6,3 +6,46 @@ staticParameters:
   - io-threads
   - io-threads-do-reads
   - falkordbe.offload-path
+
+## Parameters the server accepts through CONFIG SET while it is running.
+##
+## Anything listed here is reloaded in place by the reconfigure action instead
+## of forcing a rolling restart of the component. A parameter that appears in
+## neither list is written to the rendered config but is otherwise treated as
+## unclassified, so declaring the dynamic set is what keeps day-2 tuning of
+## these values non disruptive.
+dynamicParameters:
+  - acllog-max-len
+  - activedefrag
+  - activerehashing
+  - aof-disable-auto-gc
+  - aof-timestamp-enabled
+  - appendfsync
+  - appendonly
+  - hash-max-listpack-entries
+  - hash-max-listpack-value
+  - latency-tracking
+  - lfu-decay-time
+  - lfu-log-factor
+  - list-compress-depth
+  - list-max-listpack-size
+  - maxmemory
+  - maxmemory-clients
+  - maxmemory-policy
+  - maxmemory-samples
+  - min-replicas-max-lag
+  - min-replicas-to-write
+  - notify-keyspace-events
+  - proto-max-bulk-len
+  - repl-backlog-size
+  - repl-backlog-ttl
+  - replica-lazy-flush
+  - set-max-intset-entries
+  - slowlog-log-slower-than
+  - slowlog-max-len
+  - stream-node-max-bytes
+  - stream-node-max-entries
+  - tcp-keepalive
+  - timeout
+  - zset-max-listpack-entries
+  - zset-max-listpack-value

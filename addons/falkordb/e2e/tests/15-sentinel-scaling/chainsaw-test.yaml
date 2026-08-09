@@ -1,0 +1,198 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sentinel-scaling
+spec:
+  description: >-
+    Resize the sentinel component from 3 to 5 and back to 3, and prove a failover
+    still works at each size.
+
+    Scenario 07 scales the *server* component and scenario 11 kills sentinels
+    without changing how many there are. Changing the size of the sentinel
+    component is different in kind, because it changes the quorum arithmetic:
+    every sentinel has to learn about the new peers, and after a scale-in the
+    survivors have to forget the removed ones. A sentinel that still counts a
+    departed peer needs votes from a majority that can no longer be assembled, so
+    the cluster looks completely healthy right up to the moment a real failover is
+    needed and then never completes one.
+
+    That is why each size is validated by actually killing the primary rather than
+    by reading sentinel's own view of the world.
+  steps:
+    - name: create the cluster and seed data
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-sentscale falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-sentscale falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-sentscale 50
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sentscale
+            tail: 100
+
+    - name: scale the sentinels out from 3 to 5
+      try:
+        - apply:
+            file: scale-out.yaml
+        - assert:
+            file: assert-scale-out-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-sentscale-out
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sentscale
+            tail: 200
+
+    - name: all five sentinels monitor the primary
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_pod_count "$NAMESPACE" fdb-sentscale falkordb-sent 5
+
+              # The two new sentinels are useless unless they have discovered the
+              # master on their own. A sentinel that came up with an empty monitor
+              # list still counts towards the quorum denominator, which makes the
+              # majority harder to reach than it was before the scale-out.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-sentscale falkordb-sent); do
+                fdb_retry "$pod to monitor the primary" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sentscale
+            tail: 200
+
+    - name: a failover still completes with five sentinels
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-sentscale falkordb)"
+              echo "killing the primary $primary with five sentinels watching"
+              fdb_kill_pod "$NAMESPACE" "$primary"
+
+              fdb_retry "a new primary to be elected" bash -c '
+                current=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-sentscale,apps.kubeblocks.io/component-name=falkordb,kubeblocks.io/role=primary" \
+                  -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)
+                [ -n "$current" ] || { echo "no primary yet" >&2; exit 1; }
+                [ "$current" != "'"$primary"'" ] || { echo "$current is still the old primary" >&2; exit 1; }
+                echo "$current was promoted"
+              '
+
+              fdb_retry "the cluster to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-sentscale falkordb 1 1
+              new_primary="$(fdb_primary "$NAMESPACE" fdb-sentscale falkordb)"
+              fdb_verify_keys "$NAMESPACE" "$new_primary" e2e-sentscale 50
+              fdb_retry "the old primary to rejoin as a replica" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-sentscale falkordb
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sentscale
+            tail: 200
+
+    - name: scale the sentinels back in from 5 to 3
+      try:
+        # KubeBlocks rejects a HorizontalScaling OpsRequest while the cluster is
+        # still Updating, and the failover in the previous step leaves it that
+        # way until the old primary has rejoined.
+        - assert:
+            file: assert-running.yaml
+        - apply:
+            file: scale-in.yaml
+        - assert:
+            file: assert-scale-in-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-sentscale-in
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sentscale
+            tail: 200
+
+    - name: the survivors forgot the removed sentinels
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_pod_count "$NAMESPACE" fdb-sentscale falkordb-sent 3
+
+              # This is the assertion the whole scenario exists for. Sentinel does
+              # not drop a peer just because it stopped answering, so unless
+              # something explicitly resets the monitor the three survivors still
+              # believe there are five of them and will wait for votes from two
+              # pods that no longer exist.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-sentscale falkordb-sent); do
+                fdb_retry "$pod to report the reduced sentinel set" bash -c '
+                  reply=$(kubectl exec -n "'"$NAMESPACE"'" "'"$pod"'" -c falkordb-sent -- \
+                    sh -c "REDISCLI_AUTH=\"\$SENTINEL_PASSWORD\" exec redis-cli -p \"\${SENTINEL_SERVICE_PORT:-26379}\" --user \"\$SENTINEL_USER\" SENTINEL master fdb-sentscale-falkordb" 2>&1 | tr -d "\r")
+                  known=$(echo "$reply" | grep -A1 "^num-other-sentinels$" | tail -1)
+                  [ -n "$known" ] || { echo "could not read num-other-sentinels: $reply" >&2; exit 1; }
+                  if [ "$known" -gt 2 ]; then
+                    echo "'"$pod"' still counts $known other sentinels, expected at most 2" >&2
+                    exit 1
+                  fi
+                  echo "'"$pod"' counts $known other sentinels"
+                '
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sentscale
+            tail: 200
+
+    - name: a failover still completes with three sentinels
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-sentscale falkordb)"
+              echo "killing the primary $primary with three sentinels left"
+              fdb_kill_pod "$NAMESPACE" "$primary"
+
+              fdb_retry "a new primary to be elected after the scale-in" bash -c '
+                current=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-sentscale,apps.kubeblocks.io/component-name=falkordb,kubeblocks.io/role=primary" \
+                  -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)
+                [ -n "$current" ] || { echo "no primary yet" >&2; exit 1; }
+                [ "$current" != "'"$primary"'" ] || { echo "$current is still the old primary" >&2; exit 1; }
+                echo "$current was promoted"
+              '
+
+              fdb_retry "the cluster to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-sentscale falkordb 1 1
+              new_primary="$(fdb_primary "$NAMESPACE" fdb-sentscale falkordb)"
+              fdb_verify_keys "$NAMESPACE" "$new_primary" e2e-sentscale 50
+              fdb_write_keys "$NAMESPACE" "$new_primary" e2e-sentscale-after 20
+              fdb_retry "the replica to catch up" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-sentscale falkordb
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sentscale
+            tail: 200

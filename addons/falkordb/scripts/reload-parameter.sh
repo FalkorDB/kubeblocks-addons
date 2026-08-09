@@ -89,7 +89,55 @@ reload_redis_parameter() {
   apply_redis_parameter "${paramName}" "${paramValue}"
 }
 
+# KubeBlocks hands the changed parameters to this action through one of two
+# channels, depending on the version of the operator that is running:
+#
+#   * as positional arguments, which is what the reconfigureArgs field on the
+#     InstanceSet CRD produces, and
+#   * as environment variables named after the parameter, which is the only
+#     channel available on 1.2.0-alpha.1, where the CRD has no reconfigureArgs
+#     field at all and the agent merges the parameter map into the environment
+#     of the exec'd command. reconfigureArgs appears in 1.2.0-alpha.2.
+#
+# Names such as 'maxmemory-policy' are not valid shell identifiers, so the
+# environment has to be walked with `env` rather than read by expansion. Only
+# all lowercase names are considered, which is what every redis directive looks
+# like and what no KubeBlocks or container runtime variable looks like, and each
+# candidate is confirmed to be a real directive before anything is applied, so
+# an unrelated variable can never reach CONFIG SET.
+reload_parameters_from_environment() {
+  set -e
+  local applied=0
+  local entry name value output
+
+  while IFS= read -r entry; do
+    name="${entry%%=*}"
+    value="${entry#*=}"
+
+    case "$name" in
+      "" | -* | *[!a-z0-9-]*) continue ;;
+    esac
+
+    output=$(run_redis_command "CONFIG GET ${name}") || true
+    if [ -z "$(last_reply_line "$output")" ]; then
+      continue
+    fi
+
+    apply_redis_parameter "${name}" "${value}"
+    applied=$((applied + 1))
+  done < <(env)
+
+  if [ "$applied" -eq 0 ]; then
+    echo "ERROR: reconfigure was invoked without any parameter to apply" >&2
+    return 1
+  fi
+}
+
 # This is magic for shellspec ut framework.
 ${__SOURCED__:+false} : || return 0
 
-reload_redis_parameter "$@"
+if [ $# -ge 2 ]; then
+  reload_redis_parameter "$@"
+else
+  reload_parameters_from_environment
+fi

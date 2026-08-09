@@ -1,0 +1,28 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-single
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  # The default topology: a single server with no sentinel.
+  topology: standalone
+  componentSpecs:
+    - name: falkordb
+      disableExporter: true
+      replicas: 1
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 512Mi
+        requests:
+          cpu: '0.2'
+          memory: 512Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi

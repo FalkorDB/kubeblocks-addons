@@ -1,0 +1,8 @@
+apiVersion: dataprotection.kubeblocks.io/v1alpha1
+kind: Backup
+metadata:
+  name: fdb-pitr-full
+spec:
+  backupMethod: datafile
+  backupPolicyName: fdb-pitr-falkordb-backup-policy
+  deletionPolicy: Delete

@@ -1,0 +1,10 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-scale-out-sharding
+spec:
+  clusterName: fdb-shard
+  type: HorizontalScaling
+  horizontalScaling:
+    - componentName: shard
+      shards: 4

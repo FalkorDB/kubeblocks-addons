@@ -1,0 +1,118 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-self-heal
+spec:
+  description: >-
+    Kill a shard in a sharded cluster and prove it rejoins holding the same slots.
+    A restarted node comes back with a nodes.conf written before the crash, so if
+    the self-heal logic does not reconcile it against the rest of the cluster the
+    slots it owned stay unreachable and every key hashing to them is effectively
+    lost while the pod sits there Running.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-heal
+            tail: 200
+
+    - name: the cluster forms and owns every slot
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-heal shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-heal shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              # Enough keys that every shard is guaranteed to own some of them.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-heal 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-heal 200
+
+    - name: kill one shard
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              # Pick the last pod so the entry point used for the assertions below
+              # is never the one being killed.
+              victim="$(fdb_sharding_pods "$NAMESPACE" fdb-heal shard | tail -1)"
+              survivor="$(fdb_sharding_pods "$NAMESPACE" fdb-heal shard | head -1)"
+              echo "$victim" > "$state/victim"
+              echo "$survivor" > "$state/survivor"
+              echo "killing $victim, asserting through $survivor"
+
+              fdb_kill_pod "$NAMESPACE" "$victim"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-heal
+            tail: 200
+
+    - name: the cluster heals itself and keeps all of its data
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              victim="$(cat "$state/victim")"
+              survivor="$(cat "$state/survivor")"
+
+              # The restarted node must be back in the cluster, not stranded in its
+              # own single-node one, which is what a lost nodes.conf produces.
+              fdb_retry "$victim to rejoin with its slots" \
+                fdb_assert_slots_covered "$NAMESPACE" "$victim"
+              fdb_retry "the cluster view from $survivor to be healthy" \
+                fdb_assert_slots_covered "$NAMESPACE" "$survivor"
+              fdb_assert_shard_count "$NAMESPACE" fdb-heal shard 3
+
+              known="$(fdb_cli "$NAMESPACE" "$survivor" CLUSTER INFO |
+                tr -d '\r' | awk -F: '/^cluster_known_nodes:/ {print $2; exit}')"
+              [ "$known" -ge 3 ] || {
+                echo "$survivor only knows $known nodes, expected at least 3" >&2; exit 1; }
+              echo "$survivor knows $known nodes"
+
+              fdb_retry "every key to be readable again" \
+                fdb_verify_keys "$NAMESPACE" "$survivor" e2e-heal 200
+              # Reading through the restarted node too proves it serves its own
+              # slots rather than only redirecting to the others.
+              fdb_verify_keys "$NAMESPACE" "$victim" e2e-heal 200
+
+              # And the cluster must still accept writes on the healed slots.
+              fdb_write_keys "$NAMESPACE" "$survivor" e2e-heal-after 100
+              fdb_verify_keys "$NAMESPACE" "$victim" e2e-heal-after 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-heal
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

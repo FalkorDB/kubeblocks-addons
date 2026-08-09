@@ -42,5 +42,14 @@ log_level=info
 log4rs_file=./log4rs.yaml
 log_dir=./logs
 EOF
-/ape-dts dts.ini
+# ape-dts has been observed to stall forever on an RDB payload it cannot parse.
+# An unbounded run leaves the restore job "active" indefinitely, so the restore
+# never fails and the cluster never comes up. Bound it so the failure surfaces.
+if ! timeout "${APE_DTS_RESTORE_TIMEOUT:-3600}" /ape-dts dts.ini; then
+  rc=$?
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then
+    echo "ape-dts did not finish within ${APE_DTS_RESTORE_TIMEOUT:-3600}s; failing the restore" >&2
+  fi
+  exit "$rc"
+fi
 rm -rf ${DATA_DIR}/kb-dp-dump.rdb && sync

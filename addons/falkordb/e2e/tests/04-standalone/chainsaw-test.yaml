@@ -1,0 +1,65 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: standalone
+spec:
+  description: >-
+    The simplest supported deployment: one server, no sentinel. Proves the default
+    topology comes up, serves both key/value and graph traffic, and keeps its data
+    across a container crash so the volume and the persistence configuration the
+    start script writes are actually working.
+  steps:
+    - name: create the standalone cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-single
+            tail: 100
+
+    - name: the single server is a writable primary
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_pod_count "$NAMESPACE" fdb-single falkordb 1
+              # Even with no sentinel the roleProbe must label the server, because
+              # KubeBlocks routes the read-write service off that label.
+              fdb_retry "the server to be labelled primary" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-single falkordb 1 0
+              pod="$(fdb_primary "$NAMESPACE" fdb-single falkordb)"
+              fdb_retry "$pod to report master" \
+                fdb_assert_role "$NAMESPACE" "$pod" master
+
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-single 20
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-single 20
+              fdb_graph_roundtrip "$NAMESPACE" "$pod" e2e-single-graph
+
+    - name: persistence survives a container crash
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_primary "$NAMESPACE" fdb-single falkordb)"
+              # Flush the dataset to disk first: without an explicit save the test
+              # would only prove that whatever the periodic snapshot happened to
+              # catch survived, which is not a deterministic assertion.
+              fdb_cli "$NAMESPACE" "$pod" SAVE >/dev/null
+              fdb_kill_pod "$NAMESPACE" "$pod"
+
+              fdb_retry "$pod to report master again" \
+                fdb_assert_role "$NAMESPACE" "$pod" master
+              fdb_retry "the dataset to be reloaded" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-single 20
+              fdb_assert_graph_node "$NAMESPACE" "$pod" e2e-single-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-single
+            tail: 100

@@ -121,3 +121,60 @@ SHELLSPEC_INCLUDE_PATH := $(shell ./utils/get_shellspec_include_path.sh)
 .PHONY: scripts-test-kcov
 scripts-test-kcov: install-shellspec ##    Run shellspec unit test cases.
 	@shellspec --load-path $(SHELLSPEC_LOAD_PATH) --default-path $(SHELLSPEC_DEFAULT_PATH) --shell $(SHELLSPEC_DEFAULT_SHELL) --kcov --kcov-options "--include-path=$(SHELLSPEC_INCLUDE_PATH) --path-strip-level=1"
+
+################################################################################
+# End-to-end tests                                                             #
+################################################################################
+# Chainsaw uses Go-style arch names, unlike the shellcheck download above.
+E2E_OS := $(shell uname | tr '[:upper:]' '[:lower:]')
+E2E_ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+CHAINSAW_VERSION ?= v0.2.15
+CHAINSAW_INSTALL_DIR ?= $(HOME)/.local/bin
+CHAINSAW ?= $(shell command -v chainsaw 2>/dev/null || echo $(CHAINSAW_INSTALL_DIR)/chainsaw)
+CHAINSAW_URL := https://github.com/kyverno/chainsaw/releases/download/$(CHAINSAW_VERSION)/chainsaw_$(E2E_OS)_$(E2E_ARCH).tar.gz
+
+# The addon under test. Point this at another addon once it grows an e2e suite.
+E2E_ADDON ?= falkordb
+E2E_DIR := addons/$(E2E_ADDON)/e2e
+# Scenario scripts source their helpers from here.
+export E2E_LIB_DIR := $(CURDIR)/$(E2E_DIR)/lib
+# Run a subset with e.g. `make e2e E2E_TEST=02-switchover`
+E2E_TEST ?=
+E2E_PARALLEL ?= 4
+
+.PHONY: install-chainsaw
+install-chainsaw: ## Download kyverno-chainsaw locally if necessary.
+ifeq (, $(shell command -v chainsaw 2>/dev/null))
+	@echo "Downloading Chainsaw $(CHAINSAW_VERSION) for $(E2E_OS)/$(E2E_ARCH)..."
+	@mkdir -p $(CHAINSAW_INSTALL_DIR)
+	@curl -sSL $(CHAINSAW_URL) | tar -xz -C $(CHAINSAW_INSTALL_DIR) chainsaw
+	@chmod +x $(CHAINSAW_INSTALL_DIR)/chainsaw
+	@echo "Chainsaw installed to $(CHAINSAW_INSTALL_DIR)/chainsaw"
+	@$(CHAINSAW_INSTALL_DIR)/chainsaw version
+else
+	@echo "Chainsaw is detected: "$(shell command -v chainsaw)
+	@chainsaw version
+endif
+
+.PHONY: e2e-up
+e2e-up: ##    Create the local k3d cluster and install KubeBlocks plus the local addon.
+	@./$(E2E_DIR)/setup/kb-cluster.sh up
+
+.PHONY: e2e-down
+e2e-down: ##    Delete the local e2e k3d cluster.
+	@./$(E2E_DIR)/setup/kb-cluster.sh down
+
+.PHONY: e2e-status
+e2e-status: ##    Show what is installed in the e2e cluster.
+	@./$(E2E_DIR)/setup/kb-cluster.sh status
+
+.PHONY: e2e
+e2e: install-chainsaw ##    Run the chainsaw e2e suite against the current kubecontext.
+	@$(CHAINSAW) test \
+		--config $(E2E_DIR)/.chainsaw.yaml \
+		--parallel $(E2E_PARALLEL) \
+		$(if $(E2E_TEST),--test-dir $(E2E_DIR)/tests/$(E2E_TEST),--test-dir $(E2E_DIR)/tests)
+
+.PHONY: e2e-all
+e2e-all: e2e-up e2e ##    Create the cluster and run the whole suite in one go.
+

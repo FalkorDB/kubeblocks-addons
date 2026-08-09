@@ -1,0 +1,202 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: backup-restore
+spec:
+  description: >-
+    Take a datafile backup of a live cluster and restore it into a brand new one.
+    A backup that silently omits something is the worst failure mode this addon
+    has, because it looks healthy right up until the restore, so the assertions
+    deliberately cover more than the keyspace: the graph data and the custom ACL
+    accounts have to come back too.
+  steps:
+    - name: create the source cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-backup
+            tail: 100
+
+    - name: seed keys, a graph and a custom account
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-backup falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-backup falkordb)"
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-backup 100
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-backup-graph
+
+              # A user created at runtime only survives if the backup captures the
+              # ACL file as well as the dataset. ACL SETUSER only touches memory,
+              # so without an explicit ACL SAVE the account never reaches
+              # users.acl and the backup cannot possibly carry it.
+              #
+              # The account has to be created on every pod, not just the primary.
+              # FalkorDB does not replicate ACL changes, and sync-acl.sh only runs
+              # on memberJoin, so an account created after the members joined lives
+              # only on the node it was created on. The backup policy targets the
+              # secondary, so a primary-only account is silently absent from every
+              # backup taken while a secondary exists.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-backup falkordb); do
+                fdb_cli "$NAMESPACE" "$pod" ACL SETUSER e2e-analyst \
+                  on '>e2e-analyst-pw' '~e2e-backup:*' +@read >/dev/null
+                fdb_cli "$NAMESPACE" "$pod" ACL LIST | grep -q e2e-analyst
+                fdb_cli "$NAMESPACE" "$pod" ACL SAVE >/dev/null
+                echo "created the e2e-analyst account on $pod"
+              done
+
+              # Make sure everything is on disk before the backup reads the volume.
+              fdb_cli "$NAMESPACE" "$primary" SAVE >/dev/null
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-backup
+            tail: 100
+
+    - name: back the cluster up
+      try:
+        - apply:
+            file: backup.yaml
+        - assert:
+            file: assert-backup-completed.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: dataprotection.kubeblocks.io/v1alpha1
+            kind: Backup
+            name: fdb-backup-datafile
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-backup
+            tail: 200
+
+    - name: restore the backup into a new cluster
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The restore source has to name the chainsaw namespace, which is
+              # only known at run time, so this cluster cannot be a static file.
+              #
+              # This uses the `kubeblocks.io/restore-from-backup` annotation
+              # rather than `Cluster.spec.restore`. `spec.restore` routes through
+              # the volume populator, which deadlocks on KubeBlocks 1.2.0-alpha.2
+              # (https://github.com/apecloud/kubeblocks/issues/10749) and does not
+              # exist at all on the pinned 1.2.0-alpha.1. Switch back once the
+              # populator path is fixed upstream.
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: apps.kubeblocks.io/v1
+              kind: Cluster
+              metadata:
+                name: fdb-restored
+                annotations:
+                  kubeblocks.io/restore-from-backup: '{"falkordb":{"name":"fdb-backup-datafile","namespace":"$NAMESPACE","volumeRestorePolicy":"Parallel"}}'
+              spec:
+                terminationPolicy: WipeOut
+                clusterDef: falkordb
+                topology: replication
+                componentSpecs:
+                  - name: falkordb
+                    disableExporter: true
+                    replicas: 2
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 512Mi
+                      requests:
+                        cpu: '0.2'
+                        memory: 512Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+                  - name: falkordb-sent
+                    replicas: 3
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 256Mi
+                      requests:
+                        cpu: '0.1'
+                        memory: 256Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+              EOF
+        - assert:
+            file: assert-restored-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-restored
+            tail: 200
+
+    - name: the restored cluster holds everything the source did
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the restored cluster to elect a primary" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-restored falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-restored falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-restored falkordb secondary)"
+
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-backup 100
+              fdb_assert_graph_node "$NAMESPACE" "$primary" e2e-backup-graph
+
+              # The restored cluster has to be a working cluster, not just a pod
+              # with the right bytes on disk.
+              fdb_retry "the restored replica to link up" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_retry "the restored data to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-backup 100
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-restored 20
+              fdb_retry "the restored cluster to replicate new writes" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-restored 20
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-restored
+            tail: 200
+
+    - name: the custom account came back with the data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # Accounts live outside the keyspace, so a backup that only copies
+              # the dump file restores the data and silently drops every user the
+              # application authenticates with.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-restored falkordb); do
+                if ! fdb_cli "$NAMESPACE" "$pod" ACL LIST | grep -q e2e-analyst; then
+                  echo "$pod lost the e2e-analyst account during the restore" >&2
+                  fdb_cli "$NAMESPACE" "$pod" ACL LIST >&2
+                  exit 1
+                fi
+                echo "$pod still has the e2e-analyst account"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-restored
+            tail: 200

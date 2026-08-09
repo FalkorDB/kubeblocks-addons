@@ -1,0 +1,210 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tls-sharding
+spec:
+  description: >-
+    Run the sharded topology with TLS turned on, then scale it out.
+
+    Scenario 05 covers TLS on the replication topology, where the only encrypted
+    links are client connections and a single replication stream. Sharding adds
+    the cluster bus, a second port every node uses to gossip with every other node
+    and to move slots during a rebalance, and TLS has to be configured for it
+    separately from the client port.
+
+    Turning TLS on for a sharded cluster that has not configured the bus produces
+    nodes that each come up fine on their own and never manage to form a cluster,
+    or worse, form one that cannot migrate a slot. Scaling out is what forces the
+    bus to carry real work, so the scenario does not stop at "the cluster came up".
+
+    The certificates are user-provided on purpose. KubeBlocks generates one
+    self-signed CA per Component and each shard is a separate Component, so
+    `issuer.name: KubeBlocks` hands every shard a certificate that its peers
+    cannot validate and the cluster bus never comes up.
+  steps:
+    - name: issue one CA shared by every shard
+      try:
+        - script:
+            content: |
+              # KubeBlocks would otherwise mint a different CA per shard, which
+              # the cluster bus cannot validate across shards. Everything here is
+              # throwaway material for a single test namespace.
+              dir="$(mktemp -d)"
+              trap 'rm -rf "$dir"' EXIT
+
+              openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+                -keyout "$dir/ca.key" -out "$dir/ca.crt" \
+                -subj "/CN=falkordb-e2e-ca" >/dev/null 2>&1
+
+              openssl req -newkey rsa:2048 -nodes \
+                -keyout "$dir/tls.key" -out "$dir/tls.csr" \
+                -subj "/CN=fdb-shtls" >/dev/null 2>&1
+
+              # The bus does chain validation only and clients connect with
+              # --insecure, so the names below are for completeness rather than
+              # something either side checks. serverAuth alone is not enough:
+              # a node acts as a TLS client when it dials a peer's bus port.
+              cat > "$dir/ext.cnf" <<EOF
+              basicConstraints = CA:FALSE
+              keyUsage = digitalSignature, keyEncipherment
+              extendedKeyUsage = serverAuth, clientAuth
+              subjectAltName = DNS:localhost, DNS:*.${NAMESPACE}.svc, DNS:*.${NAMESPACE}.svc.cluster.local, IP:127.0.0.1
+              EOF
+
+              openssl x509 -req -in "$dir/tls.csr" -CA "$dir/ca.crt" \
+                -CAkey "$dir/ca.key" -CAcreateserial -days 3650 \
+                -out "$dir/tls.crt" -extfile "$dir/ext.cnf" >/dev/null 2>&1
+
+              kubectl create secret generic fdb-shtls-tls -n "$NAMESPACE" \
+                --from-file=ca.crt="$dir/ca.crt" \
+                --from-file=tls.crt="$dir/tls.crt" \
+                --from-file=tls.key="$dir/tls.key"
+      catch:
+        - events: {}
+
+    - name: create the sharded cluster with TLS
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shtls
+            tail: 200
+
+    - name: plaintext is refused and TLS is required
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shtls shard)"
+
+              # FDB_CLI_FLAGS is deliberately left empty here, so redis-cli speaks
+              # plaintext. If that succeeds then TLS was never actually enforced
+              # and every other assertion in this scenario is passing over an
+              # unencrypted connection.
+              if reply="$(fdb_cli "$NAMESPACE" "$pod" PING 2>&1)"; then
+                case "$reply" in
+                  *PONG*)
+                    echo "$pod answered a plaintext PING; TLS is not being enforced" >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+              echo "$pod correctly refuses plaintext connections"
+      catch:
+        - events: {}
+
+    - name: the encrypted cluster forms and owns every slot
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c --tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-shtls shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shtls shard)"
+
+              # Slot coverage over TLS is the real proof that the cluster bus came
+              # up encrypted. Nodes that cannot gossip never assign slots, so a
+              # misconfigured bus shows up here rather than as a connection error.
+              fdb_retry "all 16384 slots to be covered over TLS" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              known="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER INFO | tr -d '\r' |
+                awk -F: '/^cluster_known_nodes:/ {print $2; exit}')"
+              if [ "$known" -lt 3 ]; then
+                echo "only $known nodes are known to the cluster, expected at least 3" >&2
+                exit 1
+              fi
+              echo "the cluster bus links all $known nodes over TLS"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shtls
+            tail: 200
+
+    - name: seed keys across every shard over TLS
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c --tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shtls shard)"
+              # -c follows MOVED redirects, and over TLS each redirect opens a new
+              # encrypted connection to a different node, so this also proves every
+              # shard is individually reachable and not just the entry point.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shtls 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtls 200
+              fdb_graph_roundtrip "$NAMESPACE" "$pod" e2e-shtls-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shtls
+            tail: 200
+
+    - name: scale out from 3 to 4 shards over TLS
+      try:
+        - apply:
+            file: scale-out.yaml
+        - assert:
+            file: assert-scale-out-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-shtls-scale-out
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shtls
+            tail: 200
+
+    - name: slots migrated over the encrypted bus without losing a key
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c --tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-shtls shard 4
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shtls shard)"
+
+              # A rebalance moves slot ranges between nodes over the cluster bus.
+              # This is the heaviest thing the bus ever does, and it is where a bus
+              # that negotiated TLS badly stalls with slots left in a migrating
+              # state, which still reports the cluster as ok on the source node.
+              fdb_retry "all 16384 slots to be covered after the scale-out" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every key to survive the migration" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtls 200
+              fdb_assert_graph_node "$NAMESPACE" "$pod" e2e-shtls-graph
+
+              # The new shard has to accept writes into the range it took over.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shtls-post 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtls-post 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shtls
+            tail: 200

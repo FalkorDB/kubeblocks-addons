@@ -30,4 +30,13 @@ spec:
     - {{ . }}
     {{- end }}
   {{- end}}
+
+  ## applied to the running server through CONFIG SET
+  {{- if hasKey $pd "dynamicParameters" }}
+  dynamicParameters:
+    {{- $dynParams := get $pd "dynamicParameters" }}
+    {{- range $dynParams }}
+    - {{ . }}
+    {{- end }}
+  {{- end}}
 {{- end}}

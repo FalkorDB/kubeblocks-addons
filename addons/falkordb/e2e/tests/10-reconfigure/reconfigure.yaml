@@ -1,0 +1,12 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-config-reconfigure
+spec:
+  clusterName: fdb-config
+  type: Reconfiguring
+  reconfigures:
+    - componentName: falkordb
+      parameters:
+        - key: maxmemory-policy
+          value: allkeys-lru

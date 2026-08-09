@@ -1,0 +1,100 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tls-replication
+spec:
+  description: >-
+    Bring up a replication cluster with TLS enabled on both the servers and the
+    sentinels. TLS is the highest-risk configuration in this addon: a malformed
+    stanza makes the server refuse to start, and a stanza that is merely
+    incomplete silently leaves replication traffic in plaintext. Nothing short of
+    a real cluster can tell those apart.
+  steps:
+    - name: create the TLS-enabled cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        # Reaching Running at all already proves the generated tls stanza parses,
+        # since a bad one leaves every server in CrashLoopBackOff.
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-tls
+            tail: 200
+
+    - name: the servers really listen on TLS and not in the clear
+      try:
+        - script:
+            env:
+              - name: FDB_CLI_FLAGS
+                value: "--tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-tls falkordb); do
+                # The certificates must be mounted where the config points.
+                kubectl exec -n "$NAMESPACE" "$pod" -c falkordb -- \
+                  sh -c 'test -s /etc/pki/tls/ca.crt && test -s /etc/pki/tls/tls.crt && test -s /etc/pki/tls/tls.key'
+                echo "$pod has its certificate material mounted"
+
+                # tls-port must be serving and the plaintext port must be closed;
+                # if the stanza is half-written the server happily does both.
+                tls_port="$(fdb_config_get "$NAMESPACE" "$pod" tls-port)"
+                [ "$tls_port" != "0" ] || { echo "$pod is not listening on a TLS port" >&2; exit 1; }
+                echo "$pod is listening for TLS on port $tls_port"
+                fdb_assert_config "$NAMESPACE" "$pod" port 0
+
+                # Replication traffic is a separate switch from client traffic.
+                fdb_assert_config "$NAMESPACE" "$pod" tls-replication yes
+              done
+
+    - name: replication works over TLS
+      try:
+        - script:
+            env:
+              - name: FDB_CLI_FLAGS
+                value: "--tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "a primary to be elected" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-tls falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-tls falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-tls falkordb secondary)"
+
+              fdb_retry "the encrypted replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-tls 20
+              fdb_retry "data to reach $replica over TLS" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-tls 20
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-tls-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-tls
+            tail: 200
+
+    - name: the sentinels also speak TLS to the servers
+      try:
+        - script:
+            env:
+              - name: FDB_CLI_FLAGS
+                value: "--tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-tls falkordb)"
+              for pod in $(fdb_pods "$NAMESPACE" fdb-tls falkordb-sent); do
+                # A sentinel that failed to negotiate TLS monitors nothing, so it
+                # would sit there healthy and never run a failover.
+                fdb_retry "$pod to report the master it monitors" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+              echo "current primary is $primary"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-tls
+            tail: 200

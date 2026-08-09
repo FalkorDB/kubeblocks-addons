@@ -1,0 +1,141 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: primary-failover
+spec:
+  description: >-
+    Kill the primary outright and prove sentinel promotes the surviving replica on
+    its own. This is the scenario the whole sentinel topology exists for, and it
+    exercises a completely different code path from the orchestrated Switchover:
+    nothing coordinates it, the old primary comes back with stale data and has to
+    be demoted, and the start script has to work out that it is no longer the
+    primary before it accepts writes.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-failover
+            tail: 100
+
+    - name: record the starting primary and seed data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-failover falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-failover falkordb)"
+              survivor="$(fdb_pods_with_role "$NAMESPACE" fdb-failover falkordb secondary)"
+              echo "$primary" > "$state/primary"
+              echo "$survivor" > "$state/survivor"
+              echo "primary=$primary survivor=$survivor"
+
+              # A sentinel that monitors nothing looks perfectly healthy from the
+              # outside and silently never runs a failover, so check before the
+              # kill rather than blaming the promotion timeout later.
+              for sent in $(fdb_pods "$NAMESPACE" fdb-failover falkordb-sent); do
+                fdb_retry "$sent to report the master it monitors" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$sent"
+              done
+
+              fdb_retry "the replication link on $survivor" \
+                fdb_assert_replication_up "$NAMESPACE" "$survivor"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-failover 20
+              fdb_retry "data to reach $survivor" \
+                fdb_verify_keys "$NAMESPACE" "$survivor" e2e-failover 20
+
+    - name: kill the primary and let sentinel promote the survivor
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              primary="$(cat "$state/primary")"
+              survivor="$(cat "$state/survivor")"
+
+              fdb_kill_pod "$NAMESPACE" "$primary"
+
+              # Nobody told the survivor to take over; sentinel has to notice the
+              # primary is gone, reach quorum and promote it by itself.
+              fdb_retry "$survivor to be promoted by sentinel" \
+                fdb_assert_role "$NAMESPACE" "$survivor" master
+              fdb_retry "$survivor to be labelled primary" \
+                fdb_pod_has_role "$NAMESPACE" "$survivor" primary
+              fdb_log "sentinel promoted $survivor after $primary was killed"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-failover
+            tail: 200
+
+    - name: the restarted pod rejoins as a replica of the new primary
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              old_primary="$(cat "$state/primary")"
+              survivor="$(cat "$state/survivor")"
+
+              # The dangerous outcome is a split brain, where the restarted pod
+              # comes back believing it is still the primary and accepts writes.
+              fdb_retry "$old_primary to be demoted to a replica" \
+                fdb_assert_role "$NAMESPACE" "$old_primary" slave
+              fdb_retry "$old_primary to be labelled secondary" \
+                fdb_pod_has_role "$NAMESPACE" "$old_primary" secondary
+              fdb_retry "$old_primary to resync with $survivor" \
+                fdb_assert_replication_up "$NAMESPACE" "$old_primary"
+              fdb_assert_role_counts "$NAMESPACE" fdb-failover falkordb 1 1
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-failover
+            tail: 200
+
+    - name: no data was lost and writes still land
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-failover falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-failover falkordb secondary)"
+
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-failover 20
+              fdb_retry "the pre-failover data to be back on $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-failover 20
+
+              # The cluster has to be writable again, not merely readable.
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-postfailover 20
+              fdb_retry "post-failover writes to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-postfailover 20
+
+    - name: replica-priority was left usable for the next failover
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # A pod left at priority 0 can never be promoted again, which turns a
+              # single recovered failure into a permanent loss of redundancy.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-failover falkordb); do
+                priority="$(fdb_config_get "$NAMESPACE" "$pod" replica-priority)"
+                if [ "$priority" = "0" ]; then
+                  echo "$pod is pinned at replica-priority 0 and can never be promoted" >&2
+                  exit 1
+                fi
+                echo "$pod has replica-priority $priority"
+              done
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

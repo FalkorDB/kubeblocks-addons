@@ -1,0 +1,167 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: day2-ops
+spec:
+  description: >-
+    The routine operations an operator runs against a live cluster: add a replica,
+    change the resource allocation, then remove the replica again. Each one
+    reconfigures and restarts servers underneath a running dataset, so the risk is
+    not that the OpsRequest fails loudly but that it succeeds while quietly leaving
+    a replica unlinked, the roles duplicated or the data behind.
+  steps:
+    - name: create the cluster and seed data
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ops falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-ops falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-ops 50
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-ops-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ops
+            tail: 100
+
+    - name: scale out from 2 to 3 replicas
+      try:
+        - apply:
+            file: scale-out.yaml
+        - assert:
+            file: assert-scale-out-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-ops-scale-out
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ops
+            tail: 200
+
+    - name: the new replica joined and caught up
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_pod_count "$NAMESPACE" fdb-ops falkordb 3
+              # A new pod that never links up still reports Running, so the pod
+              # count alone proves nothing.
+              fdb_retry "exactly one primary and two secondaries" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ops falkordb 1 2
+              fdb_retry "every replica to link to the primary" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-ops falkordb
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-ops falkordb); do
+                fdb_retry "the seeded data on $pod" \
+                  fdb_verify_keys "$NAMESPACE" "$pod" e2e-ops 50
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ops
+            tail: 200
+
+    - name: vertically scale the servers
+      try:
+        - apply:
+            file: vertical-scale.yaml
+        - assert:
+            file: assert-vertical-scale-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-ops-vscale
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ops
+            tail: 200
+
+    - name: the rolling restart preserved the topology and the data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # Vertical scaling restarts every server in turn, so this is also the
+              # regression test for a rolling restart: the roles must re-converge on
+              # a single primary rather than leaving two or none.
+              fdb_retry "the roles to reconverge after the restart" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ops falkordb 1 2
+              fdb_retry "every replica to link up again" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-ops falkordb
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-ops falkordb)"
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-ops 50
+              fdb_assert_graph_node "$NAMESPACE" "$primary" e2e-ops-graph
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-ops falkordb); do
+                requested="$(kubectl get pod -n "$NAMESPACE" "$pod" \
+                  -o jsonpath='{.spec.containers[?(@.name=="falkordb")].resources.requests.memory}')"
+                [ "$requested" = "640Mi" ] || {
+                  echo "$pod still requests $requested, expected 640Mi" >&2; exit 1; }
+                echo "$pod is running with the new resource request"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ops
+            tail: 200
+
+    - name: scale back in from 3 to 2 replicas
+      try:
+        - apply:
+            file: scale-in.yaml
+        - assert:
+            file: assert-scale-in-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-ops-scale-in
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ops
+            tail: 200
+
+    - name: removing a replica left a healthy cluster behind
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_pod_count "$NAMESPACE" fdb-ops falkordb 2
+              # Sentinel must forget the removed replica, otherwise it keeps voting
+              # for a pod that no longer exists and future failovers stall.
+              fdb_retry "the roles to settle after the scale-in" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-ops falkordb 1 1
+              fdb_retry "the surviving replica to stay linked" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-ops falkordb
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-ops falkordb)"
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-ops 50
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-ops-after 20
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-ops falkordb secondary)"
+              fdb_retry "new writes to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-ops-after 20
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-ops
+            tail: 200

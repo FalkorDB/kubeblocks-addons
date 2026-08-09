@@ -134,7 +134,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       replicas: 2 # decrease `replicas` for scaling in, and increase for scaling out
       disableExporter: false
 ```
@@ -187,7 +187,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       replicas: 2 # decrease `replicas` for scaling in, and increase for scaling out
       resources:
         requests:
@@ -234,7 +234,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       replicas: 2
       volumeClaimTemplates:
         - name: data
@@ -276,7 +276,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       stop: true  # set stop `true` to stop the component
       replicas: 2
       ...
@@ -305,7 +305,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       stop: false  # set to `false` (or remove this field) to start the component
       replicas: 2
     - name: falkordb-sent
@@ -459,7 +459,7 @@ spec:
     repoName: kb-oss
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       ...
 ```
 
@@ -556,7 +556,7 @@ spec:
       type: LoadBalancer
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       ...
 ```
 
@@ -601,7 +601,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       disableExporter: false # set to `false` to enable exporter
 ```
 
@@ -843,7 +843,7 @@ spec:
     template:
       name: falkordb
       replicas: 2 # set the desired number of replicas for each shard.
-      serviceVersion: 4.12.5
+      serviceVersion: 4.20.1
       # Component-level services override services defined in
       # referenced ComponentDefinition and expose
       # endpoints that can be accessed by clients
@@ -879,7 +879,7 @@ spec:
     template:
       name: falkordb
       replicas: 2 # set the desired number of replicas for each shard.
-      serviceVersion: 4.12.5
+      serviceVersion: 4.20.1
       stop: false # set to `true` to stop all components
 ```
 

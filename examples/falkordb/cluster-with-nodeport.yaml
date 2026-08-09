@@ -19,7 +19,7 @@ spec:
         - name: falkordb-advertised
           serviceType: NodePort
           podService: true
-      serviceVersion: 4.12.5
+      serviceVersion: 4.20.1
       resources:
         limits:
           cpu: "0.5"
@@ -45,7 +45,7 @@ spec:
         - name: sentinel-advertised
           serviceType: NodePort
           podService: true
-      serviceVersion: 4.12.5
+      serviceVersion: 4.20.1
       resources:
         limits:
           cpu: "0.5"
