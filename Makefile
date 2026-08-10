@@ -141,6 +141,10 @@ export E2E_LIB_DIR := $(CURDIR)/$(E2E_DIR)/lib
 # Run a subset with e.g. `make e2e E2E_TEST=02-switchover`
 E2E_TEST ?=
 E2E_PARALLEL ?= 4
+# Split the suite across several machines: every runner uses the same
+# E2E_SHARD_COUNT and its own E2E_SHARD_INDEX (0-based). 0 disables sharding.
+E2E_SHARD_COUNT ?= 0
+E2E_SHARD_INDEX ?= 0
 
 .PHONY: install-chainsaw
 install-chainsaw: ## Download kyverno-chainsaw locally if necessary.
@@ -173,6 +177,7 @@ e2e: install-chainsaw ##    Run the chainsaw e2e suite against the current kubec
 	@$(CHAINSAW) test \
 		--config $(E2E_DIR)/.chainsaw.yaml \
 		--parallel $(E2E_PARALLEL) \
+		$(if $(filter-out 0,$(E2E_SHARD_COUNT)),--shard-count $(E2E_SHARD_COUNT) --shard-index $(E2E_SHARD_INDEX)) \
 		$(if $(E2E_TEST),--test-dir $(E2E_DIR)/tests/$(E2E_TEST),--test-dir $(E2E_DIR)/tests)
 
 .PHONY: e2e-all

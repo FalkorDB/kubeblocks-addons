@@ -13,6 +13,10 @@ on:
         description: "KubeBlocks version to install"
         required: false
         default: "1.2.0-alpha.1"
+      shards:
+        description: "Number of machines to split the suite across"
+        required: false
+        default: "4"
   pull_request:
     types: [labeled, synchronize]
     paths:
@@ -22,17 +26,62 @@ on:
 permissions:
   contents: read
 
+# A new push supersedes the run it interrupts; e2e runs are far too expensive to
+# leave queued behind an obsolete commit.
+concurrency:
+  group: e2e-falkordb-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  e2e:
-    # On pull_request only run when the opt-in label is present.
+  plan:
+    # Decide how many machines to split the suite across. A single-scenario run
+    # has nothing to spread, so it stays on one.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'e2e/falkordb')
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+    steps:
+        - name: Plan the shards
+          id: plan
+          env:
+            TEST: ${{ github.event.inputs.test || '' }}
+            SHARDS: ${{ github.event.inputs.shards || '4' }}
+          run: |
+            set -euo pipefail
+            if [[ ! "$SHARDS" =~ ^[0-9]+$ ]]; then
+              echo "::error::shards must be a number, got '$SHARDS'"
+              exit 1
+            fi
+            if [ -n "$TEST" ] || [ "$SHARDS" -le 1 ]; then
+              echo 'shards=[0]' >> "$GITHUB_OUTPUT"
+              echo 'shard_count=0' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            list=$(seq 0 $((SHARDS - 1)) | paste -sd, -)
+            echo "shards=[$list]" >> "$GITHUB_OUTPUT"
+            echo "shard_count=$SHARDS" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: plan
+    name: e2e (shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       E2E_KB_VERSION: ${{ github.event.inputs.kb_version || '1.2.0-alpha.1' }}
       E2E_TEST: ${{ github.event.inputs.test || '' }}
+      E2E_SHARD_COUNT: ${{ needs.plan.outputs.shard_count }}
+      E2E_SHARD_INDEX: ${{ matrix.shard }}
+      # A GitHub runner has 4 vCPU. A replication scenario asks for ~1.6 CPU of
+      # pod requests, so a third concurrent scenario would sit Pending until it
+      # hit the assert timeout. Scale out across machines instead.
+      E2E_PARALLEL: 2
     steps:
       - uses: actions/checkout@v4
 
