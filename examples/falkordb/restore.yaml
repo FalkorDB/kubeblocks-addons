@@ -14,7 +14,7 @@ spec:
   topology: replication
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.20.1"
+      serviceVersion: "4.20.2"
       disableExporter: false
       replicas: 2
       resources:
@@ -34,7 +34,7 @@ spec:
               requests:
                 storage: 20Gi
     - name: falkordb-sent
-      serviceVersion: "4.20.1"
+      serviceVersion: "4.20.2"
       replicas: 3
       resources:
         limits:
