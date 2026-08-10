@@ -106,7 +106,10 @@ jobs:
         if: steps.add-version.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          helm lint addons/falkordb --dependency-update
+          # charts/ and Chart.lock are gitignored, so the kblib dependency has to
+          # be fetched before the chart can be linted or rendered.
+          helm dependency build addons/falkordb
+          helm lint addons/falkordb
           helm template falkordb addons/falkordb > /dev/null
 
       # A version that lands in values.yaml but not in the docs is exactly the
