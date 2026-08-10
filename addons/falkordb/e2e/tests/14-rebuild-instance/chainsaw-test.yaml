@@ -2,6 +2,24 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: rebuild-instance
+  labels:
+    ## Excluded from CI (`make e2e E2E_SELECTOR='e2e.falkordb/ci!=unsupported'`).
+    ##
+    ## RebuildInstance provisions a scratch PVC, waits for its PV, restores into
+    ## it and then rebinds that PV onto the original claim. Neither storage class
+    ## the e2e cluster offers survives the round trip:
+    ##
+    ##   local-path (WaitForFirstConsumer, the k3d default) has no PV until the
+    ##   rebuild pod is scheduled, so KubeBlocks gives up with
+    ##   `can not found the pv by the pvc "rebuild-<hash>-..."`. It is a race, so
+    ##   it passes on a developer machine and loses on a loaded runner.
+    ##
+    ##   csi-hostpath-sc (Immediate) clears that hurdle and then stalls forever on
+    ##   `Waiting for source PVCs to bind restored PVs`, and its volumes also hang
+    ##   on delete, which costs another two cleanup timeouts.
+    ##
+    ## Keep running it locally, where the local-path race is reliably won.
+    e2e.falkordb/ci: unsupported
 spec:
   description: >-
     Corrupt a replica's data and recover it with a RebuildInstance operation.

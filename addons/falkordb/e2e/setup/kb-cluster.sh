@@ -211,10 +211,24 @@ install_addon() {
   # The definitions carry helm.sh/resource-policy: keep and the KubeBlocks
   # controller defaults some of their fields, so a re-install races the
   # controller for server-side-apply field ownership. The local working tree is
-  # the source of truth here, so take ownership unconditionally.
+  # the source of truth here, so take ownership unconditionally -- but only with
+  # the flags this helm actually has. --take-ownership landed in helm 3.17 and
+  # --force-conflicts in helm 4, and an older helm rejects an unknown flag
+  # outright. Nothing is adopted on a fresh cluster anyway, so dropping them
+  # there costs nothing.
+  local ownership=()
+  local upgrade_help
+  upgrade_help="$(helm upgrade --help 2>/dev/null || true)"
+  case "$upgrade_help" in
+    *--take-ownership*) ownership+=(--take-ownership) ;;
+  esac
+  case "$upgrade_help" in
+    *--force-conflicts*) ownership+=(--force-conflicts) ;;
+  esac
+
   helm upgrade --install falkordb "$ADDON_CHART" \
     --namespace "$KB_NAMESPACE" \
-    --force-conflicts --take-ownership \
+    ${ownership[@]+"${ownership[@]}"} \
     --wait --timeout "$KB_WAIT"
 
   log "waiting for the FalkorDB ComponentDefinitions to be available"

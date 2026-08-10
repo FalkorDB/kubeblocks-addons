@@ -7,8 +7,16 @@
 # Every helper talks to FalkorDB by exec'ing redis-cli *inside* the target pod and
 # reading the password from the container's own REDIS_DEFAULT_PASSWORD env var, so
 # no credential is ever passed on a command line or copied out of the cluster.
+#
+# Keep this file POSIX sh: chainsaw runs every `script:` block through /bin/sh,
+# which is bash on macOS but dash on the Ubuntu CI runners.
 
-set -euo pipefail
+# `pipefail` is not in POSIX, and dash aborts the whole script on an unknown
+# `set -o` option, so ask for it only where it exists.
+if (set -o pipefail) 2>/dev/null; then
+  set -o pipefail
+fi
+set -eu
 
 # Container name inside a FalkorDB pod. Sharding pods use a different one.
 FDB_CONTAINER="${FDB_CONTAINER:-falkordb}"

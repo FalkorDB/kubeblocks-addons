@@ -224,6 +224,12 @@ spec:
     ## sentinel added after the cluster was created monitors nothing and can
     ## never vote in a failover. This copies the configuration from a sentinel
     ## that is already monitoring onto the new one.
+    ##
+    ## `All` rather than `Any`: with `Any` KubeBlocks may pick the joining
+    ## member itself, which monitors nothing and therefore has nothing to
+    ## propagate, leaving the new sentinel inert. Running it everywhere
+    ## guarantees an already configured sentinel performs the hand-over; the
+    ## unconfigured ones no-op and the script is idempotent on repeats.
     memberJoin:
       exec:
         container: falkordb-sent
@@ -231,7 +237,7 @@ spec:
           - /bin/bash
           - -c
           - /scripts/falkordb-sent-member-join.sh
-        targetPodSelector: Any
+        targetPodSelector: All
         env:
           - name: CURRENT_POD_NAME
             valueFrom:

@@ -10,8 +10,11 @@
 # failover, and the cluster silently loses its ability to fail over once the
 # original sentinels are outnumbered.
 #
-# KubeBlocks runs memberJoin on an existing member rather than on the new one,
-# which is what makes this possible at all. The falkordb password required for
+# The action is declared with `targetPodSelector: All`, so it runs on every
+# sentinel including the joining one. Only a sentinel that already monitors the
+# master can hand its configuration over; the rest exit early. Do not narrow this
+# to `Any`: KubeBlocks is free to pick the joining member, which knows nothing.
+# The falkordb password required for
 # `auth-pass` is not exposed to the sentinel component, because a credentialVarRef
 # from the sentinel back to the data component creates a start-up cycle. A
 # sentinel that is already monitoring does however hold that password in the

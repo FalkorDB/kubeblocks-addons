@@ -15,7 +15,7 @@ spec:
           cpu: '0.5'
           memory: 512Mi
         requests:
-          cpu: '0.2'
+          cpu: 100m
           memory: 512Mi
       volumeClaimTemplates:
         - name: data
@@ -32,7 +32,7 @@ spec:
           cpu: '0.5'
           memory: 256Mi
         requests:
-          cpu: '0.1'
+          cpu: 50m
           memory: 256Mi
       volumeClaimTemplates:
         - name: data
