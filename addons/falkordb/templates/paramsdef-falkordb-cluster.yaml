@@ -10,11 +10,7 @@ metadata:
   labels:
     {{- include "falkordb.labels" $ | nindent 4 }}
 spec:
-  componentDef: {{ printf "%s-%s" .clusterComponentDef  $.Chart.Version }}
-  templateName: falkordb-cluster-config
   fileName: redis.conf
-  fileFormatConfig:
-    format: redis
   # ConfigurationSchema that impose restrictions on engine parameter's rule
   parametersSchema:
     topLevelKey: FalkorDBParameter
