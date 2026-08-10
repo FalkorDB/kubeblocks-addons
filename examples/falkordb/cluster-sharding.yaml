@@ -29,7 +29,7 @@ spec:
           memory: 1Gi
       # Specifies the version of the Component service. This field is used to determine the version of the service that is created for the Component. \
       # The serviceVersion is used to determine the version of the falkordb Sharding Cluster kernel. If the serviceVersion is not specified, the default value is the ServiceVersion defined in ComponentDefinition.
-      serviceVersion: 4.20.1
+      serviceVersion: "4.20.2"
       # Component-level services override services defined in referenced ComponentDefinition and expose
       # endpoints that can be accessed by clients
       # This example explicitly override the svc `falkordb-advertised` to use the NodePort
