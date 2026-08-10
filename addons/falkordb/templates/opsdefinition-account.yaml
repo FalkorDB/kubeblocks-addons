@@ -2,6 +2,8 @@ apiVersion: operations.kubeblocks.io/v1alpha1
 kind: OpsDefinition
 metadata:
   name: falkordb-master-account-ops
+  labels:
+    {{- include "falkordb.labels" . | nindent 4 }}
 spec:
   podInfoExtractors:
     - name: master-connection
@@ -74,6 +76,8 @@ apiVersion: operations.kubeblocks.io/v1alpha1
 kind: OpsDefinition
 metadata:
   name: falkordb-sent-account-ops
+  labels:
+    {{- include "falkordb.labels" . | nindent 4 }}
 spec:
   podInfoExtractors:
     - name: sentinel-connection
@@ -146,6 +150,8 @@ apiVersion: operations.kubeblocks.io/v1alpha1
 kind: OpsDefinition
 metadata:
   name: falkordb-shard-account-ops
+  labels:
+    {{- include "falkordb.labels" . | nindent 4 }}
 spec:
   podInfoExtractors:
     - name: shard-connection
