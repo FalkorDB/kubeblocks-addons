@@ -2,6 +2,20 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: sharding-backup-restore
+  labels:
+    ## Excluded from CI (`make e2e E2E_SELECTOR='e2e.falkordb/ci!=unsupported'`).
+    ##
+    ## The sharded restore replays each shard's RDB through ape-dts, and every
+    ## published release up to 2.0.26-alpha.16 - the tag this chart defaults to -
+    ## mis-parses FalkorDB's `telemetry{<graph>}` stream keys, panics, then hangs
+    ## instead of exiting. This scenario creates a graph before backing up, so
+    ## whichever shard owns that key never finishes restoring and the cluster
+    ## comes back with a partial keyspace.
+    ##
+    ## It passes locally only against a patched image built from
+    ## https://github.com/apecloud/ape-dts/pull/564. Drop this label once that
+    ## PR ships in a release and values.yaml is bumped to it.
+    e2e.falkordb/ci: unsupported
 spec:
   description: >-
     Back up a sharded FalkorDB cluster and restore it into a brand new one.

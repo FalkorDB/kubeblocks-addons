@@ -20,16 +20,6 @@ spec:
       volumeClaimTemplates:
         - name: data
           spec:
-            # RebuildInstance provisions a scratch PVC, waits for its PV and
-            # rebinds that PV onto the rebuilt member. With a
-            # WaitForFirstConsumer class (local-path, the k3d default) no PV
-            # exists until the rebuild pod is scheduled, and KubeBlocks gives up
-            # with `can not found the pv by the pvc "rebuild-<hash>-..."` before
-            # the provisioner catches up. It is a race, so it passes on a fast
-            # machine and fails on a loaded CI runner. The hostpath CSI class
-            # the e2e setup installs binds Immediately, which removes the race
-            # without weakening what this scenario actually covers.
-            storageClassName: csi-hostpath-sc
             accessModes:
               - ReadWriteOnce
             resources:

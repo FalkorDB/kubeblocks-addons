@@ -78,6 +78,11 @@ jobs:
       E2E_TEST: ${{ github.event.inputs.test || '' }}
       E2E_SHARD_COUNT: ${{ needs.plan.outputs.shard_count }}
       E2E_SHARD_INDEX: ${{ matrix.shard }}
+      # Scenarios that cannot run unattended here carry
+      # `e2e.falkordb/ci: unsupported` and say why in their own metadata. `!=`
+      # also matches every test that has no such label, so this only drops the
+      # ones that opt out.
+      E2E_SELECTOR: e2e.falkordb/ci!=unsupported
       # A GitHub runner has 4 vCPU. A replication scenario asks for ~1.6 CPU of
       # pod requests, so a third concurrent scenario would sit Pending until it
       # hit the assert timeout. Scale out across machines instead.
