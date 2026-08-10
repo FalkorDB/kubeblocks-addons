@@ -1,0 +1,123 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: scale-sharding
+spec:
+  description: >-
+    Scale a sharded FalkorDB cluster out from 3 to 4 shards and back in again,
+    proving the hash slots stay fully covered and, crucially, that not a single key
+    is lost while slots migrate between shards.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shard
+            tail: 100
+
+    - name: the cluster forms and owns every slot
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-shard shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+    - name: seed keys spread across the whole keyspace
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
+              # 200 distinct keys hash into slots spanning all three shards, so a
+              # rebalance that drops or mis-migrates a slot range will be caught.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shard 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shard 200
+
+    - name: scale out from 3 to 4 shards
+      try:
+        - apply:
+            file: scale-out.yaml
+        - assert:
+            file: assert-scale-out-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-scale-out-sharding
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shard
+            tail: 100
+
+    - name: slots stay covered and no key was lost during the rebalance
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-shard shard 4
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
+              fdb_retry "all 16384 slots to be covered after scale-out" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              # The new shard only holds data if slots were actually migrated to it.
+              fdb_retry "every seeded key to still be readable" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-shard 200
+
+    - name: scale back in from 4 to 3 shards
+      try:
+        - apply:
+            file: scale-in.yaml
+        - assert:
+            file: assert-scale-in-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-scale-in-sharding
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shard
+            tail: 100
+
+    - name: the removed shard handed its slots and data over intact
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-shard shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
+              fdb_retry "all 16384 slots to be covered after scale-in" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every seeded key to survive the shard removal" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-shard 200

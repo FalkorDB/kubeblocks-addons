@@ -41,6 +41,11 @@
 
 	appendonly?: string & "yes" | "no"
 
+	// Retain the history AOF files that the server would otherwise delete
+	// after a rewrite. The continuous 'aof' backup method turns this on
+	// through its reconfigure-ref so that archiving can ship every segment.
+	"aof-disable-auto-gc"?: string & "yes" | "no"
+
 	"aof-timestamp-enabled"?: string & "yes" | "no"
 
 	"client-output-buffer-limit normal": string | *"0 0 0"

@@ -1,0 +1,11 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-sentscale-in
+spec:
+  clusterName: fdb-sentscale
+  type: HorizontalScaling
+  horizontalScaling:
+    - componentName: falkordb-sent
+      scaleIn:
+        replicaChanges: 2

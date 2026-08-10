@@ -1,0 +1,13 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-upgrade-ops
+spec:
+  clusterName: fdb-upgrade
+  type: Upgrade
+  upgrade:
+    components:
+      - componentName: falkordb
+        serviceVersion: "4.20.1"
+      - componentName: falkordb-sent
+        serviceVersion: "4.20.1"

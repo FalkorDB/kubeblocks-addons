@@ -1,0 +1,46 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-metrics
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  topology: replication
+  componentSpecs:
+    - name: falkordb
+      # Every other scenario disables the exporter, so the metrics container had
+      # never been rendered, let alone scraped.
+      disableExporter: false
+      replicas: 2
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 512Mi
+        requests:
+          cpu: '0.2'
+          memory: 512Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+    - name: falkordb-sent
+      replicas: 3
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 256Mi
+        requests:
+          cpu: '0.1'
+          memory: 256Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi

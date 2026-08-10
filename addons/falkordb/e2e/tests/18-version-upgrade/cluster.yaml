@@ -1,0 +1,56 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-upgrade
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  topology: replication
+  componentSpecs:
+    - name: falkordb
+      # The exporter has to stay enabled here. KubeBlocks decides an Upgrade
+      # OpsRequest is finished by comparing every container declared in the
+      # ComponentDefinition runtime against the pod, and its container lookup
+      # falls back to the pod's *first* container when the named one is absent.
+      # With the exporter disabled the missing `metrics` container therefore
+      # resolves to the falkordb image, never matches the expected exporter
+      # image, and the OpsRequest stays Running forever even though the upgrade
+      # itself succeeded.
+      disableExporter: false
+      replicas: 2
+      # Deliberately older than the chart default so the upgrade has somewhere to
+      # go. 4.18.11 is the newest version below the default 4.20.1.
+      serviceVersion: "4.18.11"
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 512Mi
+        requests:
+          cpu: '0.2'
+          memory: 512Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+    - name: falkordb-sent
+      replicas: 3
+      serviceVersion: "4.18.11"
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 256Mi
+        requests:
+          cpu: '0.1'
+          memory: 256Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi

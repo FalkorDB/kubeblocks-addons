@@ -23,7 +23,7 @@ FalkorDB is an open source (SSPL licensed) in-memory graph database based on Red
 
 | Major Versions | Description |
 |---------------|-------------|
-| 4.0           | 4.18.8, 4.14.10, 4.12.5 |
+| 4.0           | 4.20.1, 4.18.11, 4.18.8, 4.14.12, 4.14.10, 4.12.5 |
 
 ## Prerequisites
 
@@ -134,10 +134,34 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       replicas: 2 # decrease `replicas` for scaling in, and increase for scaling out
       disableExporter: false
 ```
+
+#### Scaling shards in `sharding` topology
+
+In the `sharding` topology the two operations above change the number of replicas *inside* each shard. To change the number of shards themselves, set `shards` instead.
+
+##### [Scale-out shards](scale-out-sharding.yaml)
+
+```bash
+kubectl apply -f examples/falkordb/scale-out-sharding.yaml
+```
+
+KubeBlocks provisions the new shard and the addon then migrates a share of the 16384 hash slots onto it. On a cluster holding a lot of data this rebalance can take a while — watch it with:
+
+```bash
+kubectl describe -n demo ops falkordb-scale-out-sharding
+```
+
+##### [Scale-in shards](scale-in-sharding.yaml)
+
+```bash
+kubectl apply -f examples/falkordb/scale-in-sharding.yaml
+```
+
+The slots owned by the removed shard are migrated to the remaining shards before it is torn down, so no keys are lost. A FalkorDB cluster requires at least 3 shards, so `shards` must not go below 3.
 
 ### [Vertical scaling](verticalscale.yaml)
 
@@ -163,7 +187,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       replicas: 2 # decrease `replicas` for scaling in, and increase for scaling out
       resources:
         requests:
@@ -210,7 +234,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       replicas: 2
       volumeClaimTemplates:
         - name: data
@@ -252,7 +276,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       stop: true  # set stop `true` to stop the component
       replicas: 2
       ...
@@ -281,7 +305,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       stop: false  # set to `false` (or remove this field) to start the component
       replicas: 2
     - name: falkordb-sent
@@ -435,7 +459,7 @@ spec:
     repoName: kb-oss
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       ...
 ```
 
@@ -446,6 +470,38 @@ To restore a new cluster from a Backup:
 ```bash
 kubectl apply -f examples/falkordb/restore.yaml
 ```
+
+### [Rebuild Instance](rebuild-instance.yaml)
+
+To rebuild a broken instance in place from a backup taken with the `backup-for-rebuild-instance` method:
+
+```bash
+kubectl apply -f examples/falkordb/rebuild-instance.yaml
+```
+
+Set `backupName` to an existing backup and `instances[*].name` to the pod you want to rebuild. Set `inPlace: false` to create a replacement pod instead of reusing the existing one.
+
+### Switchover
+
+Promote a replica to primary. In `replication` topology the promotion is driven by Sentinel; in `sharding` topology it is driven by `CLUSTER FAILOVER`.
+
+#### [Switchover](switchover.yaml)
+
+Hand over the role held by `instanceName`, letting the addon pick the new primary:
+
+```bash
+kubectl apply -f examples/falkordb/switchover.yaml
+```
+
+#### [Switchover to a specified instance](switchover-specified-instance.yaml)
+
+Set `candidateName` to promote a specific pod:
+
+```bash
+kubectl apply -f examples/falkordb/switchover-specified-instance.yaml
+```
+
+`candidateName` must name a pod in the same component that is currently a healthy replica. If the switchover fails, the addon restores the original `replica-priority` of every replica, so the next Sentinel-driven failover is unaffected.
 
 ### Expose
 
@@ -500,7 +556,7 @@ spec:
       type: LoadBalancer
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       ...
 ```
 
@@ -545,7 +601,7 @@ kind: Cluster
 spec:
   componentSpecs:
     - name: falkordb
-      serviceVersion: "4.12.5"
+      serviceVersion: "4.20.1"
       disableExporter: false # set to `false` to enable exporter
 ```
 
@@ -618,6 +674,17 @@ The `redis_exporter` used here is provided by [redis_exporter](https://github.co
 
 Sometimes the default dashboard may not work as expected, you may need to adjust the dashboard to match the labels the metrics are scraped with, in particular, the `job` label. In our case, the `job` variable should be set to `monitoring/falkordb-replication-pod-monitor` in the dashboard.
 
+##### Step 4. Create Alert Rules (optional)
+
+Apply the `PrometheusRule` file to get alerted on the most common FalkorDB failure modes (instance down, replication broken, memory pressure, rejected connections, etc.):
+
+```bash
+kubectl apply -f examples/falkordb/alert-rules.yaml
+```
+
+> [!NOTE]
+> Adjust `metadata.labels.release` to match the label your Prometheus Operator instance uses to select rules.
+
 ### Delete
 
 If you want to delete the cluster and all its resource, you can modify the termination policy and then delete the cluster:
@@ -667,6 +734,52 @@ spec:
 # irrelevant lines commited
 ```
 Service `falkordb-advertised` and `falkordb-sent` are defined in `ComponentDefinition` name `falkordb-4` and `falkordb-sent-4`.  They are used to to parse the advertised endpoints of the FalkorDB pods and Sentinel Pods.
+
+#### Create FalkorDB Replication with TLS
+
+To encrypt client and replication traffic, set `tls: true` and pick a certificate issuer on each component:
+
+```bash
+kubectl apply -f examples/falkordb/cluster-tls.yaml
+```
+
+```yaml
+# snippet of cluster-tls.yaml
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+spec:
+  componentSpecs:
+    - name: falkordb
+      tls: true
+      issuer:
+        name: KubeBlocks  # let KubeBlocks generate a self-signed CA and certificate
+```
+
+Use `issuer.name: UserProvided` together with `issuer.secretRef` to supply your own certificate instead.
+
+#### Create FalkorDB with a Custom Password
+
+By default KubeBlocks generates the password of the `default` system account. To use your own credentials, create a Secret and reference it from `systemAccounts`:
+
+```bash
+kubectl apply -f examples/falkordb/custom-secret.yaml
+```
+
+```yaml
+# snippet of custom-secret.yaml
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+spec:
+  componentSpecs:
+    - name: falkordb
+      systemAccounts:
+        - name: default
+          secretRef:
+            name: falkordb-custom-account
+            namespace: demo
+```
+
+The referenced Secret must contain the `username` and `password` keys and must exist before the cluster is created.
 
 #### Create FalkorDB Standalone with Extra Configuration
 
@@ -730,7 +843,7 @@ spec:
     template:
       name: falkordb
       replicas: 2 # set the desired number of replicas for each shard.
-      serviceVersion: 4.12.5
+      serviceVersion: 4.20.1
       # Component-level services override services defined in
       # referenced ComponentDefinition and expose
       # endpoints that can be accessed by clients
@@ -766,7 +879,7 @@ spec:
     template:
       name: falkordb
       replicas: 2 # set the desired number of replicas for each shard.
-      serviceVersion: 4.12.5
+      serviceVersion: 4.20.1
       stop: false # set to `true` to stop all components
 ```
 

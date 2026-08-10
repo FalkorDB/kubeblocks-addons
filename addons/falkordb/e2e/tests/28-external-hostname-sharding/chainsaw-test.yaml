@@ -1,0 +1,297 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: external-hostname-sharding
+spec:
+  description: >-
+    Run a sharded cluster whose nodes gossip external DNS hostnames, and drive it
+    from outside its namespace through MOVED redirects.
+
+    Sharding raises the stakes on external access. A replication client only has
+    to reach the one address Sentinel gives it, but a cluster client is redirected
+    to whatever endpoint the nodes advertise to each other, so every node has to
+    carry a name the client can resolve. Redis only sends hostnames at all when
+    cluster-announce-hostname is set on each node and the endpoint type asks for
+    them, and getting either wrong leaves a cluster that is perfectly healthy
+    inside Kubernetes and unreachable from anywhere else.
+
+    Because KubeBlocks generates a component name per shard, the announced name
+    can only be built from the pod name, which is what makes the $(POD_NAME)
+    template the only workable form here.
+
+    The assertions are that every node announces a distinct external hostname,
+    that the gossiped topology is expressed in those names rather than pod IPs,
+    and that a client in another namespace can follow redirects across all the
+    shards using nothing but the external zone.
+  steps:
+    - name: create a sharded cluster that announces external hostnames
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+
+              # The zone embeds the namespace, which chainsaw only picks at run
+              # time, so the manifest cannot be a static file. $(POD_NAME) is
+              # escaped because the addon expands it, not the shell here.
+              cat <<EOF | kubectl apply -f -
+              apiVersion: apps.kubeblocks.io/v1
+              kind: Cluster
+              metadata:
+                name: fdb-extc
+                namespace: $NAMESPACE
+              spec:
+                terminationPolicy: WipeOut
+                clusterDef: falkordb
+                topology: cluster
+                shardings:
+                  - name: shard
+                    shardingDef: falkordb-cluster
+                    shards: 3
+                    template:
+                      name: falkordb
+                      disableExporter: true
+                      replicas: 1
+                      env:
+                        - name: ANNOUNCE_HOSTNAME_OVERRIDE
+                          value: \$(POD_NAME).$NAMESPACE.$suffix
+                      resources:
+                        limits:
+                          cpu: '0.5'
+                          memory: 512Mi
+                        requests:
+                          cpu: '0.2'
+                          memory: 512Mi
+                      volumeClaimTemplates:
+                        - name: data
+                          spec:
+                            accessModes:
+                              - ReadWriteOnce
+                            resources:
+                              requests:
+                                storage: 1Gi
+              EOF
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-extc
+            tail: 100
+
+    - name: every node announces a distinct external hostname
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+
+              seen=""
+              count=0
+              for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-extc shard); do
+                announced="$(fdb_config_get "$NAMESPACE" "$pod" cluster-announce-hostname)"
+                if [ "$announced" != "$pod.$NAMESPACE.$suffix" ]; then
+                  echo "$pod announces '$announced', expected $pod.$NAMESPACE.$suffix" >&2
+                  exit 1
+                fi
+
+                # Announcing a hostname is not enough on its own: unless the
+                # preferred endpoint type asks for hostnames, redirects and
+                # CLUSTER SHARDS still hand out IP addresses.
+                fdb_assert_config "$NAMESPACE" "$pod" cluster-preferred-endpoint-type hostname
+
+                seen="$seen $announced"
+                count=$((count + 1))
+              done
+
+              if [ "$count" -ne 3 ]; then
+                echo "expected 3 shard pods, found $count" >&2
+                exit 1
+              fi
+              if [ "$(printf '%s' "$seen" | tr ' ' '\n' | grep . | sort -u | wc -l | tr -d ' ')" -ne 3 ]; then
+                echo "the shards did not announce distinct hostnames:$seen" >&2
+                exit 1
+              fi
+              fdb_log "all 3 shards announce their own name under .$suffix"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-extc
+            tail: 100
+
+    - name: the gossiped topology is expressed in external hostnames
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-extc shard)"
+
+              fdb_retry "the slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              # CLUSTER SHARDS reports what the nodes told each other, so a
+              # hostname here means the announcement really travelled over
+              # gossip rather than just sitting in a local config file.
+              shards="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER SHARDS | tr -d '\r')"
+              # Each node contributes the hostname twice, once as its endpoint
+              # and once as its hostname attribute, so count distinct names.
+              found="$(printf '%s\n' "$shards" \
+                | grep "^fdb-extc-.*\.$NAMESPACE\.$suffix$" | sort -u | wc -l | tr -d ' ')"
+              if [ "$found" -ne 3 ]; then
+                echo "expected 3 nodes reported under .$suffix, found $found" >&2
+                printf '%s\n' "$shards" >&2
+                exit 1
+              fi
+              fdb_log "all 3 nodes appear in CLUSTER SHARDS by external hostname"
+
+              # CLUSTER NODES always carries the ip:port@cport of each node; the
+              # announced hostname is appended after a comma. Every node must
+              # have one, or clients preferring hostnames get an empty endpoint.
+              nodes="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER NODES | tr -d '\r' | grep .)"
+              total="$(printf '%s\n' "$nodes" | wc -l | tr -d ' ')"
+              named="$(printf '%s\n' "$nodes" \
+                | grep -c ",fdb-extc-.*\.$NAMESPACE\.$suffix " || true)"
+              if [ "$total" -ne 3 ] || [ "$named" -ne 3 ]; then
+                echo "expected 3 nodes all carrying a .$suffix hostname, found $named of $total:" >&2
+                printf '%s\n' "$nodes" >&2
+                exit 1
+              fi
+              fdb_log "every node in CLUSTER NODES carries its external hostname"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-extc
+            tail: 100
+
+    - name: a client in another namespace follows redirects by hostname
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              suffix="${E2E_EXTERNAL_DNS_SUFFIX:-falkordb.e2e.example.com}"
+              client_ns="$NAMESPACE-ext"
+              pod="$(fdb_sharding_pods "$NAMESPACE" fdb-extc shard | head -1)"
+              host="$pod.$NAMESPACE.$suffix"
+
+              # Reading the reference out of the pod avoids guessing at the
+              # secret name, which carries the generated component name.
+              secret="$(kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath='{.spec.containers[?(@.name=="falkordb-cluster")].env[?(@.name=="REDIS_DEFAULT_PASSWORD")].valueFrom.secretKeyRef.name}')"
+              key="$(kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath='{.spec.containers[?(@.name=="falkordb-cluster")].env[?(@.name=="REDIS_DEFAULT_PASSWORD")].valueFrom.secretKeyRef.key}')"
+              if [ -z "$secret" ]; then
+                echo "could not find the account secret backing $pod" >&2
+                exit 1
+              fi
+
+              # Running the client somewhere else proves the names are not being
+              # completed by the test namespace's DNS search path.
+              kubectl create namespace "$client_ns" >/dev/null
+              kubectl get secret -n "$NAMESPACE" "$secret" \
+                -o jsonpath="{.data.$key}" | base64 -d > "$(fdb_state_dir)/password"
+              kubectl create secret generic fdb-extc-account -n "$client_ns" \
+                --from-file=password="$(fdb_state_dir)/password" >/dev/null
+
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ext-client
+                namespace: $client_ns
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: client
+                    image: falkordb/falkordb:v4.20.1
+                    env:
+                      - name: REDISCLI_AUTH
+                        valueFrom:
+                          secretKeyRef:
+                            name: fdb-extc-account
+                            key: password
+                      - name: HOST
+                        value: $host
+                    command:
+                      - sh
+                      - -c
+                      - |
+                        set -e
+                        # 30 keys spread over the whole slot range, so the client
+                        # is redirected to every shard on the way through.
+                        i=1
+                        while [ \$i -le 30 ]; do
+                          redis-cli -c -h "\$HOST" SET "e2e-extc-\$i" "value-\$i" > /dev/null
+                          i=\$((i + 1))
+                        done
+                        i=1
+                        while [ \$i -le 30 ]; do
+                          got="\$(redis-cli -c -h "\$HOST" GET "e2e-extc-\$i")"
+                          if [ "\$got" != "value-\$i" ]; then
+                            echo "key e2e-extc-\$i returned '\$got'"
+                            exit 1
+                          fi
+                          i=\$((i + 1))
+                        done
+                        redis-cli -c -h "\$HOST" GRAPH.QUERY 'g{probe}' "CREATE (:Person {name:'alice'})" > /dev/null
+                        echo ALL-KEYS-OK
+              EOF
+
+              kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/ext-client \
+                -n "$client_ns" --timeout=5m
+              output="$(kubectl logs -n "$client_ns" ext-client)"
+              if ! printf '%s' "$output" | grep -q ALL-KEYS-OK; then
+                echo "the external client could not drive the cluster:" >&2
+                printf '%s' "$output" >&2
+                exit 1
+              fi
+              fdb_log "a pod in $client_ns wrote and read 30 keys through $host"
+
+              # The keys really landed in the shards rather than being answered
+              # by whatever the client first connected to.
+              fdb_assert_graph_node "$NAMESPACE" "$pod" 'g{probe}'
+              missing=0
+              i=1
+              while [ "$i" -le 30 ]; do
+                value="$(fdb_cli "$NAMESPACE" "$pod" GET "e2e-extc-$i" | tr -d '\r')"
+                [ "$value" = "value-$i" ] || missing=$((missing + 1))
+                i=$((i + 1))
+              done
+              if [ "$missing" -ne 0 ]; then
+                echo "$missing of the 30 keys are missing from the cluster" >&2
+                exit 1
+              fi
+              fdb_log "all 30 keys are readable from inside the cluster too"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-extc
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              kubectl delete namespace "$NAMESPACE-ext" --wait=false --ignore-not-found >/dev/null
+              fdb_clean_state_dir

@@ -1,6 +1,11 @@
 #!/bin/bash
 
-set -e
+# shellcheck disable=SC2034
+ut_mode="false"
+test || __() {
+  set -e;
+}
+
 service_port=${SERVICE_PORT:-6379}
 
 function do_acl_command() {
@@ -14,16 +19,30 @@ function do_acl_command() {
         # in case, the host is like this: apple-7bff57f594-shard-b8p-1.apple-7bff57f594-shard-b8p-headless.kubeblocks-cloud-ns.svc.cluster.local,apple-7bff57f594-shard-9x9-0.apple-7bff57f594-shard-9x9-headless.kubeblocks-cloud-ns.svc.cluster.local,apple-7bff57f594-shard-8bf-1.apple-7bff57f594-shard-8bf-headless.kubeblocks-cloud-ns.svc.cluster.local
         # in case of fixed ip mode, the host is like this: 10.96.180.100:6379@1 10.96.180.100:6379@2
         # we need to remove the @1 or @2 and remove the port
-        host=$(echo "$host" | sed 's/@[0-9]*//g' | sed 's/:[0-9]*/ /g')
-        cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $service_port --user $user -a $password"
+        #
+        # The port is parsed into a per-host variable rather than into the global
+        # one: a fixed-ip entry followed by a plain fqdn would otherwise keep
+        # talking to the port the previous entry happened to advertise.
+        host_port="$service_port"
+        host="${host%%@*}"
+        case "$host" in
+            *:*)
+                host_port="${host##*:}"
+                host="${host%:*}"
+                ;;
+        esac
+        cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $host_port --user $user -a $password"
         if [ -z "$password" ]; then
-            cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $service_port --user $user"
+            cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $host_port --user $user"
         fi
         if [ -n "$ACL_COMMAND" ]; then
             echo "DO ACL COMMAND FOR HOST: $host"
-            $cmd $ACL_COMMAND
-            if [ $? -ne 0 ]; then
+            output=$($cmd $ACL_COMMAND 2>&1)
+            exit_code=$?
+            if [ $exit_code -ne 0 ] || echo "$output" | grep -q "^ERR"; then
                 echo "DO ACL COMMAND FOR HOST: $host FAILED"
+                echo "Exit Code: $exit_code"
+                echo "Output: $output"
                 exit 1
             fi
         else
@@ -102,8 +121,14 @@ function get_cluster_host_list() {
         CLUSTER NODES |
         grep -v "fail" |
         grep -v "noaddr" |
-        awk '{print $2}' |
-        cut -d ':' -f1 |
+        awk '{
+            split($2, endpoint, ",")
+            if (endpoint[2] != "") {
+                print endpoint[2]
+            } else {
+                print endpoint[1]
+            }
+        }' |
         paste -sd,)
     if [ -z "$host_list" ]; then
         echo "GET CLUSTER HOST LIST FAILED, SKIP ACL OPERATION"
@@ -112,6 +137,7 @@ function get_cluster_host_list() {
 }
 
 function main() {
+    set -e
     env_pre_check
 
     if [ "$SHARD_MODE" = "TRUE" ]; then
@@ -121,5 +147,12 @@ function main() {
     fi
     do_acl_command "$host_list" "$REDIS_DEFAULT_USER" "$REDIS_DEFAULT_PASSWORD"
 }
+
+# This is magic for shellspec ut framework.
+# Sometime, functions are defined in a single shell script.
+# You will want to test it. but you do not want to run the script.
+# When included from shellspec, __SOURCED__ variable defined and script
+# end here. The script path is assigned to the __SOURCED__ variable.
+${__SOURCED__:+false} : || return 0
 
 main

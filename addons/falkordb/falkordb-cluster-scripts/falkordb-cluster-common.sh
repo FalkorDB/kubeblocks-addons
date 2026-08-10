@@ -541,10 +541,87 @@ check_slots_covered() {
   fi
   set_xtrace_when_ut_mode_false
   if contains "$check" "All 16384 slots covered"; then
+    if contains "$check" "[ERR]" || \
+       contains "$check" "[WARNING] The following slots are open" || \
+       contains "$check" "has slots in importing state" || \
+       contains "$check" "has slots in migrating state"; then
+      echo "FalkorDB Cluster slots are covered but cluster check is not stable:" >&2
+      echo "$check" >&2
+      return 1
+    fi
     return 0
+  fi
+  echo "FalkorDB Cluster slots are not fully covered:" >&2
+  echo "$check" >&2
+  return 1
+}
+
+# fix_cluster_slots repairs open/importing/migrating slots by running the
+# `redis-cli --cluster fix` command against the given node.
+fix_cluster_slots() {
+  local node_endpoint_with_port="$1"
+  local cluster_service_port="$2"
+  local fix_yes_input
+  local fix_yes_count
+  unset_xtrace_when_ut_mode_false
+  if is_empty "$REDIS_DEFAULT_PASSWORD"; then
+    fix_command="redis-cli $REDIS_CLI_TLS_CMD --cluster fix $node_endpoint_with_port -p $cluster_service_port --cluster-yes"
+    logging_mask_fix_command="$fix_command"
   else
+    fix_command="redis-cli $REDIS_CLI_TLS_CMD --cluster fix $node_endpoint_with_port -p $cluster_service_port --cluster-yes -a $REDIS_DEFAULT_PASSWORD"
+    logging_mask_fix_command="${fix_command/$REDIS_DEFAULT_PASSWORD/********}"
+  fi
+  # --cluster-yes does not cover the interactive prompts raised for every open slot,
+  # so feed enough "yes" answers to let the fix run unattended.
+  fix_yes_input=""
+  fix_yes_count=0
+  while [ "$fix_yes_count" -lt 128 ]; do
+    fix_yes_input="${fix_yes_input}yes\n"
+    fix_yes_count=$((fix_yes_count + 1))
+  done
+  echo "fix FalkorDB Cluster slots command: printf yes... | $logging_mask_fix_command" >&2
+  if ! printf "%b" "$fix_yes_input" | $fix_command; then
+    set_xtrace_when_ut_mode_false
+    echo "Failed to fix FalkorDB Cluster slots for $node_endpoint_with_port" >&2
     return 1
   fi
+  set_xtrace_when_ut_mode_false
+  return 0
+}
+
+# count_node_slots prints the number of hash slots currently owned by the node
+# identified by the given cluster id.
+count_node_slots() {
+  local cluster_node="$1"
+  local cluster_node_port="$2"
+  local node_cluster_id="$3"
+  local cluster_nodes_info
+  cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port")
+  status=$?
+  if [ $status -ne 0 ]; then
+    echo "Failed to get cluster nodes info in count_node_slots" >&2
+    return 1
+  fi
+
+  echo "$cluster_nodes_info" | awk -v node_id="$node_cluster_id" '
+    $1 == node_id {
+      count = 0
+      for (i = 9; i <= NF; i++) {
+        if ($i ~ /^[0-9]+$/) {
+          count += 1
+        } else if ($i ~ /^[0-9]+-[0-9]+$/) {
+          split($i, range, "-")
+          count += range[2] - range[1] + 1
+        }
+      }
+      print count
+      found = 1
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }'
 }
 
 # check if the cluster has been initialized

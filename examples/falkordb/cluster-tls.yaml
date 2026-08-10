@@ -1,0 +1,57 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: falkordb-tls
+  namespace: demo
+spec:
+  terminationPolicy: Delete
+  clusterDef: falkordb
+  topology: replication
+  componentSpecs:
+    - name: falkordb
+      serviceVersion: "4.20.1"
+      disableExporter: false
+      replicas: 2
+      # Enables TLS for the client and replication traffic of this Component.
+      tls: true
+      # Issuer of the TLS certificate. `KubeBlocks` lets the operator generate
+      # a self-signed CA and certificate. Use `UserProvided` together with
+      # `issuer.secretRef` to bring your own certificate.
+      issuer:
+        name: KubeBlocks
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 0.5Gi
+        requests:
+          cpu: '0.5'
+          memory: 0.5Gi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 20Gi
+    - name: falkordb-sent
+      serviceVersion: "4.20.1"
+      replicas: 3
+      tls: true
+      issuer:
+        name: KubeBlocks
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 0.5Gi
+        requests:
+          cpu: '0.5'
+          memory: 0.5Gi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 20Gi

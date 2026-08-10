@@ -60,12 +60,19 @@ image:
       minor12:
         patch5: v4.12.5
 
+  # KNOWN ISSUE: every published ape-dts release up to and including
+  # 2.0.26-alpha.16 mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB
+  # type byte 26). The parser desyncs, panics, and the process then hangs instead
+  # of exiting, so a sharded restore silently stalls with a partial dataset.
+  # The fix is https://github.com/apecloud/ape-dts/pull/564 - bump these tags to
+  # the first release that carries it.
   apeDts:
     registry: ""
     repository: apecloud/ape-dts
     tag: 2.0.26-alpha.16
     reshardTag: 2.0.26-alpha.16
 
+# See the apeDts note above: this tag has the same unfixed RDB stream parser.
 apeDtsImage:
   registry: ""
   repository: apecloud/ape-dts

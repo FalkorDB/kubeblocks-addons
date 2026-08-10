@@ -1,0 +1,155 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sentinel-quorum
+spec:
+  description: >-
+    Losing the entire sentinel quorum at once. Sentinel keeps its view of the
+    topology in a config file on its own volume, so the danger is not that the
+    pods fail to come back but that they come back monitoring the wrong master,
+    or none at all, while still reporting Ready. That failure is invisible until
+    the next primary outage, so this scenario kills the quorum, waits for it to
+    rebuild, and only then kills the primary to prove failover still works.
+  steps:
+    - name: create the cluster and seed data
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-quorum falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-quorum falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-quorum 50
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-quorum-graph
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-quorum falkordb-sent); do
+                fdb_retry "sentinel $pod to monitor the master" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-quorum
+            tail: 100
+
+    - name: destroy the whole sentinel quorum
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary_before="$(fdb_primary "$NAMESPACE" fdb-quorum falkordb)"
+              echo "$primary_before" > "$(fdb_state_dir)/primary-before"
+
+              # Deleting them one at a time would let the survivors re-seed the
+              # one that comes back, which is the easy case. Deleting all three
+              # together forces each sentinel to rebuild its view from its own
+              # config file and from the servers themselves.
+              kubectl delete pod -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-quorum,apps.kubeblocks.io/component-name=falkordb-sent" \
+                --wait=false >/dev/null
+              echo "[e2e] deleted every sentinel pod"
+
+              # The replacements reuse the old names, so waiting on a name can
+              # latch onto the pod that is still terminating and then die with
+              # NotFound the moment it goes away. Poll the set instead: three
+              # sentinels present, none terminating, all Ready.
+              sentinel_selector="app.kubernetes.io/instance=fdb-quorum,apps.kubeblocks.io/component-name=falkordb-sent"
+              quorum_is_back() {
+                local total terminating ready
+                total="$(kubectl get pod -n "$NAMESPACE" -l "$sentinel_selector" \
+                  --no-headers 2>/dev/null | grep -c . || true)"
+                terminating="$(kubectl get pod -n "$NAMESPACE" -l "$sentinel_selector" \
+                  -o jsonpath='{.items[*].metadata.deletionTimestamp}' 2>/dev/null \
+                  | wc -w | tr -d ' ')"
+                ready="$(kubectl get pod -n "$NAMESPACE" -l "$sentinel_selector" \
+                  -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null \
+                  | tr ' ' '\n' | grep -c '^True$' || true)"
+                [ "$total" -eq 3 ] && [ "$terminating" -eq 0 ] && [ "$ready" -eq 3 ]
+              }
+              fdb_retry "all three sentinels to come back Ready" quorum_is_back
+              echo "[e2e] every sentinel is Ready again"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: apps.kubeblocks.io/component-name=falkordb-sent
+            tail: 200
+
+    - name: the rebuilt quorum monitors the right master
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary_before="$(cat "$(fdb_state_dir)/primary-before")"
+
+              # Nothing failed over, so a sentinel that now points somewhere else
+              # has rebuilt its view incorrectly.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-quorum falkordb-sent); do
+                fdb_retry "sentinel $pod to monitor a master again" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+
+                name="$(fdb_sentinel_cli "$NAMESPACE" "$pod" SENTINEL masters \
+                  | tr -d '\r' | grep -A1 '^name$' | tail -1)"
+                addr="$(fdb_sentinel_cli "$NAMESPACE" "$pod" \
+                  SENTINEL get-master-addr-by-name "$name" | tr -d '\r' | head -1)"
+                case "$addr" in
+                  "$primary_before"*)
+                    echo "[e2e] sentinel $pod still points at $primary_before" ;;
+                  *)
+                    echo "sentinel $pod monitors '$addr', expected $primary_before" >&2
+                    exit 1 ;;
+                esac
+              done
+
+              # The servers themselves must be untouched by the sentinel outage.
+              fdb_assert_role_counts "$NAMESPACE" fdb-quorum falkordb 1 1
+              fdb_verify_keys "$NAMESPACE" "$primary_before" e2e-quorum 50
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-quorum
+            tail: 200
+
+    - name: failover still works after the quorum was rebuilt
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary_before="$(cat "$(fdb_state_dir)/primary-before")"
+              fdb_kill_pod "$NAMESPACE" "$primary_before"
+
+              # This is the assertion the whole scenario exists for: a quorum that
+              # rebuilt itself incorrectly leaves the cluster with no primary here.
+              fdb_retry "sentinel to promote a new primary" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-quorum falkordb 1 1
+              primary_after="$(fdb_primary "$NAMESPACE" fdb-quorum falkordb)"
+              [ "$primary_after" != "$primary_before" ] || {
+                echo "$primary_before is primary again, no failover happened" >&2
+                exit 1; }
+              echo "[e2e] $primary_after was promoted after $primary_before died"
+
+              fdb_retry "the old primary to rejoin as a replica" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-quorum falkordb
+              fdb_verify_keys "$NAMESPACE" "$primary_after" e2e-quorum 50
+              fdb_assert_graph_node "$NAMESPACE" "$primary_after" e2e-quorum-graph
+
+              fdb_write_keys "$NAMESPACE" "$primary_after" e2e-quorum-after 20
+              fdb_retry "new writes to reach $primary_before" \
+                fdb_verify_keys "$NAMESPACE" "$primary_before" e2e-quorum-after 20
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-quorum
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

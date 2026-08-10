@@ -1,0 +1,84 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: create-replication
+spec:
+  description: >-
+    Provision a replication-topology FalkorDB cluster and prove it actually works:
+    exactly one pod is primary, the replica has a live replication link, and data
+    written to the primary is readable from the replica.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-repl
+            tail: 100
+
+    - name: exactly one primary and one secondary are elected
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_retry "a primary to be elected" \
+                fdb_primary "$NAMESPACE" fdb-repl falkordb >/dev/null
+              primary="$(fdb_primary "$NAMESPACE" fdb-repl falkordb)"
+              echo "primary is $primary"
+
+              secondaries="$(fdb_pods_with_role "$NAMESPACE" fdb-repl falkordb secondary)"
+              count="$(echo "$secondaries" | grep -c . || true)"
+              [ "$count" -eq 1 ] || {
+                echo "expected 1 secondary, found $count" >&2
+                exit 1
+              }
+              echo "secondary is $secondaries"
+
+              # KubeBlocks' role label must agree with what the server reports.
+              fdb_assert_role "$NAMESPACE" "$primary" master
+              fdb_assert_role "$NAMESPACE" "$secondaries" slave
+
+    - name: replication is live and data reaches the replica
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              primary="$(fdb_primary "$NAMESPACE" fdb-repl falkordb)"
+              secondary="$(fdb_pods_with_role "$NAMESPACE" fdb-repl falkordb secondary)"
+
+              fdb_retry "the replication link on $secondary" \
+                fdb_assert_replication_up "$NAMESPACE" "$secondary"
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-create 20
+              # replication is asynchronous, so give it a moment to catch up
+              fdb_retry "replicated data on $secondary" \
+                fdb_verify_keys "$NAMESPACE" "$secondary" e2e-create 20
+
+    - name: the graph module is loaded and usable
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              primary="$(fdb_primary "$NAMESPACE" fdb-repl falkordb)"
+
+              # FalkorDB's reason for existing is the graph module; a plain Redis
+              # image would pass every other assertion in this file.
+              modules="$(fdb_cli "$NAMESPACE" "$primary" MODULE LIST | tr -d '\r')"
+              echo "$modules" | grep -qi graph || {
+                echo "the graph module is not loaded: $modules" >&2
+                exit 1
+              }
+
+              fdb_cli "$NAMESPACE" "$primary" \
+                GRAPH.QUERY e2e-graph "CREATE (:Person {name:'alice'})" >/dev/null
+              result="$(fdb_cli "$NAMESPACE" "$primary" \
+                GRAPH.QUERY e2e-graph "MATCH (p:Person) RETURN p.name" | tr -d '\r')"
+              echo "$result" | grep -q alice || {
+                echo "graph query did not return the inserted node: $result" >&2
+                exit 1
+              }
+              echo "graph module round-trip succeeded"

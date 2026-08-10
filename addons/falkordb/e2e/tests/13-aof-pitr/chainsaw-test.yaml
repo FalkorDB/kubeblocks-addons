@@ -1,0 +1,308 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aof-pitr
+spec:
+  description: >-
+    Exercise the `aof` backup method and restore the cluster to a point in time.
+
+    `aof` is the only Continuous backup method the addon ships. Unlike the Full
+    methods it never completes; it runs alongside the server shipping the append
+    only file, and its value is only realised when a restore asks for a moment
+    *between* two full backups. Nothing in the suite touched it, so neither the
+    log shipper nor the PITR replay in falkordb-for-pitr-v2 had ever run.
+
+    The assertion that matters is the negative one: writes made after the chosen
+    restore time must be absent from the restored cluster. A restore that simply
+    replays every log it can find looks perfectly healthy and silently ignores the
+    recovery target, which is the whole reason anyone reaches for PITR.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-pitr
+            tail: 100
+
+    - name: turn on continuous aof archiving
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The BackupPolicyTemplate ships every schedule disabled, so the
+              # generated BackupSchedule has to be switched on before any log is
+              # archived. Enabling the aof method is also what applies the
+              # reconfigure-ref from the template, which sets aof-disable-auto-gc
+              # and aof-timestamp-enabled; without those the server recycles the
+              # log files the restore needs and stamps no time into them.
+              schedule="$(kubectl get backupschedule -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-pitr" \
+                -o jsonpath='{.items[0].metadata.name}')"
+              if [ -z "$schedule" ]; then
+                echo "no BackupSchedule was generated for fdb-pitr" >&2
+                kubectl get backupschedule -n "$NAMESPACE" >&2
+                exit 1
+              fi
+              echo "enabling the aof method on BackupSchedule $schedule"
+
+              methods="$(kubectl get backupschedule -n "$NAMESPACE" "$schedule" \
+                -o jsonpath='{range .spec.schedules[*]}{.backupMethod}{"\n"}{end}')"
+              index=0
+              found=""
+              for method in $methods; do
+                if [ "$method" = "aof" ]; then
+                  found="$index"
+                  break
+                fi
+                index=$((index + 1))
+              done
+              if [ -z "$found" ]; then
+                echo "the schedule has no aof method: $methods" >&2
+                exit 1
+              fi
+
+              kubectl patch backupschedule -n "$NAMESPACE" "$schedule" --type=json \
+                -p "[{\"op\":\"replace\",\"path\":\"/spec/schedules/$found/enabled\",\"value\":true}]"
+      catch:
+        - events: {}
+
+    - name: the continuous backup starts archiving
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # A Continuous backup never reaches Completed. It goes Running and
+              # then keeps extending status.timeRange.end as it ships log, so the
+              # only meaningful readiness signal is a timeRange that exists.
+              fdb_retry "the continuous aof backup to report a time range" bash -c '
+                name=$(kubectl get backup -n "'"$NAMESPACE"'" \
+                  -l dataprotection.kubeblocks.io/backup-type=Continuous \
+                  -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)
+                [ -n "$name" ] || { echo "no continuous backup yet" >&2; exit 1; }
+                end=$(kubectl get backup -n "'"$NAMESPACE"'" "$name" \
+                  -o jsonpath="{.status.timeRange.end}" 2>/dev/null)
+                [ -n "$end" ] || { echo "$name has no timeRange.end yet" >&2; exit 1; }
+                echo "continuous backup $name is archiving up to $end"
+              '
+      catch:
+        - events: {}
+        - script:
+            content: kubectl get backup -n "$NAMESPACE" -o wide
+
+    - name: seed the baseline data and take the full backup
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-pitr falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-pitr falkordb)"
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-pitr-base 100
+              fdb_cli "$NAMESPACE" "$primary" SAVE >/dev/null
+        - apply:
+            file: full-backup.yaml
+        - assert:
+            file: assert-full-backup-completed.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: dataprotection.kubeblocks.io/v1alpha1
+            kind: Backup
+            name: fdb-pitr-full
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-pitr
+            tail: 200
+
+    - name: write before and after a recovery target
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-pitr falkordb)"
+              state="$(fdb_state_dir)"
+
+              # These writes land after the full backup, so only the archived log
+              # can carry them into a restore.
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-pitr-early 50
+
+              # The recovery target is read from inside the pod rather than from
+              # the machine running chainsaw. The restore time is compared against
+              # timestamps the server wrote into the log, and a few seconds of
+              # clock skew between a laptop and the cluster nodes is enough to
+              # push the target outside the archived range.
+              sleep 15
+              target="$(kubectl exec -n "$NAMESPACE" "$primary" -c falkordb -- \
+                date -u +%Y-%m-%dT%H:%M:%SZ | tr -d '\r')"
+              echo "$target" > "$state/restore-time"
+              echo "recovery target is $target"
+              sleep 15
+
+              # Everything from here on must NOT come back.
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-pitr-late 50
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-pitr-late 50
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-pitr
+            tail: 100
+
+    - name: the archive catches up past the recovery target
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              target="$(cat "$state/restore-time")"
+
+              # KubeBlocks refuses a restoreTime that is not inside the continuous
+              # backup's window, so the archive has to have shipped past the target
+              # before the restore is attempted.
+              fdb_retry "the archive to cover $target" bash -c '
+                name=$(kubectl get backup -n "'"$NAMESPACE"'" \
+                  -l dataprotection.kubeblocks.io/backup-type=Continuous \
+                  -o jsonpath="{.items[0].metadata.name}")
+                end=$(kubectl get backup -n "'"$NAMESPACE"'" "$name" \
+                  -o jsonpath="{.status.timeRange.end}")
+                [ -n "$end" ] || { echo "no timeRange.end yet" >&2; exit 1; }
+                # RFC3339 in UTC sorts lexicographically, so string comparison is
+                # a correct ordering here and needs no date parsing.
+                if [ "$end" \< "'"$target"'" ]; then
+                  echo "archive only reaches $end, target is '"$target"'" >&2
+                  exit 1
+                fi
+                echo "archive reaches $end, past the target"
+              '
+      catch:
+        - events: {}
+        - script:
+            content: kubectl get backup -n "$NAMESPACE" -o wide
+
+    - name: restore to the recovery target
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              target="$(cat "$state/restore-time")"
+
+              # PITR is driven by naming the *Continuous* backup, not the full
+              # one. KubeBlocks decides what to do from the referenced backup's
+              # type: a Full backup is restored verbatim and restoreTime is
+              # ignored, whereas a Continuous backup makes it locate the base
+              # full backup for that instant and then replay the archived log
+              # on top of it. Pointing at fdb-pitr-full here silently produces
+              # an ordinary full restore that loses every write made after the
+              # backup was taken.
+              continuous="$(kubectl get backup -n "$NAMESPACE" \
+                -l dataprotection.kubeblocks.io/backup-type=Continuous \
+                -o jsonpath='{.items[0].metadata.name}')"
+              if [ -z "$continuous" ]; then
+                echo "no continuous backup to restore from" >&2
+                exit 1
+              fi
+              echo "restoring from continuous backup $continuous to $target"
+
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: apps.kubeblocks.io/v1
+              kind: Cluster
+              metadata:
+                name: fdb-pitr-r
+                annotations:
+                  kubeblocks.io/restore-from-backup: '{"falkordb":{"name":"$continuous","namespace":"$NAMESPACE","volumeRestorePolicy":"Parallel","restoreTime":"$target"}}'
+              spec:
+                terminationPolicy: WipeOut
+                clusterDef: falkordb
+                topology: replication
+                componentSpecs:
+                  - name: falkordb
+                    disableExporter: true
+                    replicas: 2
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 512Mi
+                      requests:
+                        cpu: '0.2'
+                        memory: 512Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+                  - name: falkordb-sent
+                    replicas: 3
+                    resources:
+                      limits:
+                        cpu: '0.5'
+                        memory: 256Mi
+                      requests:
+                        cpu: '0.1'
+                        memory: 256Mi
+                    volumeClaimTemplates:
+                      - name: data
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 1Gi
+              EOF
+        - assert:
+            file: assert-restored-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-pitr-r
+            tail: 200
+
+    - name: the restored cluster stops exactly at the recovery target
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the restored cluster to elect a primary" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-pitr-r falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-pitr-r falkordb)"
+
+              # Everything written before the target has to be there: the base
+              # data came from the full backup, the early keys only exist in the
+              # archived log, so their presence is what proves the log was
+              # replayed at all rather than the full backup simply restored.
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-pitr-base 100
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-pitr-early 50
+
+              # And nothing written after it may be: this is the assertion that
+              # separates a real PITR from a restore that replays the whole log.
+              late="$(fdb_cli "$NAMESPACE" "$primary" EXISTS e2e-pitr-late:0 | tr -d '\r')"
+              if [ "$late" != "0" ]; then
+                echo "e2e-pitr-late:0 survived a restore to $(cat "$(fdb_state_dir)/restore-time")" >&2
+                echo "the recovery target was ignored and the archive was replayed to its end" >&2
+                exit 1
+              fi
+              echo "writes made after the recovery target are correctly absent"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-pitr-r
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

@@ -291,6 +291,9 @@ recover_redis_priorities() {
 
   echo "Recovering all FalkorDB replica-priority..."
   for redis_pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
+    # a pod whose original priority was never recorded (e.g. it was unreachable when
+    # the priorities were captured) would otherwise be sent an empty value.
+    [ -z "${ORIGINAL_PRIORITIES[$redis_pod_fqdn]+x}" ] && continue
     local redis_set_recover_cmd="CONFIG SET replica-priority ${ORIGINAL_PRIORITIES[$redis_pod_fqdn]}"
     call_func_with_retry 3 5 execute_sub_command "$redis_pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "$redis_set_recover_cmd" || return 1
   done
@@ -317,19 +320,36 @@ switchover_with_candidate() {
 
   # set target candidate highest priority to make sure it will be promoted to master
   unset_xtrace_when_ut_mode_false
-  set_redis_priorities "$KB_SWITCHOVER_CANDIDATE_FQDN" || return 1
+  local set_rc=0
+  set_redis_priorities "$KB_SWITCHOVER_CANDIDATE_FQDN" || set_rc=$?
 
-  # do switchover
-  execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME" || return 1
+  local switchover_rc=0
+  if [ $set_rc -eq 0 ]; then
+    execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME" || switchover_rc=$?
+    if [ $switchover_rc -eq 0 ]; then
+      check_switchover_result "$KB_SWITCHOVER_CANDIDATE_FQDN" "" || switchover_rc=$?
+    fi
+  fi
 
-  # check switchover result
-  check_switchover_result "$KB_SWITCHOVER_CANDIDATE_FQDN" "" || return 1
-
-  # recover all redis replica-priority
-  echo "Recovering all FalkorDB replica-priority..."
-  recover_redis_priorities || return 1
-
+  # recover all replica-priority regardless of the set/switchover result, otherwise
+  # a failed switchover leaves the temporary priorities in place and permanently
+  # changes which replica sentinel promotes next.
+  local recover_rc=0
+  recover_redis_priorities || recover_rc=$?
   set_xtrace_when_ut_mode_false
+
+  if [ $set_rc -ne 0 ]; then
+    echo "Priority setting failed, attempted recovery" >&2
+    return 1
+  fi
+  if [ $switchover_rc -ne 0 ]; then
+    echo "Switchover failed" >&2
+    return 1
+  fi
+  if [ $recover_rc -ne 0 ]; then
+    echo "Switchover succeeded but priority recovery failed" >&2
+    return 1
+  fi
   echo "All FalkorDB config set replica-priority recovered."
 }
 

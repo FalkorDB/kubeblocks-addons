@@ -256,6 +256,28 @@ find_exist_available_node() {
   echo ""
 }
 
+# fix_unstable_cluster_and_defer verifies the cluster is stable before a shard
+# topology change. When it is not, it attempts a `--cluster fix` and always
+# returns a non-zero status so the caller defers the current lifecycle action:
+# the repair is asynchronous, so the next retry is the one that should observe
+# the fixed state.
+fix_unstable_cluster_and_defer() {
+  local node_with_port="$1"
+  local node_port
+  node_port=$(echo "$node_with_port" | cut -d':' -f2)
+  if check_slots_covered "$node_with_port" "$node_port"; then
+    return 0
+  fi
+
+  echo "FalkorDB Cluster is not stable; run cluster fix and defer lifecycle action for retry." >&2
+  if fix_cluster_slots "$node_with_port" "$node_port"; then
+    echo "FalkorDB Cluster fix completed; defer current lifecycle action so the next retry observes the fixed state." >&2
+  else
+    echo "FalkorDB Cluster fix failed; defer current lifecycle action for operator-visible retry." >&2
+  fi
+  return 1
+}
+
 extract_pod_name_prefix() {
   local pod_name="$1"
   # shellcheck disable=SC2001
@@ -1036,6 +1058,11 @@ scale_out_redis_cluster_shard() {
     return 1
   fi
 
+  # never reshard onto an unstable cluster: repair it first and let the next retry proceed
+  if [ ${#other_undeleted_component_nodes[@]} -gt 0 ]; then
+    fix_unstable_cluster_and_defer "${other_undeleted_component_nodes[0]}" || return 1
+  fi
+
   # check the current component shard whether is already scaled out
   if [ ${#scale_out_shard_default_primary_node[@]} -eq 0 ]; then
     echo "Failed to generate primary nodes when scaling out" >&2
@@ -1104,12 +1131,31 @@ scale_out_redis_cluster_shard() {
   local all_comp_pod_count
   local shard_count
   local slots_per_shard
+  local current_slots
+  local remaining_slots
   total_slots=16384
   current_comp_pod_count=$(echo "$CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE" | tr ',' '\n' | grep -c "^$CURRENT_SHARD_COMPONENT_NAME-")
   all_comp_pod_count=$(echo "$ALL_SHARDS_POD_NAME_LIST_COMBINED" | tr ',' '\n' | grep -c ".*")
   shard_count=$((all_comp_pod_count / current_comp_pod_count))
   slots_per_shard=$((total_slots / shard_count))
-  if scale_out_shard_reshard "$primary_node_with_port" "$mapping_primary_cluster_id" "$slots_per_shard"; then
+  # only move the slots this shard is still missing, otherwise a retry after a
+  # partially completed reshard would move a second full share of slots
+  current_slots=$(count_node_slots "$primary_node_fqdn" "$primary_node_port" "$mapping_primary_cluster_id")
+  status=$?
+  if [ $status -ne 0 ]; then
+    echo "Failed to count current shard primary slots before scale out reshard" >&2
+    return 1
+  fi
+  remaining_slots=$((slots_per_shard - current_slots))
+  if [ "$remaining_slots" -le 0 ]; then
+    if check_slots_covered "$primary_node_with_port" "$SERVICE_PORT"; then
+      echo "FalkorDB cluster scale out shard already owns $current_slots slots and cluster is stable"
+      return 0
+    fi
+    fix_unstable_cluster_and_defer "$primary_node_with_port" || return 1
+  fi
+
+  if scale_out_shard_reshard "$primary_node_with_port" "$mapping_primary_cluster_id" "$remaining_slots"; then
     echo "FalkorDB cluster scale out shard reshard successfully"
   else
     echo "Failed to scale out shard reshard" >&2
@@ -1187,7 +1233,15 @@ scale_in_redis_cluster_shard() {
 
   # init information for the other components and pods
   init_other_components_and_pods_info "$CURRENT_SHARD_COMPONENT_SHORT_NAME" "$ALL_SHARDS_POD_FQDN_LIST_COMBINED" "$ALL_SHARDS_COMPONENT_LIST" "$ALL_SHARDS_DELETING_COMPONENT_LIST" "$ALL_SHARDS_UNDELETED_COMPONENT_LIST"
+  # never rebalance away from an unstable cluster: repair it first and let the next retry proceed
+  if [ ${#other_undeleted_component_nodes[@]} -gt 0 ]; then
+    fix_unstable_cluster_and_defer "${other_undeleted_component_nodes[0]}" || return 1
+  fi
   available_node=$(find_exist_available_node)
+  if is_empty "$available_node"; then
+    echo "No stable available FalkorDB Cluster node found before scaling in shard" >&2
+    return 1
+  fi
   available_node_fqdn=$(echo "$available_node" | awk -F ':' '{print $1}')
   available_node_port=$(echo "$available_node" | awk -F ':' '{print $2}')
   get_current_comp_nodes_for_scale_in "$available_node_fqdn" "$available_node_port"

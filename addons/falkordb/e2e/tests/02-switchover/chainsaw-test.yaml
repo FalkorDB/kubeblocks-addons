@@ -1,0 +1,142 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: switchover
+spec:
+  description: >-
+    Promote the replica to primary with a Switchover OpsRequest and prove the roles
+    really swapped, no data was lost, the read-write Service was moved onto the new
+    primary, and the temporary replica-priority values the switchover script sets
+    were restored afterwards.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-switch
+            tail: 100
+
+    - name: record the starting topology and seed data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              fdb_retry "a primary to be elected" \
+                fdb_primary "$NAMESPACE" fdb-switch falkordb >/dev/null
+              primary="$(fdb_primary "$NAMESPACE" fdb-switch falkordb)"
+              candidate="$(fdb_pods_with_role "$NAMESPACE" fdb-switch falkordb secondary)"
+
+              [ -n "$candidate" ] || { echo "no secondary to promote" >&2; exit 1; }
+              echo "$primary" > "$state/primary"
+              echo "$candidate" > "$state/candidate"
+              echo "primary=$primary candidate=$candidate"
+
+              fdb_retry "the replication link on $candidate" \
+                fdb_assert_replication_up "$NAMESPACE" "$candidate"
+
+              # Record where clients are being sent before the switchover, so
+              # the check afterwards compares against a known-good state.
+              fdb_retry "the primary service to route to $primary" \
+                fdb_assert_service_primary "$NAMESPACE" fdb-switch falkordb "$primary"
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-switchover 20
+              fdb_retry "replicated data on $candidate" \
+                fdb_verify_keys "$NAMESPACE" "$candidate" e2e-switchover 20
+
+    - name: switch over to the recorded candidate
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              primary="$(cat "$state/primary")"
+              candidate="$(cat "$state/candidate")"
+
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: operations.kubeblocks.io/v1alpha1
+              kind: OpsRequest
+              metadata:
+                name: fdb-switchover
+              spec:
+                clusterName: fdb-switch
+                type: Switchover
+                switchover:
+                  - componentName: falkordb
+                    instanceName: $primary
+                    candidateName: $candidate
+              EOF
+        - assert:
+            file: assert-switchover-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-switchover
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-switch
+            tail: 100
+
+    - name: the roles really swapped and no data was lost
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              old_primary="$(cat "$state/primary")"
+              candidate="$(cat "$state/candidate")"
+
+              # KubeBlocks relabels pods from the roleProbe, so allow it to catch up.
+              fdb_retry "$candidate to be labelled primary" \
+                fdb_pod_has_role "$NAMESPACE" "$candidate" primary
+              fdb_retry "$old_primary to be labelled secondary" \
+                fdb_pod_has_role "$NAMESPACE" "$old_primary" secondary
+
+              # ...and the servers themselves must agree with the labels.
+              fdb_retry "$candidate to report master" \
+                fdb_assert_role "$NAMESPACE" "$candidate" master
+              fdb_retry "$old_primary to report slave" \
+                fdb_assert_role "$NAMESPACE" "$old_primary" slave
+              fdb_retry "the replication link on $old_primary" \
+                fdb_assert_replication_up "$NAMESPACE" "$old_primary"
+
+              fdb_verify_keys "$NAMESPACE" "$candidate" e2e-switchover 20
+              fdb_verify_keys "$NAMESPACE" "$old_primary" e2e-switchover 20
+
+              # An orchestrated switchover is meant to be a controlled handover,
+              # so the Service has to end up on the new primary. If it does not,
+              # clients keep writing to the demoted pod and get READONLY.
+              fdb_retry "the primary service to follow the switchover to $candidate" \
+                fdb_assert_service_primary "$NAMESPACE" fdb-switch falkordb "$candidate"
+
+    - name: replica-priority was restored on every pod
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The switchover script temporarily rewrites replica-priority to steer
+              # sentinel's election and must put the original values back. If it does
+              # not, the next unplanned failover picks the wrong replica -- a failure
+              # no unit test can observe.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-switch falkordb); do
+                priority="$(fdb_cli "$NAMESPACE" "$pod" CONFIG GET replica-priority |
+                  tr -d '\r' | tail -1)"
+                if [ "$priority" != "100" ]; then
+                  echo "$pod has replica-priority '$priority', expected the default 100" >&2
+                  exit 1
+                fi
+                echo "$pod replica-priority is back to 100"
+              done
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

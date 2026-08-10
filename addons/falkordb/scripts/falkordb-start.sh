@@ -62,11 +62,15 @@ extract_lb_host_by_svc_name() {
 
 get_announce_hostname_override_or_default() {
   local default_value="$1"
-  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
-    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
+  local pod_name="$2"
+  if is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "$default_value"
     return
   fi
-  echo "$default_value"
+  # Each pod has to announce a name of its own, so the override is a template
+  # rather than a literal. $(POD_NAME) survives as-is until here because no
+  # container declares POD_NAME, and the kubelet leaves unknown references alone.
+  echo "${ANNOUNCE_HOSTNAME_OVERRIDE//\$(POD_NAME)/$pod_name}"
 }
 
 build_redis_default_accounts() {
@@ -131,7 +135,7 @@ build_announce_ip_and_port() {
     announce_host_value="$current_pod_fqdn"
   fi
 
-  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value")
+  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value" "$CURRENT_POD_NAME")
   if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
     echo "announce hostname override is set, using $announce_host_value for replica announce"
   fi
@@ -149,6 +153,20 @@ build_redis_service_port() {
     echo "tls-port $service_port" >> $redis_real_conf
   else
     echo "port $service_port" >> $redis_real_conf
+  fi
+}
+
+build_redis_tls_config() {
+  if [ "$TLS_ENABLED" == "true" ]; then
+    TLS_MOUNT_PATH=${TLS_MOUNT_PATH:-/etc/pki/tls}
+    {
+      echo "tls-cert-file $TLS_MOUNT_PATH/tls.crt"
+      echo "tls-key-file $TLS_MOUNT_PATH/tls.key"
+      echo "tls-ca-cert-file $TLS_MOUNT_PATH/ca.crt"
+      echo "tls-auth-clients no"
+      echo "tls-replication yes"
+      echo "port 0"
+    } >> $redis_real_conf
   fi
 }
 
@@ -311,6 +329,18 @@ check_current_pod_is_primary() {
     return 0
   fi
 
+  # When an announce hostname override is in use, the primary is registered with
+  # sentinel under that name, which shares nothing with the in-cluster fqdn the
+  # check above looks for. Without this the primary fails to recognise itself and
+  # makes itself a replica of its own address.
+  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    current_pod_announce_hostname=$(get_announce_hostname_override_or_default "" "$CURRENT_POD_NAME")
+    if equals "$primary" "$current_pod_announce_hostname"; then
+      echo "current pod is primary with announce hostname mapping, primary node: $primary"
+      return 0
+    fi
+  fi
+
   if ! is_empty "$redis_announce_host_value" && ! is_empty "$redis_announce_port_value"; then
     if equals "$primary" "$redis_announce_host_value" && equals "$primary_port" "$redis_announce_port_value"; then
       echo "current pod is primary with advertised svc mapping, primary: $primary, primary port: $primary_port, advertised ip:$redis_announce_host_value, advertised port:$redis_announce_port_value"
@@ -401,6 +431,7 @@ build_redis_conf() {
   load_redis_template_conf
   build_announce_ip_and_port
   build_redis_service_port
+  build_redis_tls_config
   build_replicaof_config
   rebuild_redis_acl_file
   build_redis_default_accounts

@@ -1,0 +1,201 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: metrics-exporter
+spec:
+  description: >-
+    Scrape the bundled redis_exporter and prove it is actually connected to the
+    server, with TLS off and then on.
+
+    Every other scenario in the suite sets `disableExporter: true`, so the
+    metrics container had never even been rendered. That matters twice over: the
+    exporter is the addon's entire observability story, and bug #33 showed that
+    whether the container exists at all changes how KubeBlocks resolves ops
+    targets.
+
+    The assertion that matters is `redis_up 1`, not the presence of an endpoint.
+    A misconfigured exporter still serves /metrics perfectly happily - it just
+    reports every server as down and emits none of the real metrics. Dashboards
+    built on it then show empty panels rather than an error, which is why this
+    kind of breakage survives for a long time.
+
+    The TLS half is the sharp end. With TLS enabled the exporter's address comes
+    from a `spec.vars` expression rather than the plain default, and that
+    expression is a separate, far less travelled branch.
+  steps:
+    - name: create the cluster with the exporter enabled
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-metrics
+            tail: 200
+
+    - name: the metrics container is rendered and the server holds data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # disableExporter: false has to actually produce the container. If
+              # the chart's enableMetrics gate and the cluster field disagree the
+              # cluster still goes Running with no exporter at all.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-metrics falkordb); do
+                containers="$(kubectl get pod -n "$NAMESPACE" "$pod" \
+                  -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}')"
+                case "$containers" in
+                  *metrics*) fdb_log "$pod runs the metrics container" ;;
+                  *)
+                    fdb_fail "$pod has no metrics container, only: $(echo "$containers" | tr '\n' ' ')"
+                    exit 1
+                    ;;
+                esac
+              done
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-metrics falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-metrics falkordb)"
+
+              # Give the exporter something to report beyond an empty keyspace,
+              # including a graph so the FalkorDB-specific collectors have work.
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-metrics 100
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-metrics-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-metrics
+            tail: 200
+
+    - name: the exporter reports the server as up
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The exporter image is distroless, so the scrape is done from the
+              # falkordb container, which shares the pod's network namespace.
+              # bash's /dev/tcp avoids depending on curl or wget being present.
+              scrape() {
+                kubectl exec -n "$NAMESPACE" "$1" -c falkordb -- bash -c '
+                  exec 3<>/dev/tcp/127.0.0.1/9121 || exit 1
+                  printf "GET /metrics HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3
+                  cat <&3
+                ' 2>&1 | tr -d '\r'
+              }
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-metrics falkordb); do
+                fdb_retry "$pod to report redis_up 1" bash -c '
+                  body="$(kubectl exec -n "'"$NAMESPACE"'" "'"$pod"'" -c falkordb -- bash -c "
+                    exec 3<>/dev/tcp/127.0.0.1/9121 || exit 1
+                    printf \"GET /metrics HTTP/1.0\r\nHost: localhost\r\n\r\n\" >&3
+                    cat <&3
+                  " 2>&1 | tr -d "\r")"
+                  case "$body" in
+                    *"redis_up 1"*) echo "'"$pod"' reports redis_up 1" ;;
+                    *"redis_up 0"*)
+                      echo "'"$pod"' reports redis_up 0 - the exporter cannot reach the server" >&2
+                      exit 1
+                      ;;
+                    *)
+                      echo "'"$pod"' served no redis_up metric at all" >&2
+                      exit 1
+                      ;;
+                  esac
+                '
+
+                # redis_up alone can be true while the exporter is authenticated
+                # as a user with no permissions, so check a metric that requires
+                # a successful INFO.
+                body="$(scrape "$pod")"
+                case "$body" in
+                  *redis_commands_processed_total*)
+                    fdb_log "$pod exposes server metrics"
+                    ;;
+                  *)
+                    fdb_fail "$pod exposes redis_up but no server metrics"
+                    exit 1
+                    ;;
+                esac
+
+                # FalkorDB-specific collectors are switched on in the cmpd; report
+                # rather than fail, since the metric names track the exporter.
+                case "$body" in
+                  *graph*) fdb_log "$pod exposes FalkorDB graph metrics" ;;
+                  *) fdb_log "$pod exposes no graph metric (REDIS_EXPORTER_IS_FALKORDB may be ineffective)" ;;
+                esac
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-metrics
+            tail: 200
+
+    - name: create a TLS cluster with the exporter enabled
+      try:
+        - apply:
+            file: cluster-tls.yaml
+        - assert:
+            file: assert-tls-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-metrics-tls
+            tail: 200
+
+    - name: the exporter reports the server as up over TLS
+      try:
+        - script:
+            env:
+              - name: FDB_CLI_FLAGS
+                value: "--tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the TLS roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-metrics-tls falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-metrics-tls falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-metrics-tls 100
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-metrics-tls falkordb); do
+                # The exporter is given a rediss:// URL built by a spec.vars
+                # expression. If that URL is malformed the exporter starts, serves
+                # /metrics and reports redis_up 0 forever without complaining.
+                fdb_retry "$pod to report redis_up 1 over TLS" bash -c '
+                  body="$(kubectl exec -n "'"$NAMESPACE"'" "'"$pod"'" -c falkordb -- bash -c "
+                    exec 3<>/dev/tcp/127.0.0.1/9121 || exit 1
+                    printf \"GET /metrics HTTP/1.0\r\nHost: localhost\r\n\r\n\" >&3
+                    cat <&3
+                  " 2>&1 | tr -d "\r")"
+                  case "$body" in
+                    *"redis_up 1"*) echo "'"$pod"' reports redis_up 1 over TLS" ;;
+                    *"redis_up 0"*)
+                      echo "'"$pod"' reports redis_up 0 - the rediss:// address is wrong" >&2
+                      exit 1
+                      ;;
+                    *)
+                      echo "'"$pod"' served no redis_up metric at all" >&2
+                      exit 1
+                      ;;
+                  esac
+                '
+              done
+      catch:
+        - events: {}
+        - script:
+            content: |
+              for pod in $(kubectl get pods -n "$NAMESPACE" \
+                -l app.kubernetes.io/instance=fdb-metrics-tls \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                echo "=== $pod REDIS_METRICS_ADDR ==="
+                kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath='{range .spec.containers[*]}{.name}{"\t"}{range .env[?(@.name=="REDIS_ADDR")]}{.value}{end}{"\n"}{end}' || true
+                kubectl logs -n "$NAMESPACE" "$pod" -c metrics --tail=50 || true
+              done
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

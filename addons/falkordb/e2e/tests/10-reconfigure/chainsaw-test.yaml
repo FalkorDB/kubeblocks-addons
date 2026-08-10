@@ -1,0 +1,132 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reconfigure
+spec:
+  description: >-
+    Changing a server parameter through a Reconfiguring OpsRequest. The reload
+    action applies the value with CONFIG SET on every pod, so the OpsRequest can
+    report Succeed while the change only ever lived in memory: the risk is that
+    the value silently reverts the next time the servers restart, or that it was
+    applied to the primary and quietly skipped on the replica. This restarts the
+    component afterwards to prove the new value was rendered into the config the
+    servers actually boot from.
+  steps:
+    - name: create the cluster and record the starting value
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-config falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-config falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-config 50
+
+              # If the cluster already booted with the value under test the whole
+              # scenario proves nothing, so refuse to run rather than pass falsely.
+              current="$(fdb_config_get "$NAMESPACE" "$primary" maxmemory-policy)"
+              echo "maxmemory-policy starts as '$current'"
+              [ "$current" != "allkeys-lru" ] || {
+                echo "the cluster already uses allkeys-lru, pick another value" >&2
+                exit 1; }
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-config
+            tail: 100
+
+    - name: reconfigure maxmemory-policy
+      try:
+        - apply:
+            file: reconfigure.yaml
+        - assert:
+            file: assert-reconfigure-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-config-reconfigure
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-config
+            tail: 200
+
+    - name: every server took the new value
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # targetPodSelector is All, so a reload that only reached the primary
+              # is a real failure mode and not just a timing artefact.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-config falkordb); do
+                fdb_retry "maxmemory-policy on $pod" \
+                  fdb_assert_config "$NAMESPACE" "$pod" maxmemory-policy allkeys-lru
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-config
+            tail: 200
+
+    - name: restart the component
+      try:
+        # KubeBlocks rejects a Restart while the cluster is still Updating from
+        # the reconfigure above, so settle first rather than racing it.
+        - assert:
+            file: assert-running.yaml
+        - apply:
+            file: restart.yaml
+        - assert:
+            file: assert-restart-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-config-restart
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-config
+            tail: 200
+
+    - name: the value survived the restart and so did the cluster
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # A CONFIG SET that never reached the rendered config comes back as
+              # the default here, which is exactly the silent regression this step
+              # exists to catch.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-config falkordb); do
+                fdb_retry "maxmemory-policy to still be set on $pod" \
+                  fdb_assert_config "$NAMESPACE" "$pod" maxmemory-policy allkeys-lru
+              done
+
+              # A restart tears down both servers, so the roles have to re-converge
+              # on a single primary rather than leaving two or none behind.
+              fdb_retry "the roles to reconverge after the restart" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-config falkordb 1 1
+              fdb_retry "the replica to link up again" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-config falkordb
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-config falkordb)"
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-config 50
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-config-after 20
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-config falkordb secondary)"
+              fdb_retry "new writes to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-config-after 20
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-config
+            tail: 200

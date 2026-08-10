@@ -1,0 +1,90 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: falkordb-alert-rules
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: FalkorDBExporter
+      rules:
+        - alert: FalkorDBDown
+          expr: "redis_up == 0"
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "FalkorDB is down"
+            description: "FalkorDB is down. (instance: {{ $labels.pod }})"
+
+        - alert: FalkorDBCPUHigh
+          expr: "(rate(redis_cpu_sys_seconds_total[1m]) + rate(redis_cpu_user_seconds_total[1m])) * 100 > 80"
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Out of CPU (> 80%)"
+            description: 'FalkorDB is running out of CPU and the value is {{ $value | printf "%.2f" }} percent. (instance: {{ $labels.pod }})'
+
+        - alert: FalkorDBMemoryHigh
+          expr: "(redis_memory_max_bytes == 0 or redis_memory_used_bytes * 100 / redis_memory_max_bytes) > 90"
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Out of memory (> 90%)"
+            description: 'FalkorDB is running out of memory and the value is {{ $value | printf "%.2f" }} percent. (instance: {{ $labels.pod }})'
+
+        - alert: FalkorDBTooManyConnections
+          expr: "redis_connected_clients * 100 / redis_config_maxclients > 80"
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "FalkorDB has too many connections (> 80%)"
+            description: 'FalkorDB has too many connections and the value is {{ $value | printf "%.2f" }} percent. (instance: {{ $labels.pod }})'
+
+        - alert: FalkorDBRejectedConnections
+          expr: "increase(redis_rejected_connections_total[1m]) > 0"
+          for: 5m
+          labels:
+            severity: error
+          annotations:
+            summary: "FalkorDB has rejected connections"
+            description: '{{ $value | printf "%.2f" }} connections to FalkorDB has been rejected. (instance: {{ $labels.pod }})'
+
+        - alert: FalkorDBKeyEviction
+          expr: "increase(redis_evicted_keys_total[5m]) > 0"
+          for: 1s
+          labels:
+            severity: error
+          annotations:
+            summary: "FalkorDB has evicted keys"
+            description: 'FalkorDB has evicted keys in the last 5 minutes and the value is {{ $value | printf "%.2f" }}. (instance: {{ $labels.pod }})'
+
+        - alert: FalkorDBMissingMaster
+          expr: 'count by (app_kubernetes_io_instance) (redis_instance_info{role="master"}) < 1'
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: "FalkorDB missing master"
+            description: "FalkorDB cluster has no node marked as master."
+
+        - alert: FalkorDBDisconnectedSlaves
+          expr: "count without (instance, job) (redis_connected_slaves) - sum without (instance, job) (redis_connected_slaves) - 1 > 1"
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "FalkorDB disconnected slaves"
+            description: "FalkorDB not replicating for all slaves. Consider reviewing the FalkorDB replication status. (instance: {{ $labels.pod }})"
+
+        - alert: FalkorDBReplicationBroken
+          expr: "delta(redis_connected_slaves[1m]) < 0"
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "FalkorDB replication broken"
+            description: "FalkorDB instance lost a slave. (instance: {{ $labels.pod }})"

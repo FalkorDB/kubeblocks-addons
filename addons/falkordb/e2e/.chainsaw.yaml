@@ -1,0 +1,28 @@
+apiVersion: chainsaw.kyverno.io/v1alpha2
+kind: Configuration
+metadata:
+  name: falkordb-e2e
+spec:
+  # Provisioning a KubeBlocks cluster involves pulling images, running the
+  # postProvision hooks and waiting for sentinel/cluster convergence, so the
+  # assert budget has to be generous compared to a typical operator test.
+  timeouts:
+    apply: 2m
+    assert: 20m
+    cleanup: 10m
+    delete: 10m
+    error: 2m
+    exec: 20m
+  execution:
+    # The scenarios each provision a full FalkorDB cluster, so the limit here is
+    # the sum of the pod *requests* rather than actual usage. A replication
+    # scenario asks for ~1.6 CPU / 1.75Gi and a sharding one for ~1.5 CPU /
+    # 1.5Gi, so four fit comfortably on the 14 CPU / 11.7Gi k3d node that
+    # `make e2e-up` creates. Override per-run with `chainsaw test --parallel N`
+    # (or `make e2e E2E_PARALLEL=N`), and lower it on a smaller node: the
+    # timeouts below are wall-clock, so a starved scenario fails rather than
+    # merely running slow.
+    parallel: 4
+    failFast: false
+  discovery:
+    testFile: chainsaw-test.yaml

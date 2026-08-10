@@ -3,6 +3,16 @@
   {{- include "falkordb-cluster.clusterCommon" . }}
   clusterDef: falkordb
   topology: {{ .Values.mode }}
+  services:
+  - componentSelector: shard
+    name: secondary
+    serviceName: shard-secondary
+    roleSelector: secondary
+    spec:
+      ports:
+        - name: falkordb-cluster
+          port: 6379
+          targetPort: cluster
   shardings:
   {{- include "falkordb-cluster.shardingSpec" . | indent 2 }}
 {{- else }}

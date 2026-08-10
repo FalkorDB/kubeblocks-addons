@@ -588,7 +588,7 @@ build_announce_ip_and_port() {
     announce_host_value="$current_pod_fqdn"
   fi
 
-  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value")
+  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value" "$CURRENT_POD_NAME")
   if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
     echo "announce hostname override is set, using $announce_host_value for replica announce"
   fi
@@ -603,25 +603,26 @@ build_announce_ip_and_port() {
 
 get_target_pod_cluster_announce_hostname() {
   local target_pod_fqdn="$1"
-  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
-    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
-    return
-  fi
-  echo "$target_pod_fqdn"
+  local target_pod_name="$2"
+  get_announce_hostname_override_or_default "$target_pod_fqdn" "$target_pod_name"
 }
 
 get_announce_hostname_override_or_default() {
   local default_value="$1"
-  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
-    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
+  local pod_name="$2"
+  if is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "$default_value"
     return
   fi
-  echo "$default_value"
+  # Redis Cluster identifies nodes by endpoint, so every node needs a hostname of
+  # its own and the override has to be a template. $(POD_NAME) reaches the script
+  # unexpanded because no container declares POD_NAME.
+  echo "${ANNOUNCE_HOSTNAME_OVERRIDE//\$(POD_NAME)/$pod_name}"
 }
 
 build_cluster_announce_info() {
   current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$CURRENT_SHARD_POD_FQDN_LIST" "$CURRENT_POD_NAME")
-  cluster_announce_hostname_value=$(get_target_pod_cluster_announce_hostname "$current_pod_fqdn")
+  cluster_announce_hostname_value=$(get_target_pod_cluster_announce_hostname "$current_pod_fqdn" "$CURRENT_POD_NAME")
   if is_empty "$current_pod_fqdn"; then
     echo "Error: Failed to get current pod: $CURRENT_POD_NAME fqdn from current shard pod fqdn list: $CURRENT_SHARD_POD_FQDN_LIST. Exiting."
     exit 1
@@ -674,6 +675,21 @@ build_redis_cluster_service_port() {
     echo "port $service_port" >> $redis_real_conf
   fi
   echo "cluster-port $cluster_bus_port" >> $redis_real_conf
+}
+
+build_redis_tls_config() {
+  if [ "$TLS_ENABLED" == "true" ]; then
+    TLS_MOUNT_PATH=${TLS_MOUNT_PATH:-/etc/pki/tls}
+    {
+      echo "tls-cert-file $TLS_MOUNT_PATH/tls.crt"
+      echo "tls-key-file $TLS_MOUNT_PATH/tls.key"
+      echo "tls-ca-cert-file $TLS_MOUNT_PATH/ca.crt"
+      echo "tls-auth-clients no"
+      echo "tls-replication yes"
+      echo "tls-cluster yes"
+      echo "port 0"
+    } >> $redis_real_conf
+  fi
 }
 
 parse_redis_cluster_shard_announce_addr() {
@@ -745,6 +761,7 @@ start_redis_server() {
 build_redis_conf() {
   load_redis_template_conf
   build_redis_cluster_service_port
+  build_redis_tls_config
   build_announce_ip_and_port
   build_cluster_announce_info
   rebuild_redis_acl_file

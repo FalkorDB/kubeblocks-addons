@@ -180,6 +180,18 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for replica announce"
     End
 
+    It "expands \$(POD_NAME) in the override so each replica announces its own name"
+      unset redis_announce_host_value
+      unset redis_announce_port_value
+      export CURRENT_POD_NAME="redis-redis-1"
+      export REDIS_POD_FQDN_LIST="redis-redis-0.redis-redis.default.svc.cluster.local,redis-redis-1.redis-redis.default.svc.cluster.local"
+      export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).redis.example.com'
+      When call build_announce_ip_and_port
+      The contents of file "$redis_real_conf" should include "replica-announce-ip redis-redis-1.redis.example.com"
+      The contents of file "$redis_real_conf" should not include 'POD_NAME'
+      The stdout should include "announce hostname override is set, using redis-redis-1.redis.example.com for replica announce"
+    End
+
     It "exits with error when failed to get current pod fqdn"
       unset redis_announce_host_value
       unset redis_announce_port_value
@@ -192,16 +204,58 @@ Describe "FalkorDB Start Bash Script Tests"
   End
 
   Describe "build_redis_service_port()"
+    # `service_port` is resolved from SERVICE_PORT once, when the script is
+    # sourced, so the test has to override the resolved variable itself.
+    reset_service_port() {
+      service_port=${SERVICE_PORT:-6379}
+    }
+    AfterEach 'reset_service_port'
+
     It "builds redis service port correctly when SERVICE_PORT env is set"
-      export  export service_por="6380"
+      service_port="6380"
       When call build_redis_service_port
-      The contents of file "$redis_real_conf" should include "port $SERVICE_PORT"
+      The contents of file "$redis_real_conf" should include "port 6380"
     End
 
     It "builds redis service port with default value when SERVICE_PORT env is not set"
       unset SERVICE_PORT
+      service_port=6379
       When call build_redis_service_port
       The contents of file "$redis_real_conf" should include "port 6379"
+    End
+  End
+
+  Describe "build_redis_tls_config()"
+    cleanup_tls_env() {
+      unset TLS_ENABLED
+      unset TLS_MOUNT_PATH
+    }
+    AfterEach 'cleanup_tls_env'
+
+    It "writes nothing when TLS is disabled"
+      TLS_ENABLED="false"
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should not include "tls-cert-file"
+    End
+
+    It "writes the full TLS config when TLS is enabled"
+      TLS_ENABLED="true"
+      TLS_MOUNT_PATH="/etc/pki/tls"
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should include "tls-cert-file /etc/pki/tls/tls.crt"
+      The contents of file "$redis_real_conf" should include "tls-key-file /etc/pki/tls/tls.key"
+      The contents of file "$redis_real_conf" should include "tls-ca-cert-file /etc/pki/tls/ca.crt"
+      The contents of file "$redis_real_conf" should include "tls-auth-clients no"
+      The contents of file "$redis_real_conf" should include "tls-replication yes"
+      # the plaintext port must be disabled, otherwise redis keeps listening in clear text
+      The contents of file "$redis_real_conf" should include "port 0"
+    End
+
+    It "falls back to the default TLS mount path when TLS_MOUNT_PATH is unset"
+      TLS_ENABLED="true"
+      unset TLS_MOUNT_PATH
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should include "tls-cert-file /etc/pki/tls/tls.crt"
     End
   End
 
@@ -318,6 +372,36 @@ Describe "FalkorDB Start Bash Script Tests"
         When call check_current_pod_is_primary
         The status should be success
         The stdout should include "current pod is primary with advertised svc mapping"
+      End
+    End
+
+    Context 'mapping with the announce hostname override'
+      setup() {
+        export CURRENT_POD_NAME="redis-redis-0"
+        export REDIS_COMPONENT_NAME="redis-redis"
+        export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).redis.example.com'
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_POD_NAME
+        unset REDIS_COMPONENT_NAME
+        unset ANNOUNCE_HOSTNAME_OVERRIDE
+        unset primary
+      }
+      After 'un_setup'
+
+      It "returns true when the primary is this pod under its override hostname"
+        primary="redis-redis-0.redis.example.com"
+        When call check_current_pod_is_primary
+        The status should be success
+        The stdout should include "current pod is primary with announce hostname mapping"
+      End
+
+      It "returns false when the primary is another pod's override hostname"
+        primary="redis-redis-1.redis.example.com"
+        When call check_current_pod_is_primary
+        The status should be failure
       End
     End
   End

@@ -1,0 +1,177 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: acl-propagation
+spec:
+  description: >-
+    Create an application ACL account and prove a newly joined member can
+    authenticate with it.
+
+    The original plan for this slot was password rotation, but the addon defines
+    exactly one system account, `default`, and it is an initAccount. An init
+    account is the credential everything else bootstraps from, so KubeBlocks does
+    not offer a day-2 rotation for it and there is nothing to exercise.
+
+    What is worth exercising is the mechanism next to it. FalkorDB does not
+    replicate ACL changes, so an account created on the primary exists nowhere
+    else, and the addon's answer is sync-acl.sh wired to the memberJoin lifecycle
+    action. Scaling out is the only thing that runs it, and nothing in the suite
+    had ever done so.
+
+    The failure mode is delayed and confusing. Everything works until a scale-out,
+    a failover, or a rebuild puts a new pod in front of traffic, and then some
+    fraction of connections start failing with WRONGPASS for an account the
+    operator can plainly see on the primary.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-acl
+            tail: 100
+
+    - name: create an application account on every existing member
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-acl falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-acl falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-acl 50
+
+              # ACL SETUSER only changes memory on the node it runs against, and
+              # it is not replicated, so the account has to be created on each
+              # existing member individually. ACL SAVE is what writes it to the
+              # acl file, which is the only copy a joining member can be given.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-acl falkordb); do
+                fdb_cli "$NAMESPACE" "$pod" ACL SETUSER e2e-app \
+                  on '>e2e-app-pw' '~e2e-acl:*' +@read +@write >/dev/null
+                fdb_cli "$NAMESPACE" "$pod" ACL SAVE >/dev/null
+                echo "created and saved the e2e-app account on $pod"
+              done
+
+              # Prove the credential is genuinely usable before scaling out, so a
+              # failure after the scale-out can only be about propagation.
+              value="$(kubectl exec -n "$NAMESPACE" "$primary" -c falkordb -- \
+                sh -c 'REDISCLI_AUTH=e2e-app-pw exec redis-cli --user e2e-app --no-auth-warning GET e2e-acl:0' | tr -d '\r')"
+              if [ "$value" != "e2e-acl:0" ]; then
+                echo "the e2e-app account cannot read its own keys on $primary: [$value]" >&2
+                exit 1
+              fi
+              echo "the e2e-app account works on $primary"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-acl
+            tail: 100
+
+    - name: scale out so a new member joins
+      try:
+        - apply:
+            file: scale-out.yaml
+        - assert:
+            file: assert-scale-out-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-acl-scale-out
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-acl
+            tail: 200
+
+    - name: the joined member received the account and can authenticate with it
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_pod_count "$NAMESPACE" fdb-acl falkordb 3
+              fdb_retry "the new member to link up" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-acl falkordb
+
+              # The dataset reaching the new pod proves replication works, which
+              # is exactly what makes the ACL gap so easy to miss: the data is
+              # there, so the pod looks completely healthy.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-acl falkordb); do
+                fdb_retry "$pod to hold the dataset" \
+                  fdb_verify_keys "$NAMESPACE" "$pod" e2e-acl 50
+              done
+
+              # Listing the account is not sufficient on its own, because an entry
+              # copied without its password hash is listed but rejects every
+              # login. Authenticating as the account is the real assertion.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-acl falkordb); do
+                fdb_retry "$pod to accept the e2e-app credential" bash -c '
+                  out=$(kubectl exec -n "'"$NAMESPACE"'" "'"$pod"'" -c falkordb -- \
+                    sh -c "REDISCLI_AUTH=e2e-app-pw exec redis-cli --user e2e-app --no-auth-warning GET e2e-acl:0" 2>&1 | tr -d "\r")
+                  if [ "$out" != "e2e-acl:0" ]; then
+                    echo "'"$pod"' rejected the e2e-app account or served the wrong value: [$out]" >&2
+                    exit 1
+                  fi
+                  echo "'"$pod"' accepts the e2e-app account"
+                '
+              done
+      catch:
+        - events: {}
+        - script:
+            content: |
+              echo "=== ACL LIST on every member ==="
+              . "$E2E_LIB_DIR/falkordb.sh"
+              for pod in $(fdb_pods "$NAMESPACE" fdb-acl falkordb); do
+                echo "--- $pod"
+                fdb_cli "$NAMESPACE" "$pod" ACL LIST || true
+              done
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-acl
+            tail: 200
+
+    - name: the account survives a failover onto the joined member
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # A joined member that holds the account only in memory loses it on
+              # restart, and the pod most likely to be restarted or promoted is
+              # the one that just joined. Killing the primary forces one of the
+              # replicas to take over and serve application traffic for real.
+              primary="$(fdb_primary "$NAMESPACE" fdb-acl falkordb)"
+              echo "killing the primary $primary"
+              fdb_kill_pod "$NAMESPACE" "$primary"
+
+              fdb_retry "a new primary to be elected" bash -c '
+                current=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-acl,apps.kubeblocks.io/component-name=falkordb,kubeblocks.io/role=primary" \
+                  -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)
+                [ -n "$current" ] || { echo "no primary yet" >&2; exit 1; }
+                [ "$current" != "'"$primary"'" ] || { echo "$current is still the old primary" >&2; exit 1; }
+                echo "$current was promoted"
+              '
+
+              new_primary="$(fdb_primary "$NAMESPACE" fdb-acl falkordb)"
+              fdb_retry "the promoted member to still accept the account" bash -c '
+                new_primary=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-acl,apps.kubeblocks.io/component-name=falkordb,kubeblocks.io/role=primary" \
+                  -o jsonpath="{.items[0].metadata.name}")
+                out=$(kubectl exec -n "'"$NAMESPACE"'" "$new_primary" -c falkordb -- \
+                  sh -c "REDISCLI_AUTH=e2e-app-pw exec redis-cli --user e2e-app --no-auth-warning SET e2e-acl:0 e2e-acl:0" 2>&1 | tr -d "\r")
+                [ "$out" = "OK" ] || { echo "$new_primary rejected a write from e2e-app: [$out]" >&2; exit 1; }
+                echo "$new_primary still serves the e2e-app account"
+              '
+              echo "the application account survived the failover onto $new_primary"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-acl
+            tail: 200

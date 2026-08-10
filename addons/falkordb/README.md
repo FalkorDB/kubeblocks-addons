@@ -23,7 +23,7 @@ FalkorDB is an open source (SSPL licensed) in-memory graph database based on Red
 
 | Major Versions | Description |
 |---------------|-------------|
-| 4.0           | 4.18.8, 4.14.10, 4.12.5 |
+| 4.0           | 4.20.1, 4.18.11, 4.18.8, 4.14.12, 4.14.10, 4.12.5 |
 
 ## Prerequisites
 
@@ -74,7 +74,7 @@ spec:
     - name: falkordb
       # ServiceVersion specifies the version of the Service expected to be
       # provisioned by this Component.
-      # Valid options are: [4.18.8, 4.14.10, 4.12.5]
+      # Valid options are: [4.20.1, 4.18.11, 4.18.8, 4.14.12, 4.14.10, 4.12.5]
       serviceVersion: "4.12.5"
       # Determines whether metrics exporter information is annotated on the
       # Component's headless Service.
@@ -1006,7 +1006,7 @@ spec:
     - name: falkordb
       # ServiceVersion specifies the version of the Service expected to be
       # provisioned by this Component.
-      # Valid options are: [4.18.8, 4.14.10, 4.12.5]
+      # Valid options are: [4.20.1, 4.18.11, 4.18.8, 4.14.12, 4.14.10, 4.12.5]
       serviceVersion: "4.12.5"
       # Determines whether metrics exporter information is annotated on the
       # Component's headless Service.

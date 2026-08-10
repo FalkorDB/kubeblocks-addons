@@ -1,0 +1,13 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-rops-reset-master
+spec:
+  clusterName: fdb-rops
+  type: Custom
+  custom:
+    opsDefinitionName: falkordb-reset-master
+    components:
+      # reset-master.sh reaches the sentinels from the falkordb component, which
+      # is where SENTINEL_POD_NAME_LIST and REDIS_COMPONENT_NAME are declared.
+      - componentName: falkordb

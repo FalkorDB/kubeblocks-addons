@@ -48,11 +48,15 @@ extract_lb_host_by_svc_name() {
 
 get_announce_hostname_override_or_default() {
   local default_value="$1"
-  if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
-    echo "$ANNOUNCE_HOSTNAME_OVERRIDE"
+  local pod_name="$2"
+  if is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
+    echo "$default_value"
     return
   fi
-  echo "$default_value"
+  # Each sentinel has to announce a name of its own, so the override is a
+  # template rather than a literal. See falkordb-start.sh for why $(POD_NAME)
+  # reaches the script unexpanded.
+  echo "${ANNOUNCE_HOSTNAME_OVERRIDE//\$(POD_NAME)/$pod_name}"
 }
 
 # TODO: if instanceTemplate is specified, the pod service could not be parsed from the pod ordinal.
@@ -141,12 +145,14 @@ reset_redis_sentinel_conf() {
     -e "/tls-ca-cert-file /d" \
     -e "/tls-port /d" \
     -e "/tls-auth-clients no/d" \
+    -e "/tls-replication /d" \
     -e "/aclfile \/data\/users.acl/d" $redis_sentinel_real_conf
     unset_xtrace_when_ut_mode_false
     if [ -n "$SENTINEL_PASSWORD" ]; then
       sed -i -e "/sentinel sentinel-user/d" \
       -e "/sentinel sentinel-pass/d" $redis_sentinel_real_conf
     fi
+    set_xtrace_when_ut_mode_false
   fi
 
   # hack for redis sentinel when nodeport is enabled, remove known-replica line which has the same nodeport port with master
@@ -165,6 +171,23 @@ reset_redis_sentinel_conf() {
   fi
 }
 
+# KubeBlocks resolves componentVarRef.podFQDNs from the pods that exist when the
+# environment is rendered, so a sentinel created by a scale-out is handed a list
+# that does not contain itself. Every sentinel of a component shares the same
+# headless service domain, so the missing entry can be reconstructed from any
+# peer instead of refusing to start.
+derive_current_pod_fqdn() {
+  local fqdn_list="$1"
+  local pod_name="$2"
+  local first_peer domain
+  first_peer=$(echo "${fqdn_list%%,*}" | tr -d '[:space:]')
+  domain=${first_peer#*.}
+  if is_empty "$pod_name" || is_empty "$domain" || [ "$domain" = "$first_peer" ]; then
+    return 0
+  fi
+  echo "${pod_name}.${domain}"
+}
+
 build_redis_sentinel_conf() {
   echo "build redis sentinel conf"
   if ! env_exist SENTINEL_POD_FQDN_LIST; then
@@ -177,36 +200,50 @@ build_redis_sentinel_conf() {
   fi
 
   sentinel_port=${SENTINEL_SERVICE_PORT:-26379}
-  # build announce ip and port according to whether the announce addr is enabled
+  # Resolution is only meaningful when we announce a DNS name; announcing a raw
+  # address must leave it off. Default it explicitly, because an unset variable
+  # makes the `if $enable_hostname_resolution` test below an empty command,
+  # which the shell reports as success.
+  enable_hostname_resolution=false
+  # Work out what to announce. Each branch only selects the address; the config
+  # is written once, after the branches, so that no branch can emit a partial or
+  # duplicate announce pair.
   if ! is_empty "$redis_sentinel_announce_host_value" && ! is_empty "$redis_sentinel_announce_port_value"; then
     echo "redis sentinel use nodeport $redis_sentinel_announce_host_value:$redis_sentinel_announce_port_value to announce"
-    {
-      echo "sentinel announce-ip $redis_sentinel_announce_host_value"
-      echo "sentinel announce-port $redis_sentinel_announce_port_value"
-    } >> $redis_sentinel_real_conf
+    announce_host_value="$redis_sentinel_announce_host_value"
+    announce_port_value="$redis_sentinel_announce_port_value"
   elif [ "$FIXED_POD_IP_ENABLED" == "true" ]; then
     echo "redis sentinel use the fixed pod ip $CURRENT_POD_IP:$sentinel_port to announce"
-    {
-      echo "sentinel announce-ip $CURRENT_POD_IP"
-      echo "sentinel announce-port $sentinel_port"
-    } >> $redis_sentinel_real_conf
+    announce_host_value="$CURRENT_POD_IP"
+    announce_port_value="$sentinel_port"
   else
     # shellcheck disable=SC2153
     current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$SENTINEL_POD_FQDN_LIST" "$CURRENT_POD_NAME")
     if is_empty "$current_pod_fqdn"; then
-      echo "Error: Failed to get current pod: $CURRENT_POD_NAME fqdn from sentinel pod fqdn list: $SENTINEL_POD_FQDN_LIST. Exiting."
-      exit 1
+      current_pod_fqdn=$(derive_current_pod_fqdn "$SENTINEL_POD_FQDN_LIST" "$CURRENT_POD_NAME")
+      if is_empty "$current_pod_fqdn"; then
+        echo "Error: Failed to get current pod: $CURRENT_POD_NAME fqdn from sentinel pod fqdn list: $SENTINEL_POD_FQDN_LIST. Exiting."
+        exit 1
+      fi
+      echo "current pod is absent from the sentinel pod fqdn list, derived $current_pod_fqdn from its peers"
     fi
     echo "redis sentinel use current pod fqdn: $current_pod_fqdn to announce"
     announce_host_value="$current_pod_fqdn"
+    announce_port_value="$sentinel_port"
     enable_hostname_resolution=true
   fi
 
-  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value")
-  announce_port_value="$sentinel_port"
+  announce_host_value=$(get_announce_hostname_override_or_default "$announce_host_value" "$CURRENT_POD_NAME")
   if ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE"; then
     echo "announce hostname override is set, using $announce_host_value for sentinel announce"
     enable_hostname_resolution=true
+  fi
+
+  # An empty value here would render as a bare 'sentinel announce-ip', which
+  # redis rejects as an unrecognized statement and refuses to start on.
+  if is_empty "$announce_host_value" || is_empty "$announce_port_value"; then
+    echo "Error: Failed to determine the sentinel announce address. Exiting."
+    exit 1
   fi
 
   {

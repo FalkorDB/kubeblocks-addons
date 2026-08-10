@@ -215,6 +215,20 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The contents of file "$redis_real_conf" should include "cluster-announce-ip $CURRENT_POD_IP"
       The stdout should include "announce hostname override is set, using $ANNOUNCE_HOSTNAME_OVERRIDE for cluster announce"
     End
+
+    It "expands \$(POD_NAME) so each cluster node announces a hostname of its own"
+      unset redis_announce_host_value
+      unset redis_announce_port_value
+      unset redis_announce_bus_port_value
+      export CURRENT_POD_IP="172.0.0.6"
+      export CURRENT_POD_NAME="redis-redis-1"
+      export CURRENT_SHARD_POD_FQDN_LIST="redis-redis-0.redis-redis.default.svc.cluster.local,redis-redis-1.redis-redis.default.svc.cluster.local"
+      export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).redis.example.com'
+      When call build_cluster_announce_info
+      The contents of file "$redis_real_conf" should include "cluster-announce-hostname redis-redis-1.redis.example.com"
+      The contents of file "$redis_real_conf" should not include 'POD_NAME'
+      The stdout should include "announce hostname override is set, using redis-redis-1.redis.example.com for cluster announce"
+    End
   End
 
   Describe "build_redis_cluster_service_port()"
@@ -232,6 +246,41 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       When call build_redis_cluster_service_port
       The contents of file "$redis_real_conf" should include "port 6379"
       The contents of file "$redis_real_conf" should include "cluster-port 16379"
+    End
+  End
+
+  Describe "build_redis_tls_config()"
+    cleanup_tls_env() {
+      unset TLS_ENABLED
+      unset TLS_MOUNT_PATH
+    }
+    AfterEach 'cleanup_tls_env'
+
+    It "writes nothing when TLS is disabled"
+      TLS_ENABLED="false"
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should not include "tls-cert-file"
+    End
+
+    It "writes the full TLS config when TLS is enabled"
+      TLS_ENABLED="true"
+      TLS_MOUNT_PATH="/etc/pki/tls"
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should include "tls-cert-file /etc/pki/tls/tls.crt"
+      The contents of file "$redis_real_conf" should include "tls-key-file /etc/pki/tls/tls.key"
+      The contents of file "$redis_real_conf" should include "tls-ca-cert-file /etc/pki/tls/ca.crt"
+      The contents of file "$redis_real_conf" should include "tls-auth-clients no"
+      The contents of file "$redis_real_conf" should include "tls-replication yes"
+      # the cluster bus must also be encrypted, otherwise nodes cannot gossip over TLS
+      The contents of file "$redis_real_conf" should include "tls-cluster yes"
+      The contents of file "$redis_real_conf" should include "port 0"
+    End
+
+    It "falls back to the default TLS mount path when TLS_MOUNT_PATH is unset"
+      TLS_ENABLED="true"
+      unset TLS_MOUNT_PATH
+      When call build_redis_tls_config
+      The contents of file "$redis_real_conf" should include "tls-cert-file /etc/pki/tls/tls.crt"
     End
   End
 

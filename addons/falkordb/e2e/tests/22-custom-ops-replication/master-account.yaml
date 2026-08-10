@@ -1,0 +1,18 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-rops-master-account
+spec:
+  clusterName: fdb-rops
+  type: Custom
+  custom:
+    opsDefinitionName: falkordb-master-account-ops
+    components:
+      - componentName: falkordb
+        parameters:
+          - name: ACL_COMMAND
+            value: "ACL SETUSER e2e-master on >master-pass ~* &* +@all"
+          # falkordb-account.sh walks REDIS_POD_FQDN_LIST and only reports
+          # success when the hosts it reached equals REPLICAS.
+          - name: REPLICAS
+            value: "2"

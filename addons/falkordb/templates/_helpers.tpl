@@ -56,13 +56,6 @@ Define falkordb component definition regular expression name prefix
 {{- end -}}
 
 {{/*
-Define falkordb 4.X component definition regular expression name prefix
-*/}}
-{{- define "falkordb4.cmpdRegexpPattern" -}}
-^falkordb-7.*
-{{- end -}}
-
-{{/*
 Define falkordb sentienl component definition regular expression name prefix
 */}}
 {{- define "falkordbSentinel.cmpdRegexpPattern" -}}
@@ -70,24 +63,10 @@ Define falkordb sentienl component definition regular expression name prefix
 {{- end -}}
 
 {{/*
-Define falkordb sentienl 4.X component definition regular expression name prefix
-*/}}
-{{- define "falkordbSentinel7.cmpdRegexpPattern" -}}
-^falkordb-sent-7.*
-{{- end -}}
-
-{{/*
 Define falkordb cluster component definition regular expression name prefix
 */}}
 {{- define "falkordbCluster.cmpdRegexpPattern" -}}
 ^falkordb-cluster-\d+
-{{- end -}}
-
-{{/*
-Define falkordb cluster 7.X component definition regular expression name prefix
-*/}}
-{{- define "falkordbCluster7.cmpdRegexpPattern" -}}
-^falkordb-cluster-7.*
 {{- end -}}
 
 
@@ -157,19 +136,19 @@ valueFrom:
 
 {{- define "busybox.image" -}}
 {{ .Values.busyboxImage.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.busyboxImage.repository}}:{{ .Values.busyboxImage.tag }}
-{{- end }}}
+{{- end }}
 
 {{- define "metrics.repository" -}}
 {{ .Values.metrics.image.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.metrics.image.repository}}
-{{- end }}}
+{{- end }}
 
 {{- define "metrics.image" -}}
 {{ .Values.metrics.image.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.metrics.image.repository}}:{{ .Values.metrics.image.tag }}
-{{- end }}}
+{{- end }}
 
 {{- define "apeDts.image" -}}
 {{ .Values.apeDtsImage.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.apeDtsImage.repository}}:{{ .Values.apeDtsImage.tag }}
-{{- end }}}
+{{- end }}
 
 {{/*
 Generate scripts configmap
@@ -206,18 +185,13 @@ reconfigure:
     container: {{ $container }}
     targetPodSelector: All
     command:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-
-        /scripts/reload-parameter.sh "$1" "$2"
-      - --
+      - /bin/bash
+      - /scripts/reload-parameter.sh
 {{- end -}}
 
 {{- define "apeDts.reshard.image" -}}
 {{ .Values.image.apeDts.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.image.apeDts.repository}}:{{ .Values.image.apeDts.reshardTag }}
-{{- end }}}
+{{- end }}
 
 {{- define "kblib.syncer.policyRules" -}}
 policyRules:

@@ -1,0 +1,224 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-backup-restore
+spec:
+  description: >-
+    Back up a sharded FalkorDB cluster and restore it into a brand new one.
+
+    This is the single most intricate path in the addon and it had no coverage at
+    all. A sharded backup is not one backup: the policy fans out to one target per
+    shard, each shard dumps only the slots it owns, and the restore has to put the
+    right dump back under the right shard *and* rebuild slot ownership so the
+    reassembled cluster answers for all 16384 slots. Any mismatch between the shard
+    a dump came from and the shard it lands in produces a cluster that comes up
+    Running and reports ok while silently serving MOVED errors or missing data.
+  steps:
+    - name: create the source sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shbk
+            tail: 100
+
+    - name: the cluster forms and owns every slot
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-shbk shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shbk shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+      catch:
+        - events: {}
+
+    - name: seed keys across every shard and flush them to disk
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shbk shard)"
+              # 300 keys hash into slots owned by all three shards, so a restore
+              # that loses or misplaces one shard's slot range cannot pass the
+              # verification step below.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shbk 300
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shbk 300
+
+              # A graph lands entirely in one shard, which catches the case where
+              # the module data survives on some shards but not the one that owns
+              # the graph key.
+              fdb_graph_roundtrip "$NAMESPACE" "$pod" e2e-shbk-graph
+
+              # The backup reads the data volume, so every shard has to have
+              # written its dump before the backup starts. The backup targets the
+              # only member of each shard, so SAVE has to run everywhere.
+              for p in $(fdb_sharding_pods "$NAMESPACE" fdb-shbk shard); do
+                fdb_cli "$NAMESPACE" "$p" SAVE >/dev/null
+                echo "flushed $p to disk"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shbk
+            tail: 100
+
+    - name: back the sharded cluster up
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # KubeBlocks derives the BackupPolicy name from the cluster and the
+              # sharding, so it is only known at run time and the Backup cannot be
+              # a static file. Sharding policies are the ones that carry more than
+              # one target, which is exactly what this scenario is here to test.
+              policy=""
+              for candidate in $(kubectl get backuppolicy -n "$NAMESPACE" \
+                    -l "app.kubernetes.io/instance=fdb-shbk" \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                policy="$candidate"
+                break
+              done
+              if [ -z "$policy" ]; then
+                echo "no BackupPolicy was generated for fdb-shbk" >&2
+                kubectl get backuppolicy -n "$NAMESPACE" >&2
+                exit 1
+              fi
+              echo "using BackupPolicy $policy"
+
+              targets="$(kubectl get backuppolicy -n "$NAMESPACE" "$policy" \
+                -o jsonpath='{range .spec.targets[*]}{.name}{"\n"}{end}' | grep -c . || true)"
+              echo "the policy fans out to $targets target(s)"
+              if [ "$targets" -lt 3 ]; then
+                echo "expected one backup target per shard, got $targets" >&2
+                kubectl get backuppolicy -n "$NAMESPACE" "$policy" -o yaml >&2
+                exit 1
+              fi
+
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: dataprotection.kubeblocks.io/v1alpha1
+              kind: Backup
+              metadata:
+                name: fdb-shbk-datafile
+              spec:
+                backupMethod: datafile
+                backupPolicyName: $policy
+                deletionPolicy: Delete
+              EOF
+        - assert:
+            file: assert-backup-completed.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: dataprotection.kubeblocks.io/v1alpha1
+            kind: Backup
+            name: fdb-shbk-datafile
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shbk
+            tail: 200
+
+    - name: restore the backup into a new sharded cluster
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # For a sharded cluster the restore annotation is keyed by the
+              # *sharding* name rather than a component name, and KubeBlocks maps
+              # each shard of the new cluster onto the matching backup target.
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: apps.kubeblocks.io/v1
+              kind: Cluster
+              metadata:
+                name: fdb-shbk-r
+                annotations:
+                  kubeblocks.io/restore-from-backup: '{"shard":{"name":"fdb-shbk-datafile","namespace":"$NAMESPACE","volumeRestorePolicy":"Parallel"}}'
+              spec:
+                terminationPolicy: WipeOut
+                clusterDef: falkordb
+                topology: cluster
+                shardings:
+                  - name: shard
+                    shardingDef: falkordb-cluster
+                    shards: 3
+                    template:
+                      name: falkordb
+                      disableExporter: true
+                      replicas: 1
+                      resources:
+                        limits:
+                          cpu: '0.5'
+                          memory: 512Mi
+                        requests:
+                          cpu: '0.2'
+                          memory: 512Mi
+                      volumeClaimTemplates:
+                        - name: data
+                          spec:
+                            accessModes:
+                              - ReadWriteOnce
+                            resources:
+                              requests:
+                                storage: 1Gi
+              EOF
+        - assert:
+            file: assert-restored-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shbk-r
+            tail: 200
+
+    - name: the restored cluster owns every slot and holds every key
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-shbk-r shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shbk-r shard)"
+
+              # Slot coverage first: a restored cluster that lost a shard's slot
+              # range still reports Running, and every read against the missing
+              # range fails rather than returning wrong data.
+              fdb_retry "the restored cluster to cover all 16384 slots" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              # -c follows MOVED redirects, so reading all 300 keys through a
+              # single entry point exercises every shard's restored dataset.
+              fdb_retry "the restored keyspace to be complete" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-shbk 300
+              fdb_assert_graph_node "$NAMESPACE" "$pod" e2e-shbk-graph
+
+              # The restored cluster has to be writable, not just readable: a
+              # shard whose slots came back unowned accepts reads served from
+              # another node's dump but rejects writes into its own range.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shbk-post 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shbk-post 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shbk-r
+            tail: 200

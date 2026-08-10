@@ -1,0 +1,11 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-ops-scale-out
+spec:
+  clusterName: fdb-ops
+  type: HorizontalScaling
+  horizontalScaling:
+    - componentName: falkordb
+      scaleOut:
+        replicaChanges: 1

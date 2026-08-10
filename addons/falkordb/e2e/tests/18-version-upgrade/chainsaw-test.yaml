@@ -1,0 +1,157 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: version-upgrade
+spec:
+  description: >-
+    Start on FalkorDB 4.18.11 and upgrade the running cluster to 4.20.1.
+
+    An in-place version upgrade is a rolling restart where the pods come back on a
+    different image, and it is the one operation that exercises the ComponentVersion
+    mapping: the serviceVersion the user asks for has to resolve to a real image
+    tag for the servers *and* for the sentinels, which have their own separate
+    ComponentVersion. A serviceVersion with no mapping leaves the OpsRequest stuck
+    rather than failing loudly.
+
+    The data assertions matter as much as the version ones. A rolling upgrade
+    restarts the primary, so the cluster fails over midway through, and this is
+    the only scenario where a failover happens while the two members are running
+    different versions of the server.
+  steps:
+    - name: create the cluster on the older version
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-upgrade
+            tail: 200
+
+    - name: the pods really are running the older version
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-upgrade falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-upgrade falkordb)"
+
+              # Asserting the starting version is what makes the upgrade
+              # assertion meaningful. Without it a cluster that quietly ignored
+              # serviceVersion and started on 4.20.1 all along would pass the
+              # post-upgrade check without anything having been upgraded.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-upgrade falkordb); do
+                image="$(kubectl get pod -n "$NAMESPACE" "$pod" \
+                  -o jsonpath='{.spec.containers[?(@.name=="falkordb")].image}')"
+                case "$image" in
+                  *4.18.11*) echo "$pod runs $image" ;;
+                  *) echo "$pod runs $image, expected a 4.18.11 image" >&2; exit 1 ;;
+                esac
+              done
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-upgrade 100
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-upgrade-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-upgrade
+            tail: 200
+
+    - name: upgrade to 4.20.1
+      try:
+        - apply:
+            file: upgrade.yaml
+        - assert:
+            file: assert-upgrade-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-upgrade-ops
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-upgrade
+            tail: 200
+
+    - name: every pod moved to the new image
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-upgrade falkordb); do
+                image="$(kubectl get pod -n "$NAMESPACE" "$pod" \
+                  -o jsonpath='{.spec.containers[?(@.name=="falkordb")].image}')"
+                case "$image" in
+                  *4.20.1*) echo "$pod runs $image" ;;
+                  *) echo "$pod still runs $image after the upgrade" >&2; exit 1 ;;
+                esac
+              done
+
+              # The sentinels resolve their image through a separate
+              # ComponentVersion, so an upgrade can move the servers and leave the
+              # sentinels behind without the OpsRequest noticing.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-upgrade falkordb-sent); do
+                image="$(kubectl get pod -n "$NAMESPACE" "$pod" \
+                  -o jsonpath='{.spec.containers[?(@.name=="falkordb-sent")].image}')"
+                case "$image" in
+                  *4.20.1*) echo "$pod runs $image" ;;
+                  *) echo "$pod still runs $image after the upgrade" >&2; exit 1 ;;
+                esac
+              done
+
+              # And the server has to agree with the image tag. A pod pulled from
+              # the right tag that reports a different version means the mapping
+              # points at the wrong image.
+              primary="$(fdb_primary "$NAMESPACE" fdb-upgrade falkordb)"
+              modules="$(fdb_cli "$NAMESPACE" "$primary" MODULE LIST | tr -d '\r')"
+              echo "$modules" | grep -qi graph || {
+                echo "the graph module is not loaded after the upgrade: $modules" >&2
+                exit 1
+              }
+              echo "the graph module is loaded on the upgraded primary"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-upgrade
+            tail: 200
+
+    - name: the upgraded cluster kept its data and its topology
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The rolling upgrade restarts the primary, so the cluster has to
+              # have failed over and settled back to exactly one primary.
+              fdb_retry "the roles to settle after the upgrade" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-upgrade falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-upgrade falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-upgrade falkordb secondary)"
+
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-upgrade 100
+              fdb_assert_graph_node "$NAMESPACE" "$primary" e2e-upgrade-graph
+
+              fdb_retry "the replica to link up on the new version" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-upgrade-after 20
+              fdb_retry "new writes to replicate after the upgrade" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-upgrade-after 20
+
+              # The sentinels have to be monitoring whoever won the post-upgrade
+              # election, not the pod that was the primary when the upgrade began.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-upgrade falkordb-sent); do
+                fdb_retry "$pod to monitor the upgraded primary" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-upgrade
+            tail: 200

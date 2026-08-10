@@ -1,0 +1,21 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: falkordb-scale-out-sharding
+  namespace: demo
+spec:
+  # Specifies the name of the Cluster resource that this operation is targeting.
+  clusterName: falkordb-sharding
+  type: HorizontalScaling
+  # Lists HorizontalScaling objects, each specifying scaling requirements for a Component,
+  # including desired replica changes, configurations for new instances,
+  # modifications for existing instances, and take offline/online the specified instances.
+  horizontalScaling:
+    # Specifies the name of the sharding.
+  - componentName: shard
+    # Specifies the desired number of shards.
+    # This parameter is mutually exclusive with other parameters.
+    # This will scale out from 3 shards to 4 shards (as defined in cluster-sharding.yaml).
+    # KubeBlocks provisions the new shard and the addon then rebalances the hash slots
+    # onto it, so the operation may take a while on a cluster holding a lot of data.
+    shards: 4

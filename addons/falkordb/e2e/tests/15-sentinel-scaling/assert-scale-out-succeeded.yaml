@@ -1,0 +1,6 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-sentscale-out
+status:
+  phase: Succeed

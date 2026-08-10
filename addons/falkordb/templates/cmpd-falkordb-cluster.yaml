@@ -102,12 +102,6 @@ spec:
         numSymbols: 0
         letterCase: MixedCases
         seed: 5wM4uhmKV1Ohy087
-  tls:
-    volumeName: tls
-    mountPath: /etc/pki/tls
-    caFile: ca.crt
-    certFile: tls.crt
-    keyFile: tls.key
   hostNetwork:
     containerPorts:
       - container: falkordb-cluster
@@ -346,7 +340,7 @@ spec:
       expression: {{ `{{if index . "REDIS_CLUSTER_HOST_NETWORK_PORT"}}{{.REDIS_CLUSTER_HOST_NETWORK_PORT}}{{else}}{{.SERVICE_PORT}}{{end}}` | toYaml }}
     - name: REDIS_METRICS_ADDR
       value: "redis://localhost:$(SERVICE_PORT)"
-      expression: {{ `{{if eq (index . "TLS_ENABLED") "true"}}rediss://localhost: {{.SERVICE_PORT }}{{else}}redis://localhost:{{.SERVICE_PORT}}{{end}}` | toYaml }}
+      expression: {{ `{{if eq (index . "TLS_ENABLED") "true"}}rediss://localhost:{{.SERVICE_PORT}}{{else}}redis://localhost:{{.SERVICE_PORT}}{{end}}` | toYaml }}
     - name: REDIS_CLI_TLS_CMD
       value: ""
       expression: {{ `{{if eq (index . "TLS_ENABLED") "true"}}--tls --insecure{{else }}{{end}}` | toYaml }}

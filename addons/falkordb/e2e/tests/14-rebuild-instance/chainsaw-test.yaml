@@ -1,0 +1,182 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rebuild-instance
+spec:
+  description: >-
+    Corrupt a replica's data and recover it with a RebuildInstance operation.
+
+    This is the addon's answer to a replica whose volume has gone bad, and it is
+    the only consumer of the `backup-for-rebuild-instance` method and the
+    `falkordb-for-rebuild-instance` ActionSet. Both were declared in the two
+    BackupPolicyTemplates and had never executed once.
+
+    No backupName is given on purpose. That is the path where KubeBlocks takes a
+    fresh backup from the surviving member through `backup-for-rebuild-instance`
+    and seeds the rebuilt pod from it, which is what an operator reaches for when
+    there is no recent backup to fall back on.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebuild
+            tail: 100
+
+    - name: seed data and record which pod is the replica
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rebuild falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-rebuild falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-rebuild falkordb secondary)"
+
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-rebuild 200
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-rebuild-graph
+              fdb_retry "the replica to catch up" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-rebuild 200
+
+              state="$(fdb_state_dir)"
+              echo "$primary" > "$state/primary"
+              echo "$replica" > "$state/replica"
+              echo "primary is $primary, replica to be rebuilt is $replica"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebuild
+            tail: 100
+
+    - name: corrupt the replica's volume
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              replica="$(cat "$state/replica")"
+
+              # Deleting the files is not enough. The server answers from memory
+              # and simply rewrites them, so the cluster stays Running and
+              # KubeBlocks rejects the operation outright with "RebuildInstance
+              # is forbidden when Cluster.status.phase=Running". Corrupting the
+              # on-disk state makes the server refuse to load it on its next
+              # start, which is what a bad volume actually looks like. Both the
+              # AOF manifest and the RDB are hit so this holds whether or not
+              # appendonly happens to be on.
+              kubectl exec -n "$NAMESPACE" "$replica" -c falkordb -- sh -c '
+                if [ -f /data/appendonlydir/appendonly.aof.manifest ]; then
+                  printf "corrupted-by-e2e\n" > /data/appendonlydir/appendonly.aof.manifest
+                fi
+                printf "corrupted-by-e2e\n" > /data/dump.rdb
+                ls -la /data'
+
+              # The corruption only bites when the server next reads the volume.
+              kubectl delete pod -n "$NAMESPACE" "$replica" --wait=false
+              echo "corrupted the data directory on $replica and restarted it"
+
+              # Wait for the damage to surface instead of racing the controller,
+              # because the OpsRequest is only accepted once the cluster has
+              # left Running.
+              for _ in $(seq 1 60); do
+                phase="$(kubectl get cluster -n "$NAMESPACE" fdb-rebuild -o jsonpath='{.status.phase}')"
+                echo "cluster phase is $phase"
+                if [ "$phase" != "Running" ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "cluster never left Running after the volume was corrupted" >&2
+              exit 1
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebuild
+            tail: 100
+
+    - name: rebuild the replica
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              replica="$(cat "$state/replica")"
+
+              # The pod name is only known at run time, so the OpsRequest cannot
+              # be a static file.
+              #
+              # inPlace reuses the existing pod instead of scheduling a second
+              # one alongside it. A replacement pod would need a whole extra set
+              # of resources at once, which a single node test cluster does not
+              # reliably have.
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: operations.kubeblocks.io/v1alpha1
+              kind: OpsRequest
+              metadata:
+                name: fdb-rebuild-ops
+              spec:
+                clusterName: fdb-rebuild
+                type: RebuildInstance
+                rebuildFrom:
+                  - componentName: falkordb
+                    inPlace: true
+                    instances:
+                      - name: $replica
+              EOF
+        - assert:
+            file: assert-rebuild-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rebuild-ops
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebuild
+            tail: 200
+
+    - name: the rebuilt replica is a working member again
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle after the rebuild" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rebuild falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-rebuild falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-rebuild falkordb secondary)"
+
+              # The data has to be back. A rebuild that produced an empty volume
+              # and then let replication refill it would also end up here, which
+              # is fine; what must not happen is a replica that comes back Ready
+              # while still missing the dataset.
+              fdb_retry "the rebuilt replica to hold the dataset" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-rebuild 200
+              fdb_assert_graph_node "$NAMESPACE" "$replica" e2e-rebuild-graph
+
+              # And it has to be replicating, not just holding a stale copy.
+              fdb_retry "the rebuilt replica to link up" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-rebuild-post 50
+              fdb_retry "new writes to reach the rebuilt replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-rebuild-post 50
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebuild
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

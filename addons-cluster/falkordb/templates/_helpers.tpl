@@ -134,6 +134,7 @@ Define falkordb sentinel ComponentSpec with ComponentDefinition.
 */}}
 {{- define "falkordb-cluster.sentinelComponentSpec" }}
 - name: falkordb-sent
+  {{- include "redis-cluster.tls" . | indent 2 }}
   replicas: {{ .Values.sentinel.replicas }}
   {{- if .Values.podAntiAffinityEnabled }}
   {{- include "falkordb-cluster.sentinelschedulingPolicy" . | indent 2 }}

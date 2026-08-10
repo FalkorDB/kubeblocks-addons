@@ -1,0 +1,6 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-shtls
+status:
+  phase: Running

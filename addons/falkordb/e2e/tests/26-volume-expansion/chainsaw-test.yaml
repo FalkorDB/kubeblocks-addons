@@ -1,0 +1,144 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: volume-expansion
+spec:
+  description: >-
+    Grow the data volume of a running cluster with a VolumeExpansion OpsRequest.
+
+    Running out of disk is the most ordinary way a database dies, and growing the
+    volume is the one day-2 operation that has to work without downtime and
+    without touching the data. Nothing else in the suite exercises it: every
+    other scenario leaves the volumes at their original size.
+
+    The interesting assertion is not that the OpsRequest reports Succeed. It is
+    that every replica's PVC reports the new size in status.capacity, that the
+    bound PersistentVolume grew with it, and that the dataset and the replication
+    link are still intact afterwards. A request that is accepted and recorded but
+    never actually resizes the volume looks identical from the OpsRequest alone.
+  steps:
+    - name: create the cluster and seed data
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-expand falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-expand falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-expand 100
+              fdb_graph_roundtrip "$NAMESPACE" "$primary" e2e-expand-graph
+
+              # Record the starting size so the check afterwards is comparing
+              # against what was really there rather than the manifest.
+              for pvc in $(kubectl get pvc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-expand,apps.kubeblocks.io/component-name=falkordb" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                fdb_log "$pvc starts at $(kubectl get pvc -n "$NAMESPACE" "$pvc" \
+                  -o jsonpath='{.status.capacity.storage}')"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-expand
+            tail: 100
+
+    - name: expand the data volume from 1Gi to 2Gi
+      try:
+        - apply:
+            file: expand.yaml
+        - assert:
+            file: assert-expand-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-expand-data
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-expand
+            tail: 100
+
+    - name: every data volume really grew
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # status.capacity is written by the resizer once the volume has
+              # actually been expanded, unlike spec.resources.requests which only
+              # records what was asked for.
+              checked=0
+              for pvc in $(kubectl get pvc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-expand,apps.kubeblocks.io/component-name=falkordb" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                fdb_retry "$pvc to report 2Gi" fdb_pvc_capacity_is "$NAMESPACE" "$pvc" 2Gi
+
+                pv="$(kubectl get pvc -n "$NAMESPACE" "$pvc" -o jsonpath='{.spec.volumeName}')"
+                pv_size="$(kubectl get pv "$pv" -o jsonpath='{.spec.capacity.storage}')"
+                if [ "$pv_size" != 2Gi ]; then
+                  echo "PVC $pvc reports 2Gi but its PersistentVolume $pv is still $pv_size" >&2
+                  exit 1
+                fi
+                fdb_log "$pvc and its volume $pv are both 2Gi"
+                checked=$((checked + 1))
+              done
+
+              # A label selector that matches nothing would sail through the loop.
+              if [ "$checked" -ne 2 ]; then
+                echo "expected 2 data PVCs to check, found $checked" >&2
+                kubectl get pvc -n "$NAMESPACE" >&2
+                exit 1
+              fi
+
+              # The sentinel volumes were not part of the request and must not
+              # have been dragged along with it.
+              for pvc in $(kubectl get pvc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-expand,apps.kubeblocks.io/component-name=falkordb-sent" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                size="$(kubectl get pvc -n "$NAMESPACE" "$pvc" -o jsonpath='{.status.capacity.storage}')"
+                if [ "$size" != 1Gi ]; then
+                  echo "sentinel volume $pvc was resized to $size but was not part of the request" >&2
+                  exit 1
+                fi
+              done
+              fdb_log "the sentinel volumes were left at 1Gi"
+      catch:
+        - events: {}
+
+    - name: the cluster is untouched by the resize
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle after the resize" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-expand falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-expand falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-expand falkordb secondary)"
+
+              # Expanding a volume must not cost any data.
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-expand 100
+              fdb_assert_graph_node "$NAMESPACE" "$primary" e2e-expand-graph
+
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-expand-after 20
+              fdb_retry "writes to replicate after the resize" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-expand-after 20
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-expand
+            tail: 100
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

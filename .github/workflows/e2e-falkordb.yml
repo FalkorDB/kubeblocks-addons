@@ -1,0 +1,78 @@
+name: E2E FalkorDB
+
+# End-to-end runs provision a real Kubernetes cluster and take tens of minutes, so
+# they are opt-in: trigger them manually, or add the `e2e/falkordb` label to a PR.
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Single scenario directory to run (empty runs all)"
+        required: false
+        default: ""
+      kb_version:
+        description: "KubeBlocks version to install"
+        required: false
+        default: "1.2.0-alpha.1"
+  pull_request:
+    types: [labeled, synchronize]
+    paths:
+      - "addons/falkordb/**"
+      - "addons-cluster/falkordb/**"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    # On pull_request only run when the opt-in label is present.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e/falkordb')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      E2E_KB_VERSION: ${{ github.event.inputs.kb_version || '1.2.0-alpha.1' }}
+      E2E_TEST: ${{ github.event.inputs.test || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k3d
+        run: |
+          curl -sSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d version
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.15.4
+
+      - name: Install Chainsaw
+        run: make install-chainsaw
+
+      - name: Bring up the cluster and install KubeBlocks + the addon
+        run: make e2e-up
+
+      - name: Run the e2e suite
+        run: make e2e
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "::group::nodes"
+          kubectl get nodes -o wide || true
+          echo "::endgroup::"
+          echo "::group::all resources in kb-system"
+          kubectl -n kb-system get all || true
+          echo "::endgroup::"
+          echo "::group::clusters"
+          kubectl get clusters -A || true
+          kubectl get components -A || true
+          kubectl get opsrequests -A || true
+          echo "::endgroup::"
+          echo "::group::recent events"
+          kubectl get events -A --sort-by=.lastTimestamp | tail -100 || true
+          echo "::endgroup::"
+
+      - name: Tear down
+        if: always()
+        run: make e2e-down

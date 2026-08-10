@@ -1,0 +1,193 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: nodeport-advertised
+spec:
+  description: >-
+    Expose the servers and the sentinels through per-pod NodePort services and
+    prove the advertised address is the one that actually gets announced.
+
+    The ComponentDefinition ships `falkordb-advertised` and `sentinel-advertised`
+    with `podService: true`, and falkordb-register-to-sentinel.sh contains a
+    substantial block of logic that reads REDIS_ADVERTISED_PORT, matches the
+    per-pod service to the pod, and registers the primary with the node address
+    instead of the pod IP. None of that had ever executed.
+
+    The failure it guards against is quiet and total. A sentinel that hands out a
+    pod IP is perfectly usable from inside the cluster, so everything looks
+    correct, and every external client that asks sentinel where the primary is
+    gets an address it cannot route to.
+  steps:
+    - name: create the cluster with advertised NodePort services
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-nodeport
+            tail: 200
+
+    - name: a NodePort service exists for every pod
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # podService means one service per pod, not one for the component,
+              # because an external client has to be able to reach a *specific*
+              # member. A single shared service would round-robin across the
+              # primary and the replicas and make writes fail at random.
+              servers="$(kubectl get svc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-nodeport,apps.kubeblocks.io/component-name=falkordb" \
+                -o jsonpath='{range .items[?(@.spec.type=="NodePort")]}{.metadata.name}{"\n"}{end}' | grep -c . || true)"
+              if [ "$servers" -lt 2 ]; then
+                echo "expected a NodePort service per server pod, found $servers" >&2
+                kubectl get svc -n "$NAMESPACE" >&2
+                exit 1
+              fi
+              echo "$servers NodePort services expose the servers"
+
+              sentinels="$(kubectl get svc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-nodeport,apps.kubeblocks.io/component-name=falkordb-sent" \
+                -o jsonpath='{range .items[?(@.spec.type=="NodePort")]}{.metadata.name}{"\n"}{end}' | grep -c . || true)"
+              if [ "$sentinels" -lt 3 ]; then
+                echo "expected a NodePort service per sentinel pod, found $sentinels" >&2
+                kubectl get svc -n "$NAMESPACE" >&2
+                exit 1
+              fi
+              echo "$sentinels NodePort services expose the sentinels"
+
+              # Every one of them has to have been allocated a port. A NodePort
+              # service with no nodePort is unreachable, and the announce logic
+              # falls back to the pod IP without complaining.
+              for svc in $(kubectl get svc -n "$NAMESPACE" \
+                    -l "app.kubernetes.io/instance=fdb-nodeport" \
+                    -o jsonpath='{range .items[?(@.spec.type=="NodePort")]}{.metadata.name}{"\n"}{end}'); do
+                port="$(kubectl get svc -n "$NAMESPACE" "$svc" \
+                  -o jsonpath='{.spec.ports[0].nodePort}')"
+                if [ -z "$port" ]; then
+                  echo "$svc is a NodePort service with no allocated nodePort" >&2
+                  exit 1
+                fi
+                echo "$svc listens on node port $port"
+              done
+      catch:
+        - events: {}
+
+    - name: the cluster is healthy behind the advertised services
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # Announcing an address the peers cannot reach breaks replication
+              # itself, so this check has to pass before the announce address is
+              # worth looking at.
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-nodeport falkordb 1 1
+              fdb_retry "the replica to link up" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-nodeport falkordb
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-nodeport falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-nodeport 50
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-nodeport falkordb secondary)"
+              fdb_retry "writes to reach the replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-nodeport 50
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-nodeport
+            tail: 200
+
+    - name: sentinel announces the node address, not the pod IP
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-nodeport falkordb)"
+              pod_ip="$(kubectl get pod -n "$NAMESPACE" "$primary" -o jsonpath='{.status.podIP}')"
+              sentinel="$(fdb_pods "$NAMESPACE" fdb-nodeport falkordb-sent | head -1)"
+
+              fdb_retry "sentinel to publish an address for the primary" bash -c '
+                reply=$(kubectl exec -n "'"$NAMESPACE"'" "'"$sentinel"'" -c falkordb-sent -- \
+                  sh -c "REDISCLI_AUTH=\"\$SENTINEL_PASSWORD\" exec redis-cli -p \"\${SENTINEL_SERVICE_PORT:-26379}\" --user \"\$SENTINEL_USER\" SENTINEL get-master-addr-by-name fdb-nodeport-falkordb" 2>&1 | tr -d "\r")
+                echo "$reply" | grep -q "[0-9]" || { echo "sentinel has no address yet: $reply" >&2; exit 1; }
+                echo "$reply"
+              ' > /dev/null
+
+              addr="$(kubectl exec -n "$NAMESPACE" "$sentinel" -c falkordb-sent -- \
+                sh -c 'REDISCLI_AUTH="$SENTINEL_PASSWORD" exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" --user "$SENTINEL_USER" SENTINEL get-master-addr-by-name fdb-nodeport-falkordb' | tr -d '\r')"
+              announced_host="$(echo "$addr" | sed -n '1p')"
+              announced_port="$(echo "$addr" | sed -n '2p')"
+              echo "sentinel points clients at $announced_host:$announced_port (primary pod IP is $pod_ip)"
+
+              # The whole point of the advertised service is that this is NOT the
+              # pod IP. A pod IP here means the announce logic silently fell
+              # through to its default and external clients are broken.
+              if [ "$announced_host" = "$pod_ip" ]; then
+                echo "sentinel announced the pod IP $pod_ip despite the advertised NodePort service" >&2
+                kubectl get svc -n "$NAMESPACE" >&2
+                exit 1
+              fi
+
+              # And the announced port has to be one of the allocated node ports,
+              # not the internal 6379. Announcing a routable host with the wrong
+              # port is just as unusable, and much harder to spot.
+              node_ports="$(kubectl get svc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-nodeport,apps.kubeblocks.io/component-name=falkordb" \
+                -o jsonpath='{range .items[?(@.spec.type=="NodePort")]}{.spec.ports[0].nodePort}{"\n"}{end}')"
+              matched=""
+              for port in $node_ports; do
+                if [ "$port" = "$announced_port" ]; then
+                  matched="yes"
+                  break
+                fi
+              done
+              if [ -z "$matched" ]; then
+                echo "sentinel announced port $announced_port, which is not one of the node ports: $node_ports" >&2
+                exit 1
+              fi
+              echo "the announced port $announced_port is a real node port"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-nodeport
+            tail: 200
+
+    - name: the announced address actually serves traffic
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              sentinel="$(fdb_pods "$NAMESPACE" fdb-nodeport falkordb-sent | head -1)"
+              addr="$(kubectl exec -n "$NAMESPACE" "$sentinel" -c falkordb-sent -- \
+                sh -c 'REDISCLI_AUTH="$SENTINEL_PASSWORD" exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" --user "$SENTINEL_USER" SENTINEL get-master-addr-by-name fdb-nodeport-falkordb' | tr -d '\r')"
+              announced_host="$(echo "$addr" | sed -n '1p')"
+              announced_port="$(echo "$addr" | sed -n '2p')"
+
+              # Dialling the advertised address is what a real client does, and it
+              # is the only check that catches an address that is well formed,
+              # passes every assertion above, and still refuses connections.
+              #
+              # The dial is made from a pod rather than from the machine running
+              # chainsaw, because a kind or k3d node port is reachable inside the
+              # cluster network but is only published to the host if the cluster
+              # happened to be created with an explicit port mapping.
+              primary="$(fdb_primary "$NAMESPACE" fdb-nodeport falkordb)"
+              fdb_retry "the advertised endpoint to answer" bash -c '
+                role=$(kubectl exec -n "'"$NAMESPACE"'" "'"$primary"'" -c falkordb -- \
+                  sh -c "REDISCLI_AUTH=\"\$REDIS_DEFAULT_PASSWORD\" exec redis-cli -h '"$announced_host"' -p '"$announced_port"' INFO replication" 2>&1 |
+                  tr -d "\r" | awk -F: "/^role:/ {print \$2; exit}")
+                [ "$role" = "master" ] || { echo "the advertised endpoint reports role [$role], expected master" >&2; exit 1; }
+                echo "the advertised endpoint answers as the master"
+              '
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-nodeport
+            tail: 200

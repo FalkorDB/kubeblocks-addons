@@ -1,0 +1,198 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: custom-ops-sharding
+spec:
+  description: >-
+    Exercise the two custom OpsDefinitions that target a sharded cluster:
+    falkordb-cluster-rebalance and falkordb-shard-account-ops.
+
+    Neither had ever run. `type: Custom` appeared nowhere in the suite, so both
+    OpsDefinitions were shipped on the strength of their YAML parsing and
+    nothing else - the podInfoExtractor env wiring, the sharding-name lookup and
+    the scripts they mount were all unverified.
+
+    Rebalance is the riskier of the two. It runs /ape-dts as a bare container
+    command with no timeout, which is exactly the shape that made a sharded
+    restore hang forever until the RDB stream parser was fixed. A rebalance that
+    moves slots while ape-dts silently gives up leaves the cluster with holes in
+    its keyspace, so the assertions below check the slot map and the data rather
+    than the OpsRequest phase alone.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-cops
+            tail: 200
+
+    - name: the cluster forms and holds data
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-cops shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-cops shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              # Enough keys that every shard owns some of them, so a rebalance
+              # that drops a slot range cannot hide behind an empty shard.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-cops 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-cops 200
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-cops
+            tail: 200
+
+    - name: run the rebalance custom ops
+      try:
+        - apply:
+            file: rebalance.yaml
+        - assert:
+            file: assert-rebalance-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-cops-rebalance
+        # The rebalance runs as a Job, so its container logs are the only place
+        # an ape-dts failure is visible; the OpsRequest just reports Failed.
+        - script:
+            content: |
+              kubectl get jobs -n "$NAMESPACE" -o wide
+              for job in $(kubectl get jobs -n "$NAMESPACE" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                echo "=== $job ==="
+                kubectl logs -n "$NAMESPACE" "job/$job" --all-containers --tail=100 || true
+              done
+
+    - name: the rebalance left a complete, readable cluster
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-cops shard 3
+
+              # Every node has to agree the slot map is whole. Checking a single
+              # entry point is not enough: a node that was migrated away from
+              # still answers happily about the slots it kept.
+              for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-cops shard); do
+                fdb_retry "$pod to report a complete slot map" \
+                  fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              done
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-cops shard)"
+              fdb_retry "every key to survive the rebalance" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-cops 200
+
+              # And the cluster must still accept writes afterwards.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-cops-after 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-cops-after 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-cops
+            tail: 200
+
+    - name: run the shard account custom ops
+      try:
+        - apply:
+            file: account-ops.yaml
+        - assert:
+            file: assert-account-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-cops-account
+        - script:
+            content: |
+              for pod in $(kubectl get pods -n "$NAMESPACE" \
+                -l app.kubernetes.io/managed-by=kubeblocks \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                case "$pod" in
+                  *account-ops*|*shard-account*)
+                    echo "=== $pod ==="
+                    kubectl logs -n "$NAMESPACE" "$pod" --all-containers --tail=100 || true
+                    ;;
+                esac
+              done
+
+    - name: the account exists on every shard and can actually log in
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The OpsRequest reaching Succeed only proves the job exited 0. The
+              # script counts hosts itself and compares against REPLICAS, so it
+              # can report success having reached a subset if the count happens
+              # to line up. Ask each node directly instead.
+              for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-cops shard); do
+                users="$(fdb_cli "$NAMESPACE" "$pod" ACL USERS | tr -d '\r')"
+                case "$users" in
+                  *e2e-shardops*) fdb_log "$pod knows e2e-shardops" ;;
+                  *)
+                    fdb_fail "$pod does not know e2e-shardops, users are: $users"
+                    exit 1
+                    ;;
+                esac
+              done
+
+              # ACL SAVE is the second half of the script. Without it the account
+              # is lost on restart, which is silent until the pod cycles.
+              for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-cops shard); do
+                kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
+                  sh -c 'grep -q "e2e-shardops" /data/users.acl' \
+                  || fdb_log "$pod has no persisted users.acl entry (ACL SAVE target may differ)"
+              done
+
+              # Finally prove the credentials work, which the ACL USERS listing
+              # does not: a user created without `on` is listed but cannot auth.
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-cops shard)"
+              out="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
+                redis-cli -c --user e2e-shardops --pass shardops-pass --no-auth-warning PING \
+                2>&1 | tr -d '\r')"
+              case "$out" in
+                *PONG*) fdb_log "e2e-shardops authenticated against $pod" ;;
+                *)
+                  fdb_fail "e2e-shardops could not authenticate against $pod: $out"
+                  exit 1
+                  ;;
+              esac
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-cops
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir
