@@ -21,7 +21,7 @@ function restore_sentinel_acl() {
           sentinel_cmd="$sentinel_cmd -a $SENTINEL_PASSWORD"
       fi
       if [ "$($sentinel_cmd ping)" != "PONG" ]; then
-          echo "Waring: failed to connect sentinel ${sentinel_fqdn}, skip"
+          echo "Warning: failed to connect sentinel ${sentinel_fqdn}, skip"
           continue
       fi
       while IFS= read -r user_rule; do

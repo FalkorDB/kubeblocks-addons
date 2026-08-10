@@ -26,10 +26,14 @@ function save_sentinel_acl() {
       if [ -n "$SENTINEL_PASSWORD" ]; then
           sentinel_cmd="$sentinel_cmd -a $SENTINEL_PASSWORD"
       fi
-      acl_list=$($sentinel_cmd ACL LIST)
-      if [ $? -eq 0 ]; then
+      # The assignment has to be the `if` condition itself: `set -e` aborts the
+      # whole backup on a plain failing assignment, so an unreachable sentinel
+      # would kill the script instead of letting the loop try the next one.
+      if acl_list=$($sentinel_cmd ACL LIST); then
           break
       fi
+      echo "WARNING: failed to read ACLs from ${sentinel_fqdn}, trying the next sentinel"
+      acl_list=""
   done
   if [ -z "$acl_list" ]; then
      return

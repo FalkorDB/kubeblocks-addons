@@ -252,6 +252,27 @@ Describe "FalkorDB Account Script Tests"
       End
     End
 
+    Context "with a mix of IP:port@slot and fqdn hosts"
+      redis-cli() {
+        # Echo the connection flags so the assertions can check what the host
+        # and port actually parsed to rather than just that the call succeeded.
+        echo "CONNECT $1 $2 $3 $4"
+        return 0
+      }
+
+      It "keeps the host intact and does not leak a port between hosts"
+        export ACL_COMMAND="ACL SETUSER testuser on >pass ~* +@all"
+        export REPLICAS=2
+        export REDIS_CLI_TLS_CMD=""
+        service_port=6379
+        When run do_acl_command "10.96.180.100:31666@3013,falkordb-0.falkordb-headless.ns.svc" "default" "password123"
+        The status should be success
+        The stdout should include "CONNECT -h 10.96.180.100 -p 31666"
+        The stdout should include "CONNECT -h falkordb-0.falkordb-headless.ns.svc -p 6379"
+        The stdout should include "DO ACL COMMAND FOR ALL HOSTS SUCCESS"
+      End
+    End
+
     Context "when ACL command returns ERR"
       redis-cli() {
         if echo "$*" | grep -q "ACL SAVE"; then

@@ -19,15 +19,21 @@ function do_acl_command() {
         # in case, the host is like this: apple-7bff57f594-shard-b8p-1.apple-7bff57f594-shard-b8p-headless.kubeblocks-cloud-ns.svc.cluster.local,apple-7bff57f594-shard-9x9-0.apple-7bff57f594-shard-9x9-headless.kubeblocks-cloud-ns.svc.cluster.local,apple-7bff57f594-shard-8bf-1.apple-7bff57f594-shard-8bf-headless.kubeblocks-cloud-ns.svc.cluster.local
         # in case of fixed ip mode, the host is like this: 10.96.180.100:6379@1 10.96.180.100:6379@2
         # we need to remove the @1 or @2 and remove the port
-        port=$(echo "$host" | sed -E 's/.*:([0-9]+)@.*/\1/')
-        host=$(echo "$host" | sed 's/@[0-9]*//g' | sed 's/:[0-9]*/ /g')
-        # if the host is a fqdn, port == host; if the host is 10.13.25.19:31666@3013, port != host
-        if [ "$port" != "$host" ]; then
-            service_port="$port"
-        fi
-        cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $service_port --user $user -a $password"
+        #
+        # The port is parsed into a per-host variable rather than into the global
+        # one: a fixed-ip entry followed by a plain fqdn would otherwise keep
+        # talking to the port the previous entry happened to advertise.
+        host_port="$service_port"
+        host="${host%%@*}"
+        case "$host" in
+            *:*)
+                host_port="${host##*:}"
+                host="${host%:*}"
+                ;;
+        esac
+        cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $host_port --user $user -a $password"
         if [ -z "$password" ]; then
-            cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $service_port --user $user"
+            cmd="redis-cli $REDIS_CLI_TLS_CMD -h $host -p $host_port --user $user"
         fi
         if [ -n "$ACL_COMMAND" ]; then
             echo "DO ACL COMMAND FOR HOST: $host"
