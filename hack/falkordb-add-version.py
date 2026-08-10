@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """Register a released FalkorDB image as a supported version of the falkordb addon.
 
-Updates addons/falkordb/values.yaml (mirrorVersions, and optionally the default
-serviceVersion/defaultImageTag) and addons/falkordb/Chart.yaml (chart version and
-appVersion), preserving comments and formatting.
+Updates every file that has to know about a supported version:
+
+  addons/falkordb/values.yaml            mirrorVersions, and optionally serviceVersion/defaultImageTag
+  addons/falkordb/Chart.yaml             chart version and appVersion
+  addons/falkordb/README.md              the supported-versions table and the "Valid options" hints
+  addons-cluster/falkordb/values.yaml    default cluster version
+  addons-cluster/falkordb/values.schema.json  default cluster version
+  addons-cluster/falkordb/Chart.yaml     appVersion
+  examples/falkordb/*.yaml               serviceVersion pinned in the examples
+  examples/falkordb/README.md            the supported-versions table and the "Valid options" hints
+
+Comments and formatting are preserved throughout.
 
 Outputs `key=value` lines to $GITHUB_OUTPUT when running inside GitHub Actions.
 """
@@ -18,8 +27,16 @@ from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString as DQ
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-VALUES_FILE = REPO_ROOT / "addons" / "falkordb" / "values.yaml"
-CHART_FILE = REPO_ROOT / "addons" / "falkordb" / "Chart.yaml"
+ADDON_DIR = REPO_ROOT / "addons" / "falkordb"
+CLUSTER_DIR = REPO_ROOT / "addons-cluster" / "falkordb"
+EXAMPLES_DIR = REPO_ROOT / "examples" / "falkordb"
+
+VALUES_FILE = ADDON_DIR / "values.yaml"
+CHART_FILE = ADDON_DIR / "Chart.yaml"
+ADDON_README = ADDON_DIR / "README.md"
+CLUSTER_VALUES_FILE = CLUSTER_DIR / "values.yaml"
+CLUSTER_SCHEMA_FILE = CLUSTER_DIR / "values.schema.json"
+CLUSTER_CHART_FILE = CLUSTER_DIR / "Chart.yaml"
 
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
@@ -44,6 +61,78 @@ def set_output(**kwargs):
 def bump_patch(version):
     major, minor, patch = parse_version(version)
     return f"{major}.{minor}.{patch + 1}"
+
+
+def rewrite(path, replacer):
+    """Apply replacer to the file's text, writing it back only if it changed."""
+    if not path.exists():
+        return False
+    original = path.read_text(encoding="utf-8")
+    updated = replacer(original)
+    if updated == original:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def supported_versions(entry):
+    """The versions of one major, newest first, as the docs list them."""
+    versions = [str(item["version"]) for item in entry.get("mirrorVersions") or []]
+    return sorted(set(versions), key=parse_version, reverse=True)
+
+
+def refresh_version_lists(path, major, versions):
+    """Update the docs that enumerate the supported versions of a major.
+
+    Two shapes carry the list: the `| 4.0 | a, b, c |` row of the Versions
+    table, and the `# Valid options are: [a, b, c]` hint above serviceVersion.
+    """
+    joined = ", ".join(versions)
+    table_row = re.compile(rf"^(\|\s*{re.escape(major)}\.0\s*\|).*?(\|\s*)$", re.MULTILINE)
+    options = re.compile(r"^(\s*#\s*Valid options are: )\[[^\]]*\](\s*)$", re.MULTILINE)
+
+    def replacer(text):
+        text = table_row.sub(rf"\g<1> {joined} \g<2>", text)
+        return options.sub(rf"\g<1>[{joined}]\g<2>", text)
+
+    return rewrite(path, replacer)
+
+
+def retarget_service_version(path, old, new):
+    """Repoint a pinned serviceVersion, quoted or bare, at the new default."""
+    pattern = re.compile(rf'^(\s*serviceVersion:\s*)"?{re.escape(old)}"?(\s*)$', re.MULTILINE)
+
+    def replacer(text):
+        return pattern.sub(lambda m: f'{m.group(1)}"{new}"{m.group(2)}', text)
+
+    return rewrite(path, replacer)
+
+
+def update_cluster_chart_files(version):
+    """Point the falkordb-cluster chart at the new default version.
+
+    Its own chart version is a pre-release string managed by the release
+    tooling, so only appVersion and the user-facing defaults move here.
+    """
+    changed = rewrite(
+        CLUSTER_VALUES_FILE,
+        lambda text: re.sub(r"^version:\s*\S+\s*$", f"version: {version}\n", text, flags=re.MULTILINE),
+    )
+    changed |= rewrite(
+        CLUSTER_CHART_FILE,
+        lambda text: re.sub(r'^appVersion:\s*\S+\s*$', f'appVersion: "{version}"\n', text, flags=re.MULTILINE),
+    )
+    # Editing the JSON as text keeps the hand-maintained formatting intact; a
+    # json round-trip reflows the whole schema.
+    changed |= rewrite(
+        CLUSTER_SCHEMA_FILE,
+        lambda text: re.sub(
+            r'("version"\s*:\s*\{[^}]*?"default"\s*:\s*)"[^"]*"',
+            lambda m: f'{m.group(1)}"{version}"',
+            text,
+        ),
+    )
+    return changed
 
 
 def main():
@@ -96,9 +185,9 @@ def main():
     mirror_versions.insert(0, new_mirror)
 
     is_new_default = False
+    previous_default = str(entry.get("serviceVersion", "0.0.0"))
     if args.set_default:
-        current_default = str(entry.get("serviceVersion", "0.0.0"))
-        if parse_version(version) > parse_version(current_default):
+        if parse_version(version) > parse_version(previous_default):
             entry["serviceVersion"] = DQ(version)
             entry["defaultImageTag"] = DQ(image_tag)
             is_new_default = True
@@ -114,6 +203,18 @@ def main():
     if is_new_default and entries and entries[0] is entry:
         chart["appVersion"] = DQ(version)
     yaml.dump(chart, CHART_FILE)
+
+    versions = supported_versions(entry)
+    refresh_version_lists(ADDON_README, major, versions)
+    refresh_version_lists(EXAMPLES_DIR / "README.md", major, versions)
+
+    # The examples and the cluster chart advertise one concrete version, so they
+    # only move when the new release actually becomes the default.
+    if is_new_default:
+        update_cluster_chart_files(version)
+        for example in sorted(EXAMPLES_DIR.glob("*.yaml")):
+            retarget_service_version(example, previous_default, version)
+        retarget_service_version(EXAMPLES_DIR / "README.md", previous_default, version)
 
     print(f"added FalkorDB {version} ({image_tag}) to the supported versions")
     set_output(
