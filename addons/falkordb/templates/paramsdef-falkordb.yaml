@@ -1,7 +1,7 @@
 # reuse falkordb4-config-effect-scope.
 {{- range .Values.falkordbVersions }}
 {{- $version := .major }}
-{{- $falkordbImage := printf "%s/%s:%s" ( $.Values.image.registry | default "docker.io" ) $.Values.image.repository .defaultImageTag }}
+{{- $falkordbImage := printf "%s/%s:%s" ( include "falkordb.imageRegistry" $ ) $.Values.image.repository .defaultImageTag }}
 {{- $pd := $.Files.Get "config/falkordb-config-effect-scope.yaml" | fromYaml }}
 ---
 apiVersion: parameters.kubeblocks.io/v1alpha1

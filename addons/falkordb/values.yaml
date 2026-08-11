@@ -6,6 +6,17 @@ nameOverride: ""
 
 fullnameOverride: ""
 
+## Values shared with a parent chart when this chart is used as a subchart.
+global:
+  ## Pull every image in this chart from this registry, whatever each image's own
+  ## `registry` key says. This is the single value to set for a mirrored or
+  ## air-gapped install; leave it empty to keep the per-image registries below.
+  ##
+  ## Only the registry host (and optional namespace prefix) belongs here - the
+  ## repository and tag of each image are unchanged, e.g. setting
+  ## `my-mirror.example.com/ns` renders `my-mirror.example.com/ns/busybox:1.36`.
+  imageRegistry: ""
+
 ## Optionally specify an array of secrets used to pull the images from private registries.
 ## Entries may be plain secret names or objects with a `name` field, e.g.
 ## imagePullSecrets:
@@ -67,14 +78,18 @@ image:
   # The fix is https://github.com/apecloud/ape-dts/pull/564 - bump these tags to
   # the first release that carries it.
   apeDts:
-    registry: ""
+    ## ape-dts is a third-party image and is not mirrored alongside FalkorDB's
+    ## own images, so this must not inherit `image.registry`. Use
+    ## `global.imageRegistry` to move every image at once.
+    registry: docker.io
     repository: apecloud/ape-dts
     tag: 2.0.26-alpha.16
     reshardTag: 2.0.26-alpha.16
 
 # See the apeDts note above: this tag has the same unfixed RDB stream parser.
 apeDtsImage:
-  registry: ""
+  ## Third-party image; see the note on `image.apeDts.registry`.
+  registry: docker.io
   repository: apecloud/ape-dts
   tag: 2.0.26-alpha.16
 
@@ -85,8 +100,8 @@ dbctlImage:
   tag: v1.1.0
 
 busyboxImage:
-  # if the value of busyboxImage.registry is not specified using `--set`, it will be set to the value of 'image.registry' by default
-  registry: ""
+  ## Third-party image; see the note on `image.apeDts.registry`.
+  registry: docker.io
   repository: busybox
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
@@ -94,7 +109,7 @@ busyboxImage:
 
 metrics:
   image:
-    # if the value of metrics.image.registry is not specified using `--set`, it will be set to the value of 'image.registry' by default
+    ## Third-party image; see the note on `image.apeDts.registry`.
     registry: docker.io
     repository: falkordb/redis_exporter
     tag: v1.72.4

@@ -24,7 +24,7 @@ spec:
       - name: FALKORDB_IMAGE
         valueFrom:
           versionMapping:
-            {{- $repository := printf "%s/%s" (.Values.image.registry | default "docker.io") .Values.image.repository }}
+            {{- $repository := printf "%s/%s" (include "falkordb.imageRegistry" .) .Values.image.repository }}
             {{- range .Values.falkordbVersions }}
             {{- range .mirrorVersions }}
             - serviceVersions:
