@@ -84,12 +84,43 @@ Define falkordb cluster component script template name
 falkordb-cluster-scripts-template-{{ .Chart.Version }}
 {{- end -}}
 
+{{/*
+Resolve the registry an image should be pulled from.
+
+`global.imageRegistry` wins over every per-image registry, so a parent chart or
+an air-gapped install can retarget the whole chart with a single value. When it
+is unset the caller's own registry is used, and `docker.io` is the last resort.
+
+Third-party images (busybox, ape-dts, redis_exporter, dbctl) deliberately do NOT
+fall back to `.Values.image.registry`. That key points at wherever FalkorDB's own
+images live, and upstream images are not mirrored there, so inheriting it renders
+unpullable references such as `ghcr.io/busybox`. Use `global.imageRegistry` to
+move everything at once instead.
+
+Usage:
+  {{ include "falkordb.registry" (dict "ctx" $ "registry" $.Values.busyboxImage.registry) }}
+*/}}
+{{- define "falkordb.registry" -}}
+{{- $global := "" -}}
+{{- with .ctx.Values.global -}}
+{{- $global = .imageRegistry | default "" -}}
+{{- end -}}
+{{- $global | default .registry | default "docker.io" -}}
+{{- end -}}
+
+{{/*
+The registry holding FalkorDB's own images.
+*/}}
+{{- define "falkordb.imageRegistry" -}}
+{{ include "falkordb.registry" (dict "ctx" . "registry" .Values.image.registry) }}
+{{- end -}}
+
 {{- define "falkordb4.image" -}}
 {{ include "falkordb.defaultImage" . }}
 {{- end }}
 
 {{- define "falkordb.repository" -}}
-{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.repository }}
+{{ include "falkordb.imageRegistry" . }}/{{ .Values.image.repository }}
 {{- end }}
 
 {{/*
@@ -117,7 +148,7 @@ imagePullSecrets:
 {{- $defaultTag = .defaultImageTag | default $defaultTag -}}
 {{- $repository = .repository | default $repository -}}
 {{- end -}}
-{{ .Values.image.registry | default "docker.io" }}/{{ $repository }}:{{ $defaultTag }}
+{{ include "falkordb.imageRegistry" . }}/{{ $repository }}:{{ $defaultTag }}
 {{- end }}
 
 {{- define "falkordb.imageVersionMapping" -}}
@@ -126,7 +157,7 @@ valueFrom:
   {{- range .Values.falkordbVersions }}
   {{- $defaultRepository := .repository | default $.Values.image.repository -}}
   {{- range .mirrorVersions }}
-  {{- $falkordbRepository := printf "%s/%s" ( $.Values.image.registry | default "docker.io" ) ( .repository | default $defaultRepository ) }}
+  {{- $falkordbRepository := printf "%s/%s" ( include "falkordb.imageRegistry" $ ) ( .repository | default $defaultRepository ) }}
     - serviceVersions:
         - "{{ .version }}"
       mappedValue: "{{ $falkordbRepository }}:{{ .imageTag }}"
@@ -135,19 +166,23 @@ valueFrom:
 {{- end }}
 
 {{- define "busybox.image" -}}
-{{ .Values.busyboxImage.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.busyboxImage.repository}}:{{ .Values.busyboxImage.tag }}
+{{ include "falkordb.registry" (dict "ctx" . "registry" .Values.busyboxImage.registry) }}/{{ .Values.busyboxImage.repository}}:{{ .Values.busyboxImage.tag }}
 {{- end }}
 
 {{- define "metrics.repository" -}}
-{{ .Values.metrics.image.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.metrics.image.repository}}
+{{ include "falkordb.registry" (dict "ctx" . "registry" .Values.metrics.image.registry) }}/{{ .Values.metrics.image.repository}}
 {{- end }}
 
 {{- define "metrics.image" -}}
-{{ .Values.metrics.image.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.metrics.image.repository}}:{{ .Values.metrics.image.tag }}
+{{ include "metrics.repository" . }}:{{ .Values.metrics.image.tag }}
 {{- end }}
 
 {{- define "apeDts.image" -}}
-{{ .Values.apeDtsImage.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.apeDtsImage.repository}}:{{ .Values.apeDtsImage.tag }}
+{{ include "falkordb.registry" (dict "ctx" . "registry" .Values.apeDtsImage.registry) }}/{{ .Values.apeDtsImage.repository}}:{{ .Values.apeDtsImage.tag }}
+{{- end }}
+
+{{- define "dbctl.image" -}}
+{{ include "falkordb.registry" (dict "ctx" . "registry" .Values.dbctlImage.registry) }}/{{ .Values.dbctlImage.repository }}:{{ .Values.dbctlImage.tag }}
 {{- end }}
 
 {{/*
@@ -190,7 +225,7 @@ reconfigure:
 {{- end -}}
 
 {{- define "apeDts.reshard.image" -}}
-{{ .Values.image.apeDts.registry | default ( .Values.image.registry | default "docker.io" ) }}/{{ .Values.image.apeDts.repository}}:{{ .Values.image.apeDts.reshardTag }}
+{{ include "falkordb.registry" (dict "ctx" . "registry" .Values.image.apeDts.registry) }}/{{ .Values.image.apeDts.repository}}:{{ .Values.image.apeDts.reshardTag }}
 {{- end }}
 
 {{- define "kblib.syncer.policyRules" -}}

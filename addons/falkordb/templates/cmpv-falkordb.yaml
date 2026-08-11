@@ -20,13 +20,13 @@ spec:
   {{- range .Values.falkordbVersions }}
   {{- $defaultRepository := .repository | default $.Values.image.repository -}}
   {{- range .mirrorVersions }}
-  {{- $falkordbRepository := printf "%s/%s" ( $.Values.image.registry | default "docker.io" ) ( .repository | default $defaultRepository ) }}
+  {{- $falkordbRepository := printf "%s/%s" ( include "falkordb.imageRegistry" $ ) ( .repository | default $defaultRepository ) }}
   - name: {{ .version }}
     serviceVersion: {{ .version }}
     images:
       falkordb: {{ $falkordbRepository }}:{{ .imageTag }}
       metrics: {{ include "metrics.repository" $ }}:{{ $.Values.metrics.image.tag }}
-      init-dbctl: {{ $.Values.dbctlImage.registry | default ( $.Values.image.registry | default "docker.io" ) }}/{{ $.Values.dbctlImage.repository }}:{{ $.Values.dbctlImage.tag }}
+      init-dbctl: {{ include "dbctl.image" $ }}
       postProvision: {{ $falkordbRepository }}:{{ .imageTag }}
       accountProvision: {{ $falkordbRepository }}:{{ .imageTag }}
       switchover: {{ $falkordbRepository }}:{{ .imageTag }}
