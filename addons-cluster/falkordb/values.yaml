@@ -88,7 +88,15 @@ falkordbCluster:
   customSecretNamespace: ""
 
 extra:
-  disableExporter: true
+  ## The metrics exporter is on by default. Besides being what most users want,
+  ## turning it off makes an Upgrade OpsRequest hang forever: KubeBlocks checks
+  ## every container the ComponentDefinition declares against the pod, and its
+  ## lookup falls back to the pod's *first* container when the named one is
+  ## missing, so the absent `metrics` container resolves to the falkordb image,
+  ## never matches the expected exporter image, and the OpsRequest stays
+  ## Running after a successful upgrade.
+  ## See https://github.com/apecloud/kubeblocks/issues/10757.
+  disableExporter: false
 
 prometheus:
   enabled: false

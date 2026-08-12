@@ -28,62 +28,64 @@ the cell in, see [Testing another version](#testing-another-version).
 
 | Feature | 1.0.2 | 1.1.0-beta.9 | 1.2.0-alpha.1 | 1.2.0-alpha.2 | 1.2.0-alpha.3 | e2e |
 |---|---|---|---|---|---|---|
-| Standalone cluster | Yes | Yes | Yes | ? | Yes | 04 |
-| Replication cluster (with Sentinel) | Yes | Yes | Yes | ? | Yes | 01, 11 |
-| Sharded cluster | Yes | Yes | Yes | ? | fixed, unverified — A6 | 03 |
-| Switchover | Yes | Yes | Yes | ? | Yes | 02 |
-| Automatic failover, replication | Yes | Yes | Yes | ? | Yes | 06 |
-| Automatic failover, sharded | Yes | Yes | Yes | ? | fixed, unverified — A6 | 23 |
-| Self-healing, sharded | Yes | Yes | Yes | ? | fixed, unverified — A6 | 08 |
-| Horizontal scaling, replication | Yes | Yes | Yes | ? | Yes | 01, 15 |
-| Horizontal scaling, sharded (reshard) | **No** — B5, B6 | Yes | Yes | ? | fixed, unverified — A6 | 03 |
-| Vertical scaling | Yes | Yes | Yes | ? | Yes | 07 |
-| Volume expansion | Yes | Yes | Yes | ? | Yes | 26 |
-| Restart | Yes | Yes | Yes | ? | Yes | 07 |
-| Stop / start | Yes | Yes | Yes | ? | Yes | 16 |
-| Reconfigure | Yes | Yes | Yes | ? | Yes | 10 |
-| Minor version upgrade | Yes | Yes | Yes | ? | Yes | 18 |
-| Account and ACL management | Yes | Yes | Yes | ? | fixed, unverified — A1, A6 | 20 |
-| Custom ops (rebalance, reset master) | Yes | Yes | Yes | ? | fixed, unverified — A6 | 21, 22 |
-| Expose via NodePort | Yes | Yes | Yes | ? | Yes | 17 |
-| External hostname, replication | Yes | Yes | Yes | ? | Yes | 27 |
-| External hostname, sharded | Yes | Yes | Yes | ? | fixed, unverified — A6 | 28 |
-| Metrics exporter | Yes | Yes | Yes | ? | Yes | 24 |
-| TLS, standalone and replication | Yes | Yes | Yes | ? | Yes | 05 |
-| TLS, sharded | Yes, with a user-supplied CA — B3 | Yes, with a user-supplied CA — B3 | Yes, with a user-supplied CA — B3 | ? — B3 applies | fixed, unverified — A6, B3 | 19 |
-| Backup, replication (`datafile`, `aof`) | Yes | Yes | Yes | ? | Yes | 09, 13 |
-| Backup, volume snapshot | Yes | Yes | Yes | ? | Yes | 25 |
+| Standalone cluster | Yes | Yes | Yes | Yes | Yes | 04 |
+| Replication cluster (with Sentinel) | Yes | Yes | Yes | Yes | Yes | 01, 11 |
+| Sharded cluster | Yes | Yes | Yes | Yes | Yes | 03 |
+| Switchover | Yes | Yes | Yes | Yes | Yes | 02 |
+| Automatic failover, replication | Yes | Yes | Yes | Yes | Yes | 06 |
+| Automatic failover, sharded | Yes | Yes | Yes | Yes | Yes | 23 |
+| Self-healing, sharded | Yes | Yes | Yes | Yes | Yes | 08 |
+| Horizontal scaling, replication | Yes | Yes | Yes | Yes | Yes | 01, 15 |
+| Horizontal scaling, sharded (reshard) | **No** — B5, B6 | Yes | Yes | Yes | Yes | 03 |
+| Vertical scaling | Yes | Yes | Yes | Yes | Yes | 07 |
+| Volume expansion | Yes | Yes | Yes | Yes | Yes | 26 |
+| Restart | Yes | Yes | Yes | Yes | Yes | 07 |
+| Stop / start | Yes | Yes | Yes | Yes | Yes | 16 |
+| Reconfigure | Yes | Yes | Yes | Yes | Yes | 10 |
+| Minor version upgrade | Yes | Yes | Yes | Yes | Yes | 18 |
+| Account and ACL management | Yes | Yes | Yes | Yes | Yes | 20 |
+| Custom ops (rebalance, reset master) | Yes | Yes | Yes | Yes | Yes | 21, 22 |
+| Expose via NodePort | Yes | Yes | Yes | Yes | Yes | 17 |
+| External hostname, replication | Yes | Yes | Yes | Yes | Yes | 27 |
+| External hostname, sharded | Yes | Yes | Yes | Yes | Yes | 28 |
+| Metrics exporter | Yes | Yes | Yes | Yes | Yes | 24 |
+| TLS, standalone and replication | Yes | Yes | Yes | Yes | Yes | 05 |
+| TLS, sharded | Yes, with a user-supplied CA — B3 | Yes, with a user-supplied CA — B3 | Yes, with a user-supplied CA — B3 | Yes, with a user-supplied CA — B3 | Yes, with a user-supplied CA — B3 | 19 |
+| Backup, replication (`datafile`, `aof`) | Yes | Yes | Yes | Yes | Yes | 09, 13 |
+| Backup, volume snapshot | Yes | Yes | Yes | Yes | Yes | 25 |
 | Backup, sharded | ? — A2 | ? — A2 | Yes, but not exercised in CI — A2 | ? — A2 | ? — A2 | 12 |
 | **Restore, standalone and replication** | Yes | Yes | Yes | **No** — B1, B2 | **No** — B1, B2 | 09 |
 | **Restore, point-in-time (AOF)** | Yes | Yes | Yes | **No** — B1, B2 | **No** — B1, B2 | 13 |
 | **Restore, volume snapshot** | Yes | Yes | Yes | **No** — B1, B2 | **No** — B1, B2 | 25 |
 | **Restore, sharded** | **No** — C1 | **No** — C1 | **No** — C1 | **No** — B1, B2, C1 | **No** — B1, B2, C1 | 12, A2 |
-| **Rebuild instance** | ? — B4 applies | ? — B4 applies | **No** — B4 | **No** — B4 | **No** — B4 | 14, A3 |
+| **Rebuild instance** | ? — B7 | ? — B7 | ? — B7 | ? — B7 | ? — B7 | 14, A3 |
 
-The `1.0.2`, `1.1.0-beta.9` and `1.2.0-alpha.3` columns were measured by
-[run 31578001813](https://github.com/FalkorDB/kubeblocks-addons/actions/runs/31578001813),
-four shards each. `1.2.0-alpha.2` has never been run through the suite: the
-cells there are inferred from its CRDs only.
-
-`fixed, unverified` means the cause was found and fixed after that run and the
-fix has not yet been through CI. Those cells are not `Yes` until a green run
-says so.
+Every column was measured by
+[run 31582752684](https://github.com/FalkorDB/kubeblocks-addons/actions/runs/31582752684),
+four shards each, which is the first run to include `1.2.0-alpha.2` and the
+first with the A1/A5/A6 fixes in it. The only red cells left are the three
+restore scenarios on `alpha.2`/`alpha.3` and sharded scale-in on `1.0.2`;
+`1.1.0-beta.9` and `1.2.0-alpha.1` were green on all four shards. `alpha.1`
+shard 2 failed on the first attempt in `actions/checkout` with
+`server certificate verification failed`, before a single test ran, and passed
+on re-run.
 
 C1 is a bug in ape-dts rather than in KubeBlocks, so it holds sharded restore
 down on every version regardless of what the platform does.
 
 The practical readings:
 
-- **The addon installs cleanly on every version tested, including `alpha.3`.**
-  Nothing is rejected; what breaks, breaks at runtime.
+- **The addon installs cleanly on every version tested.** Nothing is rejected;
+  what breaks, breaks at runtime.
 - **`1.0.2` — the last stable release — runs everything except sharded scale-in.**
   That single gap is not the addon's: `1.0.2` never implemented the
   `shardRemove` hook the drain depends on (B5), so the shard is deleted with its
   slots and data still on it. Everything else on the stable release works.
-- **`1.2.0-alpha.1` and `1.1.0-beta.9` are equivalent in practice**, and are the
-  only versions where sharded scale-in is safe.
-- **`alpha.3`'s sharded failures were ours** — A1 left every instance
-  passwordless (A6). Fixed; pending re-measurement.
+- **`1.1.0-beta.9` and `1.2.0-alpha.1` pass the entire suite**, and are the only
+  versions where sharded scale-in is safe *and* restore works.
+- **`alpha.3`'s sharded failures were ours, and are gone.** A1 left every
+  instance passwordless (A6); with that fixed, `alpha.2` and `alpha.3` fail on
+  exactly the same three scenarios and nothing else.
 - **Restore works up to and including `1.2.0-alpha.1` and nowhere after it.**
   `alpha.2` removed the annotation the addon uses in the same release that
   introduced the replacement, and the replacement has never completed a restore
@@ -141,7 +143,7 @@ E2E_KB_VERSION=1.0.2 make e2e-up && make e2e
 |---|---|---|---|---|
 | A1 | The three ComponentDefinitions set `systemAccounts[].passwordGenerationPolicy`, which `1.2.0-alpha.3` renamed to `passwordConfig`. It is not rejected: the field is absent from that release's `systemAccounts` item schema and the schema does not preserve unknown fields, so the API server prunes it silently. | `1.2.0-alpha.3`+ | **fixed** | Nothing. The spelling is now a chart value, `systemAccountPasswordField`, because no release serves both names except the 1.1 line — writing both is not an option either, since `kubectl apply` defaults to strict decoding and rejects the unknown one even though Helm prunes it. [e2e/setup/kb-cluster.sh](e2e/setup/kb-cluster.sh) maps `KB_VERSION` to the right spelling. 27 of the addons in this repo still carry the bare old name. |
 | A2 | Sharded backup/restore ([e2e/tests/12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore)) is excluded from CI. | all | excluded from CI | C1 |
-| A3 | `RebuildInstance` ([e2e/tests/14-rebuild-instance](e2e/tests/14-rebuild-instance)) is excluded from CI. | all | excluded from CI | B4 |
+| A3 | `RebuildInstance` ([e2e/tests/14-rebuild-instance](e2e/tests/14-rebuild-instance)) is excluded from CI. It passes locally on `local-path`, where the race below is reliably won. | all | excluded from CI | B7 |
 | A4 | Application-created ACL accounts are not captured by backups. | all | open, product limitation | A decision on whether to capture them. Identical in the in-tree `redis` addon. |
 | A5 | [e2e/tests/15-sentinel-scaling](e2e/tests/15-sentinel-scaling) timed out waiting for a promotion after the primary was killed with five sentinels watching. Sentinel *did* see the outage — `+sdown`, `+odown`, four `+try-failover` — but every attempt ended in `-failover-abort-not-elected`: no candidate reached the majority of 3. The scenario killed the primary as soon as each new sentinel monitored the master, without waiting for the five to discover each other, and a sentinel that knows no peers votes for itself. Failed on `1.1.0-beta.9` and `1.2.0-alpha.1`, passed on `1.0.2` and `1.2.0-alpha.3` in the same run — a test race, not a version boundary. | CI only | **fixed** | Nothing. The scenario now waits for every sentinel to report `num-other-sentinels` 4 before killing the primary. |
 | A6 | On `1.2.0-alpha.3` every FalkorDB instance came up **with no password at all**: `AUTH` answered `ERR AUTH <password> called without any password configured for the default user` 384–1231 times per job, and zero times on `1.0.2`, `1.1.0-beta.9` and `1.2.0-alpha.1`. This is A1's blast radius, not a separate bug — `GenerateSystemAccountPassword` returns the empty string when `PasswordConfig` is nil, the pruned field made it nil, the empty password reached the container as an empty `REDIS_DEFAULT_PASSWORD`, and [scripts/falkordb-start.sh](scripts/falkordb-start.sh) then skips writing the `user default on >...` ACL line entirely. Every sharded scenario failed at its first read or write; replication scenarios retried through it and passed, because `redis-cli` prints `AUTH failed:` and carries on. | `1.2.0-alpha.3` | **fixed** | Nothing — fixed by A1. Worth remembering as the reason a pruned field is not a cosmetic problem. |
@@ -153,9 +155,10 @@ E2E_KB_VERSION=1.0.2 make e2e-up && make e2e
 | B1 | `kubeblocks.io/restore-from-backup` was removed in `1.2.0-alpha.2` rather than deprecated. It is dropped without an error and the cluster reports `Running` over an empty volume. | `1.2.0-alpha.2`+ | [#10755](https://github.com/apecloud/kubeblocks/issues/10755), open, confirmed intentional | A rejection or warning event for the obsolete annotation, plus B2 before the addon can migrate. |
 | B2 | `Cluster.spec.restore` has never completed a restore in any release that has it. `alpha.2` hung on the `restore-manager` sidecar ([#10749](https://github.com/apecloud/kubeblocks/issues/10749), closed as duplicate); `alpha.3` deletes the `kb-populate-<uid>` PVC underneath its own `prepareData` job. | `1.2.0-alpha.2`+ | [#10755](https://github.com/apecloud/kubeblocks/issues/10755), open, assigned | An upstream fix. This is the single blocker on moving the pin past `alpha.1`. |
 | B3 | Every shard of a sharding gets its own self-signed CA, so the Redis cluster bus cannot chain-validate between shards. `ShardingDefinition.spec.tls.shared` is the intended fix and is accepted by the CRD, but `clusterShardingTLSTransformer` is never added to the cluster reconciler's transformer chain, in every tag from `v1.1.0-alpha.4` to `main`, so the field is silently ignored. | all | [#10756](https://github.com/apecloud/kubeblocks/issues/10756), open | A one-line registration upstream. Until then, sharded TLS requires a user-supplied CA. |
-| B4 | An Upgrade OpsRequest hangs forever when a ComponentDefinition declares a container the pod does not have (`disableExporter: true`). | all | [#10757](https://github.com/apecloud/kubeblocks/issues/10757), open | An upstream fix. |
-| B5 | `ShardingDefinition.spec.lifecycleActions.shardAdd` and `shardRemove` are served by the `1.0.2` CRD and never invoked: at that tag the identifiers appear only in `apis/apps/v1/shardingdefinition_types.go` and the generated deepcopy, with no reference anywhere in `controllers/`. `handleShardAddNRemove` first appears in the 1.1 line. So a sharded scale-in deletes the shard without ever running the addon's drain hook. | `1.0.2` | open, not yet filed | An upstream fix or an explicit rejection. There is no addon-side workaround: without a controller call there is no hook point. Same class as B3 — a field the API accepts and the controller ignores. |
-| B6 | Consequence of B5: on `1.0.2`, scaling a sharding in from 4 to 3 shards reports success in ~30s — the cluster returns to 3 shards, all 16384 slots assigned, state `ok` — but the removed shard's keys are gone and the survivors still redirect to it (`Could not connect to Redis at fdb-shard-shard-zbv-0...: Name or service not known`). Scale-*out* and rebalance on the same version are fine, because the addon drives those itself. | `1.0.2` | open, not yet filed | B5. |
+| B4 | An Upgrade OpsRequest hangs forever when a ComponentDefinition declares a container the pod does not have. KubeBlocks compares every declared container against the pod and falls back to the pod's *first* container when the named one is absent, so a missing `metrics` container resolves to the falkordb image, never matches the expected exporter image, and the OpsRequest stays `Running` after a successful upgrade. The trigger is `disableExporter: true`. | all | [#10757](https://github.com/apecloud/kubeblocks/issues/10757), open | An upstream fix. Worked around by shipping the exporter **enabled** by default in [addons-cluster/falkordb](../../addons-cluster/falkordb/values.yaml), and by keeping it on in [e2e/tests/18-version-upgrade](e2e/tests/18-version-upgrade); anyone who turns it off cannot upgrade until this is fixed. |
+| B5 | `ShardingDefinition.spec.lifecycleActions.shardAdd` and `shardRemove` are served by the `1.0.2` CRD and never invoked: at that tag the identifiers appear only in `apis/apps/v1/shardingdefinition_types.go` and the generated deepcopy, with no reference anywhere in `controllers/`. The API landed in 2024 ([#8272](https://github.com/apecloud/kubeblocks/pull/8272), renamed by [#8621](https://github.com/apecloud/kubeblocks/pull/8621)); the implementation only arrived in [#9830](https://github.com/apecloud/kubeblocks/pull/9830), merged to `main` after `release-1.0` was branched. So a sharded scale-in deletes the shard without ever running the addon's drain hook. | `1.0.2`, `1.0.3-beta.10` | [#10768](https://github.com/apecloud/kubeblocks/issues/10768), open | An upstream backport or an explicit rejection. There is no addon-side workaround: without a controller call there is no hook point. Same class as B3 — a field the API accepts and the controller ignores. The in-tree `redis`, `mongodb` and `rocketmq` addons declare the same hook. |
+| B6 | Consequence of B5: on `1.0.2`, scaling a sharding in from 4 to 3 shards reports success in ~30s — the cluster returns to 3 shards, all 16384 slots assigned, state `ok` — but the removed shard's keys are gone and the survivors still redirect to it (`Could not connect to Redis at fdb-shard-shard-zbv-0...: Name or service not known`). Scale-*out* and rebalance on the same version are fine, because the addon drives those itself. | `1.0.2` | [#10768](https://github.com/apecloud/kubeblocks/issues/10768), open | B5. |
+| B7 | `RebuildInstance` provisions a scratch PVC, waits for its PV, restores into it and rebinds that PV onto the original claim, and neither storage class the e2e cluster offers survives the round trip. `local-path` (`WaitForFirstConsumer`) has no PV until the rebuild pod is scheduled, so KubeBlocks gives up with `can not found the pv by the pvc "rebuild-<hash>-..."` — a race, won on a developer machine and lost on a loaded runner. `csi-hostpath-sc` (`Immediate`) clears that and then stalls forever on `Waiting for source PVCs to bind restored PVs`. | all | open, not yet filed | An upstream fix, or a documented storage-class requirement. Previously mis-attributed to B4, which is a different failure. |
 
 ### C — other upstream
 
