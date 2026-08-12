@@ -93,15 +93,7 @@ spec:
       volumeName: scripts
       defaultMode: 0555
   {{- include "kblib.syncer.policyRules" $ | nindent 2 }}
-  systemAccounts:
-    - name: default
-      initAccount: true
-      passwordGenerationPolicy:
-        length: 10
-        numDigits: 5
-        numSymbols: 0
-        letterCase: MixedCases
-        seed: 5wM4uhmKV1Ohy087
+  {{- include "falkordb.systemAccounts" $ | nindent 2 }}
   hostNetwork:
     containerPorts:
       - container: falkordb-cluster

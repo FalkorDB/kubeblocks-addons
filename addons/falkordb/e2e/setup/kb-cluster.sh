@@ -60,6 +60,19 @@ log() {
   echo "[e2e-cluster] $*"
 }
 
+# KubeBlocks renamed systemAccounts[].passwordGenerationPolicy to passwordConfig
+# in 1.2.0-alpha.3. The wrong name is pruned rather than rejected and the account
+# then has no password at all, so this has to track KB_VERSION exactly. Anything
+# newer than the versions listed here is assumed to use the new name.
+system_account_password_field() {
+  case "$KB_VERSION" in
+    0.*|1.0.*|1.1.*|1.2.0-alpha.0|1.2.0-alpha.1|1.2.0-alpha.2)
+      echo "passwordGenerationPolicy" ;;
+    *)
+      echo "passwordConfig" ;;
+  esac
+}
+
 require() {
   local missing=0
   local tool
@@ -228,6 +241,7 @@ install_addon() {
 
   helm upgrade --install falkordb "$ADDON_CHART" \
     --namespace "$KB_NAMESPACE" \
+    --set "systemAccountPasswordField=$(system_account_password_field)" \
     ${ownership[@]+"${ownership[@]}"} \
     --wait --timeout "$KB_WAIT"
 
