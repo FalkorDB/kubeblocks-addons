@@ -30,7 +30,7 @@ FalkorDB is an open source (SSPL licensed) in-memory graph database based on Red
 - Kubernetes cluster >= v1.21
 - `kubectl` installed, refer to [K8s Install Tools](https://kubernetes.io/docs/tasks/tools/)
 - Helm, refer to [Installing Helm](https://helm.sh/docs/intro/install/)
-- KubeBlocks installed and running, refer to [Install Kubeblocks](../docs/prerequisites.md)
+- KubeBlocks installed and running, refer to [Install Kubeblocks](../docs/prerequisites.md). The addon is tested against a single KubeBlocks version and some capabilities are unavailable or silently broken on others — see [COMPATIBILITY.md](COMPATIBILITY.md).
 - FalkorDB Addon Enabled, refer to [Install Addons](../docs/install-addon.md)
 - Create K8s Namespace `demo`, to keep resources created in this tutorial isolated:
 

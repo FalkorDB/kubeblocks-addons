@@ -9,8 +9,12 @@ on:
         description: "Single scenario directory to run (empty runs all)"
         required: false
         default: ""
-      kb_version:
-        description: "KubeBlocks version to install"
+      kb_versions:
+        # Every version listed here is run as its own leg of the matrix, so the
+        # results can be transcribed straight into addons/falkordb/COMPATIBILITY.md.
+        # Useful values: 1.0.2 (the last stable release), 1.1.0-beta.9,
+        # 1.2.0-alpha.1 (what the addon is pinned to), 1.2.0-alpha.2, 1.2.0-alpha.3.
+        description: "Comma-separated KubeBlocks versions to test"
         required: false
         default: "1.2.0-alpha.1"
       shards:
@@ -34,8 +38,9 @@ concurrency:
 
 jobs:
   plan:
-    # Decide how many machines to split the suite across. A single-scenario run
-    # has nothing to spread, so it stays on one.
+    # Decide how many machines to split the suite across, and which KubeBlocks
+    # versions to run against. A single-scenario run has nothing to spread, so it
+    # stays on one.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'e2e/falkordb')
@@ -43,18 +48,39 @@ jobs:
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
       shard_count: ${{ steps.plan.outputs.shard_count }}
+      kb_versions: ${{ steps.plan.outputs.kb_versions }}
     steps:
         - name: Plan the shards
           id: plan
           env:
             TEST: ${{ github.event.inputs.test || '' }}
             SHARDS: ${{ github.event.inputs.shards || '4' }}
+            KB_VERSIONS: ${{ github.event.inputs.kb_versions || '1.2.0-alpha.1' }}
           run: |
             set -euo pipefail
             if [[ ! "$SHARDS" =~ ^[0-9]+$ ]]; then
               echo "::error::shards must be a number, got '$SHARDS'"
               exit 1
             fi
+
+            # The versions end up in `helm --version` and in a release asset URL,
+            # so only accept things that actually look like a version.
+            versions=()
+            while IFS= read -r v; do
+              [ -n "$v" ] || continue
+              if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+                echo "::error::'$v' is not a valid KubeBlocks version"
+                exit 1
+              fi
+              versions+=("$v")
+            done < <(echo "$KB_VERSIONS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ "${#versions[@]}" -eq 0 ]; then
+              echo "::error::no KubeBlocks versions given"
+              exit 1
+            fi
+            printf '%s\n' "${versions[@]}" | jq -R . | jq -sc . \
+              | sed 's/^/kb_versions=/' >> "$GITHUB_OUTPUT"
+
             if [ -n "$TEST" ] || [ "$SHARDS" -le 1 ]; then
               echo 'shards=[0]' >> "$GITHUB_OUTPUT"
               echo 'shard_count=0' >> "$GITHUB_OUTPUT"
@@ -66,15 +92,16 @@ jobs:
 
   e2e:
     needs: plan
-    name: e2e (shard ${{ matrix.shard }})
+    name: e2e (kb ${{ matrix.kb }}, shard ${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
+        kb: ${{ fromJSON(needs.plan.outputs.kb_versions) }}
         shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      E2E_KB_VERSION: ${{ github.event.inputs.kb_version || '1.2.0-alpha.1' }}
+      E2E_KB_VERSION: ${{ matrix.kb }}
       E2E_TEST: ${{ github.event.inputs.test || '' }}
       E2E_SHARD_COUNT: ${{ needs.plan.outputs.shard_count }}
       E2E_SHARD_INDEX: ${{ matrix.shard }}
@@ -104,10 +131,45 @@ jobs:
         run: make install-chainsaw
 
       - name: Bring up the cluster and install KubeBlocks + the addon
+        id: up
         run: make e2e-up
 
       - name: Run the e2e suite
+        id: suite
         run: make e2e
+
+      - name: Record the outcome
+        if: always()
+        env:
+          # `install` failing is a different signal from the suite failing: it
+          # means the addon's definitions were rejected outright on this version.
+          UP: ${{ steps.up.outcome }}
+          SUITE: ${{ steps.suite.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$UP" != "success" ]; then
+            result="install failed"
+          elif [ "$SUITE" = "success" ]; then
+            result="pass"
+          else
+            result="fail"
+          fi
+          mkdir -p results
+          printf '%s\t%s\t%s\n' "$E2E_KB_VERSION" "$E2E_SHARD_INDEX" "$result" \
+            > "results/${E2E_KB_VERSION}-${E2E_SHARD_INDEX}.tsv"
+          {
+            echo "| KubeBlocks | shard | result |"
+            echo "|---|---|---|"
+            echo "| $E2E_KB_VERSION | $E2E_SHARD_INDEX | $result |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-result-${{ matrix.kb }}-${{ matrix.shard }}
+          path: results/
+          retention-days: 7
 
       - name: Dump diagnostics on failure
         if: failure()
@@ -130,3 +192,35 @@ jobs:
       - name: Tear down
         if: always()
         run: make e2e-down
+
+  matrix-summary:
+    # One table for the whole run, so a multi-version sweep can be transcribed
+    # into addons/falkordb/COMPATIBILITY.md without opening every job.
+    needs: e2e
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: e2e-result-*
+          path: results
+          merge-multiple: true
+
+      - name: Render the matrix
+        run: |
+          set -euo pipefail
+          {
+            echo "## e2e matrix"
+            echo
+            echo "| KubeBlocks | shards | result |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A version passes only if every one of its shards passed.
+          sort -u results/*.tsv 2>/dev/null | awk -F'\t' '
+            { total[$1]++; if ($3 != "pass") bad[$1] = bad[$1] " " $2 "(" $3 ")" }
+            END {
+              for (v in total) {
+                printf "| %s | %d | %s |\n", v, total[v], (v in bad ? "FAIL:" bad[v] : "pass")
+              }
+            }' | sort >> "$GITHUB_STEP_SUMMARY"
+
