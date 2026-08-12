@@ -11,10 +11,15 @@ re-check it at the bottom of this file.
 | Current chart version | `1.6.6` |
 
 `Chart.yaml` advertises `addon.kubeblocks.io/kubeblocks-version: ">=1.2.0"`. That
-is wider than what is actually tested — see the feature matrix below. It has
-been left alone because narrowing it would exclude the alpha the addon does run
-on, but it should be tightened once a KubeBlocks release exists that the addon
-passes end-to-end on.
+is both wider and narrower than what is measured: it admits `1.2.0` releases
+nobody has run the suite against, and it excludes `1.0.2` and `1.1.0-beta.9`,
+which pass. Two of the three versions this file calls good therefore need
+`kbcli addon install --force` (or `helm install` directly, which does not read
+the annotation at all). The constraint has been left alone rather than widened
+because a range that admits a pre-release has to spell that out — `>=1.0.2`
+alone does not match `1.1.0-beta.9` under semver — and getting it wrong fails
+closed at install time. Tighten it to a single tested range once a stable
+KubeBlocks release passes the suite end to end.
 
 ## Feature matrix
 
@@ -63,10 +68,13 @@ the cell in, see [Testing another version](#testing-another-version).
 Every column was measured by
 [run 31582752684](https://github.com/FalkorDB/kubeblocks-addons/actions/runs/31582752684),
 four shards each, which is the first run to include `1.2.0-alpha.2` and the
-first with the A1/A5/A6 fixes in it. The only red cells left are the three
-restore scenarios on `alpha.2`/`alpha.3` and sharded scale-in on `1.0.2`;
-`1.1.0-beta.9` and `1.2.0-alpha.1` were green on all four shards. `alpha.1`
-shard 2 failed on the first attempt in `actions/checkout` with
+first with the A1/A5/A6 fixes in it. CI runs 26 of the 28 scenarios —
+[12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore) and
+[14-rebuild-instance](e2e/tests/14-rebuild-instance) are excluded — so the rows
+those two cover are not measured by any column. Of the 26 that do run, the only
+failures were the three restore scenarios on `alpha.2`/`alpha.3` and sharded
+scale-in on `1.0.2`; `1.1.0-beta.9` and `1.2.0-alpha.1` were green on all four
+shards. `alpha.1` shard 2 failed on the first attempt in `actions/checkout` with
 `server certificate verification failed`, before a single test ran, and passed
 on re-run.
 
@@ -77,20 +85,25 @@ The practical readings:
 
 - **The addon installs cleanly on every version tested.** Nothing is rejected;
   what breaks, breaks at runtime.
-- **`1.0.2` — the last stable release — runs everything except sharded scale-in.**
-  That single gap is not the addon's: `1.0.2` never implemented the
+- **Sharded backup and restore are unresolved everywhere.** C1 blocks the
+  restore half on every version, and because the scenario is excluded from CI
+  the backup half is unmeasured on all but `1.2.0-alpha.1`, where it was last
+  run by hand. No version in this table is clean on sharded data protection.
+- **`1.0.2` — the last stable release — passes every CI scenario except sharded
+  scale-in.** That gap is not the addon's: `1.0.2` never implemented the
   `shardRemove` hook the drain depends on (B5), so the shard is deleted with its
-  slots and data still on it. Everything else on the stable release works.
-- **`1.1.0-beta.9` and `1.2.0-alpha.1` pass the entire suite**, and are the only
-  versions where sharded scale-in is safe *and* restore works.
+  slots and data still on it.
+- **`1.1.0-beta.9` and `1.2.0-alpha.1` pass every scenario CI runs**, and are the
+  only versions where sharded scale-in is safe *and* non-sharded restore works.
+  Neither has been shown to handle sharded restore or rebuild-instance.
 - **`alpha.3`'s sharded failures were ours, and are gone.** A1 left every
   instance passwordless (A6); with that fixed, `alpha.2` and `alpha.3` fail on
   exactly the same three scenarios and nothing else.
-- **Restore works up to and including `1.2.0-alpha.1` and nowhere after it.**
-  `alpha.2` removed the annotation the addon uses in the same release that
-  introduced the replacement, and the replacement has never completed a restore
-  in any release that has it. On `alpha.3` the restored cluster comes up healthy
-  and empty, which is the failure mode B1 describes.
+- **Non-sharded restore works up to and including `1.2.0-alpha.1` and nowhere
+  after it.** `alpha.2` removed the annotation the addon uses in the same
+  release that introduced the replacement, and the replacement has never
+  completed a restore in any release that has it. On `alpha.3` the restored
+  cluster comes up healthy and empty, which is the failure mode B1 describes.
 
 ### API-level changes behind the matrix
 
@@ -118,7 +131,7 @@ The e2e workflow takes a list of KubeBlocks versions and runs the whole suite
 against each of them, so the `?` cells above can be filled in with measurements
 rather than guesses:
 
-```
+```bash
 gh workflow run e2e-falkordb.yml \
   -f kb_versions=1.0.2,1.1.0-beta.9,1.2.0-alpha.1,1.2.0-alpha.3 \
   -f shards=4
@@ -131,7 +144,7 @@ and prints one row per version, ready to transcribe here.
 
 Locally, the same axis is just an environment variable:
 
-```
+```bash
 E2E_KB_VERSION=1.0.2 make e2e-up && make e2e
 ```
 
@@ -189,7 +202,7 @@ to fail until their blockers clear:
 | Scenario | Excluded | Blocker |
 |---|---|---|
 | [12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore) | yes | C1 |
-| [14-rebuild-instance](e2e/tests/14-rebuild-instance) | yes | B4 |
+| [14-rebuild-instance](e2e/tests/14-rebuild-instance) | yes | B7 |
 
 Exclusion is by label, so CI runs `make e2e E2E_SELECTOR='e2e.falkordb/ci!=unsupported'`
 while a local full run includes them.

@@ -64,7 +64,10 @@ jobs:
             fi
 
             # The versions end up in `helm --version` and in a release asset URL,
-            # so only accept things that actually look like a version.
+            # so only accept things that actually look like a version. Duplicates
+            # would collide on the matrix job name and on the result artifact
+            # name, so they are an error rather than something to deduplicate
+            # silently.
             versions=()
             while IFS= read -r v; do
               [ -n "$v" ] || continue
@@ -72,6 +75,12 @@ jobs:
                 echo "::error::'$v' is not a valid KubeBlocks version"
                 exit 1
               fi
+              for seen in ${versions[@]+"${versions[@]}"}; do
+                if [ "$seen" = "$v" ]; then
+                  echo "::error::KubeBlocks version '$v' is listed more than once"
+                  exit 1
+                fi
+              done
               versions+=("$v")
             done < <(echo "$KB_VERSIONS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             if [ "${#versions[@]}" -eq 0 ]; then
