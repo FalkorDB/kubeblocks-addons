@@ -6,6 +6,13 @@ metadata:
     {{- include "falkordb.labels" . | nindent 4 }}
   annotations:
     {{- include "falkordb.apiVersion" . | nindent 4 }}
+    ## The whole spec of a ShardingDefinition is immutable, and unlike the
+    ## ComponentDefinitions this object is not version-suffixed, so an upgrade
+    ## patches the same name in place. Without this, any future change to the spec
+    ## would be compared against the hash recorded on first reconcile and park the
+    ## object in Unavailable, taking every cluster that references it down with it.
+    ## The ComponentDefinitions carry the same annotation via falkordb.annotations.
+    apps.kubeblocks.io/skip-immutable-check: "true"
 spec:
   template:
     compDef: {{ include "falkordbCluster.cmpdRegexpPattern" . }}
@@ -17,6 +24,14 @@ spec:
   systemAccounts:
     - name: default
       shared: true
+  ## spec.tls.shared would be the natural way to give every shard one CA, which is
+  ## what the cluster bus needs. It is deliberately not set: as of KubeBlocks
+  ## 1.2.0-alpha.1 clusterShardingTLSTransformer is implemented but never added to
+  ## the cluster reconciler's transformer chain, so the field is accepted and then
+  ## silently ignored. Setting it here would read as though sharded TLS were
+  ## handled while each shard still gets its own untrusted CA. Until that is wired
+  ## up, callers have to pass their own CA via issuer.name: UserProvided, as the
+  ## tls-sharding e2e scenario does.
   lifecycleActions:
     shardRemove:
       timeoutSeconds: 600

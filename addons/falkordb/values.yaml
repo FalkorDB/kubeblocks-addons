@@ -24,6 +24,16 @@ global:
 ##   - name: another-registry-secret
 imagePullSecrets: []
 
+## KubeBlocks renamed `ComponentDefinition.spec.systemAccounts[].passwordGenerationPolicy`
+## to `passwordConfig` in 1.2.0-alpha.3, with no release serving both names except
+## the 1.1 line. Getting this wrong is not a loud failure: the API server prunes
+## the field it does not know, KubeBlocks then treats the account as passwordless
+## and every FalkorDB instance comes up with no password at all.
+##
+## Leave as `passwordGenerationPolicy` for KubeBlocks up to and including
+## 1.2.0-alpha.2; set to `passwordConfig` on 1.2.0-alpha.3 and later.
+systemAccountPasswordField: passwordGenerationPolicy
+
 ## FalkorDB versions configuration
 ## Array of major versions, each containing minor versions with specific image tags
 ## @param serviceVersion define default serviceVersion of each Component

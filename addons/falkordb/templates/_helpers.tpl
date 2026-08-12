@@ -228,6 +228,24 @@ reconfigure:
 {{ include "falkordb.registry" (dict "ctx" . "registry" .Values.image.apeDts.registry) }}/{{ .Values.image.apeDts.repository}}:{{ .Values.image.apeDts.reshardTag }}
 {{- end }}
 
+{{- /*
+The `default` system account, rendered under whichever spelling of the password
+policy field the target KubeBlocks release serves. See `systemAccountPasswordField`
+in values.yaml - an unknown field here is pruned rather than rejected, which
+leaves the server passwordless, so the name has to match the release.
+*/ -}}
+{{- define "falkordb.systemAccounts" -}}
+systemAccounts:
+  - name: default
+    initAccount: true
+    {{ .Values.systemAccountPasswordField | default "passwordGenerationPolicy" }}:
+      length: 10
+      numDigits: 5
+      numSymbols: 0
+      letterCase: MixedCases
+      seed: 5wM4uhmKV1Ohy087
+{{- end -}}
+
 {{- define "kblib.syncer.policyRules" -}}
 policyRules:
 - apiGroups:

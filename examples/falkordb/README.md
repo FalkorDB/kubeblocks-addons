@@ -465,6 +465,8 @@ spec:
 
 ### [Restore](restore.yaml)
 
+This requires KubeBlocks `1.2.0-alpha.1` or earlier. The `kubeblocks.io/restore-from-backup` annotation it uses was removed in `1.2.0-alpha.2` rather than deprecated, so on later versions it is dropped without an error and the cluster comes up `Running` with an empty dataset. Its replacement, `Cluster.spec.restore`, is not usable yet either — see [apecloud/kubeblocks#10755](https://github.com/apecloud/kubeblocks/issues/10755).
+
 To restore a new cluster from a Backup:
 
 ```bash

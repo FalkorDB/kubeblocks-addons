@@ -7,6 +7,13 @@ metadata:
     # The backup to restore from, keyed by component name. `sourceTargetName`
     # picks the backup target when the backup policy has more than one, and can
     # be omitted otherwise.
+    #
+    # This requires KubeBlocks <= 1.2.0-alpha.1. The annotation was removed in
+    # 1.2.0-alpha.2 in favour of `Cluster.spec.restore`, and removed rather than
+    # deprecated: on 1.2.0-alpha.2 and later it is dropped without an error and
+    # the cluster comes up Running with an empty dataset. `spec.restore` is not a
+    # usable replacement yet either, so there is currently no restore path on
+    # those versions. See https://github.com/apecloud/kubeblocks/issues/10755.
     kubeblocks.io/restore-from-backup: '{"falkordb":{"name":"falkordb-backup-datafile","namespace":"demo","volumeRestorePolicy":"Parallel","sourceTargetName":"falkordb"}}'
 spec:
   terminationPolicy: Delete

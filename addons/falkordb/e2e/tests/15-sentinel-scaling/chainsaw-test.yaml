@@ -72,6 +72,11 @@ spec:
               for pod in $(fdb_pods "$NAMESPACE" fdb-sentscale falkordb-sent); do
                 fdb_retry "$pod to monitor the primary" \
                   fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+                # ... and they have to have found each other too, or the vote
+                # splits five ways and every failover attempt aborts as
+                # -failover-abort-not-elected.
+                fdb_retry "$pod to discover the other four sentinels" \
+                  fdb_assert_sentinel_peers "$NAMESPACE" "$pod" 4
               done
       catch:
         - events: {}

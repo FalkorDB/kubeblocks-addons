@@ -68,16 +68,8 @@ spec:
       namespace: {{ $.Release.Namespace }}
       volumeName: scripts
       defaultMode: 0555
-  systemAccounts:
-    ## TODO: the other accounts should be created for backward compatibility
-    - name: default
-      initAccount: true
-      passwordGenerationPolicy:
-        length: 10
-        numDigits: 5
-        numSymbols: 0
-        letterCase: MixedCases
-        seed: 5wM4uhmKV1Ohy087
+  ## TODO: the other accounts should be created for backward compatibility
+  {{- include "falkordb.systemAccounts" $ | nindent 2 }}
   hostNetwork:
     containerPorts:
       - container: falkordb-sent

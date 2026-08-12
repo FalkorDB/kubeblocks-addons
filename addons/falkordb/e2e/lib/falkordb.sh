@@ -101,6 +101,33 @@ fdb_assert_sentinel_monitoring() {
   fdb_log "$pod is monitoring $masters master(s)"
 }
 
+# fdb_assert_sentinel_peers <namespace> <pod> <expected>
+# Fails unless <pod> has discovered exactly <expected> other sentinels.
+#
+# Monitoring the master is not enough to make a sentinel useful. Leader election
+# needs a majority of the whole sentinel set, and a sentinel that has not yet
+# discovered its peers votes for itself: with five sentinels and no shared view
+# the votes split, every attempt ends in -failover-abort-not-elected, and the
+# promotion simply never happens. Waiting for discovery to converge before
+# killing the primary is the difference between testing failover and testing
+# gossip timing.
+fdb_assert_sentinel_peers() {
+  local namespace="$1" pod="$2" expected="$3" reply known
+  reply="$(fdb_sentinel_cli "$namespace" "$pod" SENTINEL masters 2>&1 | tr -d '\r')"
+  known="$(echo "$reply" | grep -A1 '^num-other-sentinels$' | tail -1)"
+  case "$known" in
+    '' | *[!0-9]*)
+      fdb_fail "$pod did not report num-other-sentinels: ${reply:-<empty reply>}"
+      return 1
+      ;;
+  esac
+  if [ "$known" -ne "$expected" ]; then
+    fdb_fail "$pod knows $known other sentinels, expected $expected"
+    return 1
+  fi
+  fdb_log "$pod knows $known other sentinels"
+}
+
 # fdb_sentinel_relax_failover_cooldown <namespace> <cluster> <sentinel-component> <master> [timeout_ms]
 # Shortens `failover-timeout` for <master> on every sentinel of a cluster.
 #
