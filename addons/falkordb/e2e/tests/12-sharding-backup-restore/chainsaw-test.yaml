@@ -199,6 +199,14 @@ spec:
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-shbk-r
             tail: 200
+      cleanup:
+        # Script-created, so chainsaw does not track it and namespace GC would
+        # be what removes it. See 28-external-hostname-sharding for why that
+        # wedges a component that declares a preTerminate action.
+        - script:
+            content: |
+              kubectl delete cluster fdb-shbk-r -n "$NAMESPACE" \
+                --ignore-not-found --wait=true --timeout=5m
 
     - name: the restored cluster owns every slot and holds every key
       try:
