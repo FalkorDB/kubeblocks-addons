@@ -121,6 +121,17 @@ init_environment(){
   CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE="${CURRENT_SHARD_POD_NAME_LIST:-}"
   CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE="${CURRENT_SHARD_POD_FQDN_LIST:-}"
 
+  ## KubeBlocks 1.0 never invokes the ShardingDefinition shardRemove hook, so on
+  ## that line the drain runs from the ComponentDefinition preTerminate action
+  ## instead, and the shard being removed is identified by the builtin component
+  ## lists rather than by KB_REMOVE_SHARD_NAME. Both are adopted verbatim: the
+  ## undeleted list has to stay empty when every component is going away, which
+  ## is how a whole-cluster delete is told apart from a scale-in below.
+  if [[ -z "$ALL_SHARDS_DELETING_COMPONENT_LIST" && -n "${KB_CLUSTER_COMPONENT_DELETING_LIST:-}" ]]; then
+    ALL_SHARDS_DELETING_COMPONENT_LIST="$KB_CLUSTER_COMPONENT_DELETING_LIST"
+    ALL_SHARDS_UNDELETED_COMPONENT_LIST="${KB_CLUSTER_COMPONENT_UNDELETED_LIST:-}"
+  fi
+
   if component_matches_remove_shard_name "${KB_REMOVE_SHARD_NAME:-}" "${CURRENT_SHARD_COMPONENT_NAME:-}" "${CURRENT_SHARD_COMPONENT_SHORT_NAME:-}"; then
     ALL_SHARDS_DELETING_COMPONENT_LIST="${ALL_SHARDS_DELETING_COMPONENT_LIST:-$CURRENT_SHARD_COMPONENT_SHORT_NAME}"
     if component_list_contains_exact "$ALL_SHARDS_UNDELETED_COMPONENT_LIST" "$CURRENT_SHARD_COMPONENT_SHORT_NAME"; then
@@ -137,6 +148,44 @@ init_environment(){
   export CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE
   export CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE
   export network_mode
+}
+
+## Decide whether the current shard is being scaled in, as opposed to the whole
+## cluster being deleted or a single member being replaced.
+##
+## The drain entrypoint is reached two different ways depending on the KubeBlocks
+## version, and the two are mutually exclusive:
+##   - 1.1 and later: the ShardingDefinition shardRemove hook, which sets
+##     KB_REMOVE_SHARD_NAME. The builtin component lists are not populated.
+##   - 1.0: the ComponentDefinition preTerminate action, which fires on every
+##     component teardown and sets KB_CLUSTER_COMPONENT_DELETING_LIST and
+##     KB_CLUSTER_COMPONENT_UNDELETED_LIST. KB_REMOVE_SHARD_NAME does not exist.
+##
+## On 1.1 and later preTerminate still fires on shard removal, but with neither
+## KB_REMOVE_SHARD_NAME nor the builtin lists it falls through to a no-op here
+## and only shardRemove drains, so the shard is never rebalanced twice.
+##
+## Returns 0 to drain, 1 to skip.
+detect_scale_in_context() {
+  if component_matches_remove_shard_name "${KB_REMOVE_SHARD_NAME:-}" "${CURRENT_SHARD_COMPONENT_NAME:-}" "${CURRENT_SHARD_COMPONENT_SHORT_NAME:-}"; then
+    echo "Detected scale-in context from KB_REMOVE_SHARD_NAME"
+    return 0
+  fi
+
+  if ! component_list_contains_exact "$ALL_SHARDS_DELETING_COMPONENT_LIST" "$CURRENT_SHARD_COMPONENT_SHORT_NAME"; then
+    return 1
+  fi
+  ## a component that is both deleting and undeleted is mid-restart, not leaving
+  if component_list_contains_exact "$ALL_SHARDS_UNDELETED_COMPONENT_LIST" "$CURRENT_SHARD_COMPONENT_SHORT_NAME"; then
+    return 1
+  fi
+  ## nothing survives the teardown, so there is no cluster left to rebalance into
+  if [[ -z "$ALL_SHARDS_UNDELETED_COMPONENT_LIST" ]]; then
+    return 1
+  fi
+
+  echo "Detected scale-in context from the builtin component deleting/undeleted lists"
+  return 0
 }
 
 load_redis_cluster_common_utils() {
@@ -1352,6 +1401,10 @@ if [ $# -eq 1 ]; then
     exit 0
     ;;
   --pre-terminate)
+    if ! detect_scale_in_context; then
+      echo "Current shard is not being scaled in, skipping the FalkorDB Cluster drain"
+      exit 0
+    fi
     if scale_in_redis_cluster_shard; then
       echo "FalkorDB Cluster scale in shard successfully"
     else

@@ -73,6 +73,17 @@ system_account_password_field() {
   esac
 }
 
+# Only the 1.0 line drains a removed shard through the ComponentDefinition
+# preTerminate action. From 1.1 the ShardingDefinition shardRemove hook does it,
+# and leaving preTerminate declared there wedges every component teardown
+# because KubeBlocks keeps requeueing an action it can no longer run.
+legacy_sharding_pre_terminate() {
+  case "$KB_VERSION" in
+    0.*|1.0.*) echo "true" ;;
+    *)         echo "false" ;;
+  esac
+}
+
 require() {
   local missing=0
   local tool
@@ -242,6 +253,7 @@ install_addon() {
   helm upgrade --install falkordb "$ADDON_CHART" \
     --namespace "$KB_NAMESPACE" \
     --set "systemAccountPasswordField=$(system_account_password_field)" \
+    --set "legacyShardingPreTerminate=$(legacy_sharding_pre_terminate)" \
     ${ownership[@]+"${ownership[@]}"} \
     --wait --timeout "$KB_WAIT"
 

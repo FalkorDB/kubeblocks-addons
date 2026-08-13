@@ -84,6 +84,22 @@ spec:
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-extc
             tail: 100
+      cleanup:
+        # The cluster is created by a script rather than an `apply`, so chainsaw
+        # does not track it and would leave it to namespace GC. That deletes the
+        # Cluster, Component, InstanceSet and pods in parallel, and a component
+        # whose preTerminate action is declared cannot finish deleting once its
+        # pods are gone -- the action first fails to reach kbagent and then
+        # errors permanently with "has no pods to running the pre-terminate
+        # action", which KubeBlocks requeues forever. Deleting the Cluster on
+        # its own first runs the action while the pods are still up, so the
+        # namespace has nothing left to wait for. Only matters where the action
+        # is declared at all, but it costs a few seconds and is what the
+        # `apply`-based scenarios get for free.
+        - script:
+            content: |
+              kubectl delete cluster fdb-extc -n "$NAMESPACE" \
+                --ignore-not-found --wait=true --timeout=5m
 
     - name: every node announces a distinct external hostname
       try:

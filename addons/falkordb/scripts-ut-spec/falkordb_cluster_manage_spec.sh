@@ -160,6 +160,144 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
         The output should include "ALL_SHARDS_UNDELETED_COMPONENT_LIST=shard-7hy,shard-jwl,shard-kpl"
       End
     End
+
+    Context "when the KubeBlocks 1.0 builtin component lists identify the deleted shard"
+      init_environment_and_print_builtin_list_vars() {
+        init_environment
+        echo "ALL_SHARDS_DELETING_COMPONENT_LIST=$ALL_SHARDS_DELETING_COMPONENT_LIST"
+        echo "ALL_SHARDS_UNDELETED_COMPONENT_LIST=$ALL_SHARDS_UNDELETED_COMPONENT_LIST"
+      }
+
+      setup() {
+        unset ALL_SHARDS_COMPONENT_LIST
+        unset ALL_SHARDS_DELETING_COMPONENT_LIST
+        unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+        unset KB_REMOVE_SHARD_NAME
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        export CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-98x"
+        export ALL_SHARDS_COMPONENT_SHORT_NAMES="shard-98x:shard-98x,shard-7hy:shard-7hy,shard-jwl:shard-jwl"
+        export KB_CLUSTER_COMPONENT_DELETING_LIST="shard-98x"
+        export KB_CLUSTER_COMPONENT_UNDELETED_LIST="shard-7hy,shard-jwl"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_COMPONENT_NAME
+        unset CURRENT_SHARD_COMPONENT_SHORT_NAME
+        unset ALL_SHARDS_COMPONENT_SHORT_NAMES
+        unset KB_CLUSTER_COMPONENT_DELETING_LIST
+        unset KB_CLUSTER_COMPONENT_UNDELETED_LIST
+        unset ALL_SHARDS_COMPONENT_LIST
+        unset ALL_SHARDS_DELETING_COMPONENT_LIST
+        unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+      }
+      After "un_setup"
+
+      It "adopts the builtin deleting and undeleted lists verbatim"
+        When call init_environment_and_print_builtin_list_vars
+        The status should be success
+        The output should include "ALL_SHARDS_DELETING_COMPONENT_LIST=shard-98x"
+        The output should include "ALL_SHARDS_UNDELETED_COMPONENT_LIST=shard-7hy,shard-jwl"
+      End
+    End
+
+    Context "when the whole cluster is being deleted on KubeBlocks 1.0"
+      init_environment_and_print_builtin_list_vars() {
+        init_environment
+        echo "ALL_SHARDS_DELETING_COMPONENT_LIST=$ALL_SHARDS_DELETING_COMPONENT_LIST"
+        echo "ALL_SHARDS_UNDELETED_COMPONENT_LIST=[$ALL_SHARDS_UNDELETED_COMPONENT_LIST]"
+      }
+
+      setup() {
+        unset ALL_SHARDS_COMPONENT_LIST
+        unset ALL_SHARDS_DELETING_COMPONENT_LIST
+        unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+        unset KB_REMOVE_SHARD_NAME
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        export CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-98x"
+        export ALL_SHARDS_COMPONENT_SHORT_NAMES="shard-98x:shard-98x,shard-7hy:shard-7hy,shard-jwl:shard-jwl"
+        export KB_CLUSTER_COMPONENT_DELETING_LIST="shard-98x,shard-7hy,shard-jwl"
+        export KB_CLUSTER_COMPONENT_UNDELETED_LIST=""
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_COMPONENT_NAME
+        unset CURRENT_SHARD_COMPONENT_SHORT_NAME
+        unset ALL_SHARDS_COMPONENT_SHORT_NAMES
+        unset KB_CLUSTER_COMPONENT_DELETING_LIST
+        unset KB_CLUSTER_COMPONENT_UNDELETED_LIST
+        unset ALL_SHARDS_COMPONENT_LIST
+        unset ALL_SHARDS_DELETING_COMPONENT_LIST
+        unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+      }
+      After "un_setup"
+
+      It "keeps the undeleted list empty instead of falling back to every shard"
+        When call init_environment_and_print_builtin_list_vars
+        The status should be success
+        The output should include "ALL_SHARDS_DELETING_COMPONENT_LIST=shard-98x,shard-7hy,shard-jwl"
+        The output should include "ALL_SHARDS_UNDELETED_COMPONENT_LIST=[]"
+      End
+    End
+  End
+
+  Describe "detect_scale_in_context()"
+    setup() {
+      unset KB_REMOVE_SHARD_NAME
+      unset ALL_SHARDS_DELETING_COMPONENT_LIST
+      unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+      export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+      export CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-98x"
+    }
+    Before "setup"
+
+    un_setup() {
+      unset KB_REMOVE_SHARD_NAME
+      unset CURRENT_SHARD_COMPONENT_NAME
+      unset CURRENT_SHARD_COMPONENT_SHORT_NAME
+      unset ALL_SHARDS_DELETING_COMPONENT_LIST
+      unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+    }
+    After "un_setup"
+
+    It "drains when the shardRemove hook names the current shard"
+      export KB_REMOVE_SHARD_NAME="98x"
+      export ALL_SHARDS_DELETING_COMPONENT_LIST="shard-98x"
+      export ALL_SHARDS_UNDELETED_COMPONENT_LIST="shard-7hy,shard-jwl"
+      When call detect_scale_in_context
+      The status should be success
+      The output should include "KB_REMOVE_SHARD_NAME"
+    End
+
+    It "drains when the builtin lists show the current shard leaving a surviving cluster"
+      export ALL_SHARDS_DELETING_COMPONENT_LIST="shard-98x"
+      export ALL_SHARDS_UNDELETED_COMPONENT_LIST="shard-7hy,shard-jwl"
+      When call detect_scale_in_context
+      The status should be success
+      The output should include "builtin component deleting/undeleted lists"
+    End
+
+    It "skips when nothing survives, which is a whole-cluster delete"
+      export ALL_SHARDS_DELETING_COMPONENT_LIST="shard-98x,shard-7hy,shard-jwl"
+      export ALL_SHARDS_UNDELETED_COMPONENT_LIST=""
+      When call detect_scale_in_context
+      The status should be failure
+    End
+
+    It "skips when the current shard is both deleting and undeleted, which is a restart"
+      export ALL_SHARDS_DELETING_COMPONENT_LIST="shard-98x"
+      export ALL_SHARDS_UNDELETED_COMPONENT_LIST="shard-98x,shard-7hy"
+      When call detect_scale_in_context
+      The status should be failure
+    End
+
+    It "skips when neither mechanism reports a scale-in, as on preTerminate from 1.1 onwards"
+      export ALL_SHARDS_DELETING_COMPONENT_LIST=""
+      export ALL_SHARDS_UNDELETED_COMPONENT_LIST="shard-98x,shard-7hy,shard-jwl"
+      When call detect_scale_in_context
+      The status should be failure
+    End
   End
 
   Describe "init_other_components_and_pods_info()"
