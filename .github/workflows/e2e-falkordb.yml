@@ -50,54 +50,54 @@ jobs:
       shard_count: ${{ steps.plan.outputs.shard_count }}
       kb_versions: ${{ steps.plan.outputs.kb_versions }}
     steps:
-        - name: Plan the shards
-          id: plan
-          env:
-            TEST: ${{ github.event.inputs.test || '' }}
-            SHARDS: ${{ github.event.inputs.shards || '4' }}
-            KB_VERSIONS: ${{ github.event.inputs.kb_versions || '1.2.0-alpha.1' }}
-          run: |
-            set -euo pipefail
-            if [[ ! "$SHARDS" =~ ^[0-9]+$ ]]; then
-              echo "::error::shards must be a number, got '$SHARDS'"
+      - name: Plan the shards
+        id: plan
+        env:
+          TEST: ${{ github.event.inputs.test || '' }}
+          SHARDS: ${{ github.event.inputs.shards || '4' }}
+          KB_VERSIONS: ${{ github.event.inputs.kb_versions || '1.2.0-alpha.1' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SHARDS" =~ ^[0-9]+$ ]]; then
+            echo "::error::shards must be a number, got '$SHARDS'"
+            exit 1
+          fi
+
+          # The versions end up in `helm --version` and in a release asset URL,
+          # so only accept things that actually look like a version. Duplicates
+          # would collide on the matrix job name and on the result artifact
+          # name, so they are an error rather than something to deduplicate
+          # silently.
+          versions=()
+          while IFS= read -r v; do
+            [ -n "$v" ] || continue
+            if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::'$v' is not a valid KubeBlocks version"
               exit 1
             fi
-
-            # The versions end up in `helm --version` and in a release asset URL,
-            # so only accept things that actually look like a version. Duplicates
-            # would collide on the matrix job name and on the result artifact
-            # name, so they are an error rather than something to deduplicate
-            # silently.
-            versions=()
-            while IFS= read -r v; do
-              [ -n "$v" ] || continue
-              if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-                echo "::error::'$v' is not a valid KubeBlocks version"
+            for seen in ${versions[@]+"${versions[@]}"}; do
+              if [ "$seen" = "$v" ]; then
+                echo "::error::KubeBlocks version '$v' is listed more than once"
                 exit 1
               fi
-              for seen in ${versions[@]+"${versions[@]}"}; do
-                if [ "$seen" = "$v" ]; then
-                  echo "::error::KubeBlocks version '$v' is listed more than once"
-                  exit 1
-                fi
-              done
-              versions+=("$v")
-            done < <(echo "$KB_VERSIONS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [ "${#versions[@]}" -eq 0 ]; then
-              echo "::error::no KubeBlocks versions given"
-              exit 1
-            fi
-            printf '%s\n' "${versions[@]}" | jq -R . | jq -sc . \
-              | sed 's/^/kb_versions=/' >> "$GITHUB_OUTPUT"
+            done
+            versions+=("$v")
+          done < <(echo "$KB_VERSIONS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          if [ "${#versions[@]}" -eq 0 ]; then
+            echo "::error::no KubeBlocks versions given"
+            exit 1
+          fi
+          printf '%s\n' "${versions[@]}" | jq -R . | jq -sc . \
+            | sed 's/^/kb_versions=/' >> "$GITHUB_OUTPUT"
 
-            if [ -n "$TEST" ] || [ "$SHARDS" -le 1 ]; then
-              echo 'shards=[0]' >> "$GITHUB_OUTPUT"
-              echo 'shard_count=0' >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            list=$(seq 0 $((SHARDS - 1)) | paste -sd, -)
-            echo "shards=[$list]" >> "$GITHUB_OUTPUT"
-            echo "shard_count=$SHARDS" >> "$GITHUB_OUTPUT"
+          if [ -n "$TEST" ] || [ "$SHARDS" -le 1 ]; then
+            echo 'shards=[0]' >> "$GITHUB_OUTPUT"
+            echo 'shard_count=0' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          list=$(seq 0 $((SHARDS - 1)) | paste -sd, -)
+          echo "shards=[$list]" >> "$GITHUB_OUTPUT"
+          echo "shard_count=$SHARDS" >> "$GITHUB_OUTPUT"
 
   e2e:
     needs: plan
@@ -206,7 +206,7 @@ jobs:
     # One table for the whole run, so a multi-version sweep can be transcribed
     # into addons/falkordb/COMPATIBILITY.md without opening every job.
     needs: e2e
-    if: always()
+    if: ${{ always() && needs.e2e.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -232,4 +232,3 @@ jobs:
                 printf "| %s | %d | %s |\n", v, total[v], (v in bad ? "FAIL:" bad[v] : "pass")
               }
             }' | sort >> "$GITHUB_STEP_SUMMARY"
-
