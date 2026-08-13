@@ -460,13 +460,15 @@ spec:
       preCondition: RuntimeReady
       retryPolicy:
         maxRetries: 10
+{{- if $.Values.legacyShardingPreTerminate }}
     ## On KubeBlocks 1.1 and later a shard is drained by the ShardingDefinition
     ## shardRemove hook. That hook is served but never invoked on the 1.0 line,
-    ## where the drain has to run from here instead, so both are declared. The
-    ## script decides which context it is in and no-ops when it is neither, so
-    ## the shard is not rebalanced twice and a whole-cluster delete does not try
-    ## to rebalance at all. See detect_scale_in_context in falkordb-cluster-manage.sh
-    ## and https://github.com/apecloud/kubeblocks/issues/10768.
+    ## where the drain has to run from here instead. Declaring it on 1.1 and
+    ## later is not merely redundant, it wedges teardown: the component cannot
+    ## finish deleting until KubeBlocks runs the action, and the action errors
+    ## permanently once the pods are gone, so this stays off by default. See
+    ## detect_scale_in_context in falkordb-cluster-manage.sh and
+    ## https://github.com/apecloud/kubeblocks/issues/10768.
     preTerminate:
       exec:
         container: falkordb-cluster
@@ -476,6 +478,7 @@ spec:
           - /scripts/{{ $falkordbClusterManageScripts }} --pre-terminate > /tmp/pre-terminate.log 2>&1
       retryPolicy:
         maxRetries: 10
+{{- end }}
     memberLeave:
       exec:
         container: falkordb-cluster

@@ -28,7 +28,9 @@ spec:
       postProvision: {{ $falkordbRepository }}:{{ .imageTag }}
       accountProvision: {{ $falkordbRepository }}:{{ .imageTag }}
       switchover: {{ $falkordbRepository }}:{{ .imageTag }}
+      {{- if $.Values.legacyShardingPreTerminate }}
       preTerminate: {{ $falkordbRepository }}:{{ .imageTag }}
+      {{- end }}
       memberLeave: {{ $falkordbRepository }}:{{ .imageTag }}
       memberJoin: {{ $falkordbRepository }}:{{ .imageTag }}
       metrics: {{ include "metrics.repository" $ }}:{{ $.Values.metrics.image.tag }}

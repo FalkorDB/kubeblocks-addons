@@ -138,4 +138,12 @@ clusterDomain: "cluster.local"
 
 enableMetrics: true
 
+# Declare the ComponentDefinition preTerminate action that drains a shard before
+# it leaves the FalkorDB Cluster. KubeBlocks 1.1 and later drain through the
+# ShardingDefinition shardRemove hook instead, and declaring preTerminate there
+# blocks every component teardown, so this is only for the 1.0 line where
+# shardRemove is served but never invoked.
+# See https://github.com/apecloud/kubeblocks/issues/10768.
+legacyShardingPreTerminate: false
+
 tlsMountPath: /etc/pki/tls
