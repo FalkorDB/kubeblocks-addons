@@ -77,6 +77,9 @@ spec:
         ports:
           - falkordb-sent
   vars:
+    {{- with (include "falkordb.globalVars" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
     - name: TLS_ENABLED
       valueFrom:
         tlsVarRef:

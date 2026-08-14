@@ -105,6 +105,9 @@ spec:
           - http-metrics
   {{- end }}
   vars:
+    {{- with (include "falkordb.globalVars" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
     ## the name of current cluster instance
     - name: CLUSTER_NAME
       valueFrom:

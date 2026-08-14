@@ -17,12 +17,33 @@ global:
   ## `my-mirror.example.com/ns` renders `my-mirror.example.com/ns/busybox:1.36`.
   imageRegistry: ""
 
+  ## Override the API server address that in-cluster Kubernetes clients derive
+  ## from the `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT` variables that
+  ## kubelet injects into every container. Leave empty to keep the injected
+  ## ClusterIP.
+  ##
+  ## Set these to a DNS name (e.g. `kubernetes.default.svc.cluster.local`, or the
+  ## cluster's API FQDN) when the API endpoint requires SNI - connecting by IP
+  ## sends no SNI, so the TLS handshake is terminated mid-handshake - or when a
+  ## firewall rejects the ClusterIP outright.
+  kubernetesServiceHost: ""
+  kubernetesServicePort: ""
+
 ## Optionally specify an array of secrets used to pull the images from private registries.
 ## Entries may be plain secret names or objects with a `name` field, e.g.
 ## imagePullSecrets:
 ##   - my-registry-secret
 ##   - name: another-registry-secret
 imagePullSecrets: []
+
+## Extra environment variables applied to every container of every FalkorDB
+## component, including the `kbagent` sidecar that KubeBlocks injects. Entries
+## use the `ComponentDefinition.spec.vars` schema, which is a superset of a core
+## `EnvVar`, e.g.
+## extraEnv:
+##   - name: HTTPS_PROXY
+##     value: http://proxy.example.com:3128
+extraEnv: []
 
 ## KubeBlocks renamed `ComponentDefinition.spec.systemAccounts[].passwordGenerationPolicy`
 ## to `passwordConfig` in 1.2.0-alpha.3, with no release serving both names except
