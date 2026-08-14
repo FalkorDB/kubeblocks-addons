@@ -224,6 +224,48 @@ reconfigure:
       - /scripts/reload-parameter.sh
 {{- end -}}
 
+{{/*
+Env vars applied to every container of every FalkorDB component.
+
+These are emitted through `ComponentDefinition.spec.vars` rather than a
+per-container `env` block. KubeBlocks resolves `spec.vars` once per component
+and injects the result into every init container and container of the pod, so a
+single entry reaches `falkordb`, `metrics`, `init-dbctl` AND the `kbagent`
+sidecar that KubeBlocks appends itself - which a per-container `env` block in
+this chart cannot do, because that container does not exist here.
+
+kubelet injects `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT` into every
+container pointing at the API server's ClusterIP, and every in-cluster
+Kubernetes client derives its endpoint from them. A container's own env entry
+takes precedence over the kubelet-injected service variable, so setting these
+redirects all of those clients at a DNS name instead. That is needed when the
+API endpoint requires SNI (connecting by IP sends none, so the TLS handshake is
+terminated mid-handshake) or when a firewall rejects the ClusterIP outright.
+
+Both values default to empty, in which case this renders nothing at all.
+
+Usage:
+  {{ include "falkordb.globalVars" $ }}
+*/}}
+{{- define "falkordb.globalVars" -}}
+{{- $vars := list -}}
+{{- with .Values.global -}}
+  {{- with .kubernetesServiceHost -}}
+    {{- $vars = append $vars (dict "name" "KUBERNETES_SERVICE_HOST" "value" (toString .)) -}}
+  {{- end -}}
+  {{- with .kubernetesServicePort -}}
+    {{- $vars = append $vars (dict "name" "KUBERNETES_SERVICE_PORT" "value" (toString .)) -}}
+    {{- $vars = append $vars (dict "name" "KUBERNETES_SERVICE_PORT_HTTPS" "value" (toString .)) -}}
+  {{- end -}}
+{{- end -}}
+{{- range .Values.extraEnv -}}
+  {{- $vars = append $vars . -}}
+{{- end -}}
+{{- if $vars -}}
+{{- toYaml $vars -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "apeDts.reshard.image" -}}
 {{ include "falkordb.registry" (dict "ctx" . "registry" .Values.image.apeDts.registry) }}/{{ .Values.image.apeDts.repository}}:{{ .Values.image.apeDts.reshardTag }}
 {{- end }}
