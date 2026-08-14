@@ -135,4 +135,30 @@ Describe "FalkorDB Reload Parameter Script Tests"
       The contents of file "$redis_cli_log" should not include "auth:s3cret"
     End
   End
+
+  Describe "reload_parameters_from_environment()"
+    # A name such as 'falkordbe.ldap_servers' is not a valid shell identifier,
+    # so `export` cannot create it. The kernel accepts it when kubelet builds
+    # the container environment, which is exactly how KubeBlocks delivers the
+    # parameter, so `env` is mocked to reproduce that environment here.
+    Mock env
+      printf '%s\n' "$MOCK_ENV"
+    End
+
+    It "applies a module config whose name carries a dot and underscores"
+      export MOCK_ENV="falkordbe.ldap_servers=ldap://ldap.example.com"
+      When call reload_parameters_from_environment
+      The status should be success
+      The stdout should include "Parameter falkordbe.ldap_servers applied successfully"
+      The contents of file "$redis_cli_log" should include 'CONFIG SET falkordbe.ldap_servers "ldap://ldap.example.com"'
+    End
+
+    It "ignores KubeBlocks and container runtime variables"
+      export MOCK_ENV="KB_POD_NAME=falkordb-0"
+      When call reload_parameters_from_environment
+      The status should be failure
+      The stderr should include "reconfigure was invoked without any parameter to apply"
+      The contents of file "$redis_cli_log" should not include "CONFIG SET"
+    End
+  End
 End

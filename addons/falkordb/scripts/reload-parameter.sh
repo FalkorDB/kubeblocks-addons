@@ -105,6 +105,12 @@ reload_redis_parameter() {
 # like and what no KubeBlocks or container runtime variable looks like, and each
 # candidate is confirmed to be a real directive before anything is applied, so
 # an unrelated variable can never reach CONFIG SET.
+#
+# Dots and underscores are part of the accepted alphabet because module configs
+# are namespaced by the module that registers them, e.g. the enterprise module's
+# 'falkordbe.ldap_servers'. Rejecting them here skipped every enterprise
+# parameter and, when a change touched nothing else, failed the whole action
+# with "reconfigure was invoked without any parameter to apply".
 reload_parameters_from_environment() {
   set -e
   local applied=0
@@ -115,7 +121,7 @@ reload_parameters_from_environment() {
     value="${entry#*=}"
 
     case "$name" in
-      "" | -* | *[!a-z0-9-]*) continue ;;
+      "" | [-._]* | *[!a-z0-9._-]*) continue ;;
     esac
 
     output=$(run_redis_command "CONFIG GET ${name}") || true
