@@ -10,10 +10,11 @@ staticParameters:
 ## Parameters the server accepts through CONFIG SET while it is running.
 ##
 ## Anything listed here is reloaded in place by the reconfigure action instead
-## of forcing a rolling restart of the component. A parameter that appears in
-## neither list is written to the rendered config but is otherwise treated as
-## unclassified, so declaring the dynamic set is what keeps day-2 tuning of
-## these values non disruptive.
+## of forcing a rolling restart of the component. Because this list is non
+## empty, KubeBlocks treats every parameter that is NOT listed here as static,
+## regardless of the staticParameters list above, so any hot settable directive
+## omitted from this list silently degrades into a rolling restart. That is why
+## the enterprise module's `falkordbe.*` configs have to be enumerated here too.
 dynamicParameters:
   - acllog-max-len
   - activedefrag
@@ -22,6 +23,41 @@ dynamicParameters:
   - aof-timestamp-enabled
   - appendfsync
   - appendonly
+  - falkordbe.evict-interval-ms
+  - falkordbe.idle-threshold-ms
+  - falkordbe.ldap_acl_fallback_enabled
+  - falkordbe.ldap_auth_mode
+  - falkordbe.ldap_bind_dn_prefix
+  - falkordbe.ldap_bind_dn_suffix
+  - falkordbe.ldap_connection_pool_size
+  - falkordbe.ldap_default_acl_rules
+  - falkordbe.ldap_exempted_users_regex
+  - falkordbe.ldap_failure_detector_interval
+  - falkordbe.ldap_group_acl_rules_map
+  - falkordbe.ldap_group_acl_user_map
+  - falkordbe.ldap_groups_filter
+  - falkordbe.ldap_groups_member_attribute
+  - falkordbe.ldap_groups_name_attribute
+  - falkordbe.ldap_groups_rules_attribute
+  - falkordbe.ldap_groups_search_base
+  - falkordbe.ldap_return_auth_errors
+  - falkordbe.ldap_search_attribute
+  - falkordbe.ldap_search_base
+  - falkordbe.ldap_search_bind_dn
+  - falkordbe.ldap_search_bind_passwd
+  - falkordbe.ldap_search_dn_attribute
+  - falkordbe.ldap_search_filter
+  - falkordbe.ldap_search_scope
+  - falkordbe.ldap_servers
+  - falkordbe.ldap_timeout_connection
+  - falkordbe.ldap_timeout_ldap_operation
+  - falkordbe.ldap_tls_ca_cert_path
+  - falkordbe.ldap_tls_cert_path
+  - falkordbe.ldap_tls_key_path
+  - falkordbe.ldap_tls_skip_verify
+  - falkordbe.ldap_use_starttls
+  - falkordbe.load-evict-budget
+  - falkordbe.memory-pressure
   - hash-max-listpack-entries
   - hash-max-listpack-value
   - latency-tracking
