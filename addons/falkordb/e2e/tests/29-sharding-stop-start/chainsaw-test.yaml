@@ -1,0 +1,213 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-stop-start
+spec:
+  description: >-
+    Stop a sharded cluster and start it again, and prove the cluster re-forms.
+
+    Every pod of every shard boots at the same moment with a nodes.conf that still
+    records its peers' previous pod IPs, and the cluster bus only dials those IPs.
+    No peer is up yet to report the topology from, so unless each node re-meets
+    the others at their new addresses the cluster sits at cluster_state:fail
+    forever while every pod reports Ready. 16-stop-start covers the same full stop
+    for replication only, and 08-sharding-self-heal always leaves live peers behind.
+
+    The same state follows a full Kubernetes restart, losing the only node, or a
+    parallel update that recreates every shard's pods at once.
+  steps:
+    - name: create the sharded cluster and seed data
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-sstop shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-sstop shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              # Enough keys that every shard is guaranteed to own some of them.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-sstop 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-sstop 200
+
+              # The replicas have to hold the data before the snapshot, or a replica
+              # that comes back as the shard's primary would be missing keys.
+              fdb_retry "every replica to link up" bash -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                for p in $(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-sstop,kubeblocks.io/role=secondary" \
+                  -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}"); do
+                  fdb_assert_replication_up "'"$NAMESPACE"'" "$p" || exit 1
+                done
+              '
+              for p in $(kubectl get pods -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-sstop,kubeblocks.io/role=primary" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                acked="$(FDB_CLI_FLAGS="" fdb_cli "$NAMESPACE" "$p" WAIT 1 10000 | tr -d '\r')"
+                [ "$acked" -ge 1 ] || { echo "no replica of $p acknowledged the writes" >&2; exit 1; }
+              done
+
+              # Nothing survives the stop unless it reached the volume.
+              for p in $(fdb_sharding_pods "$NAMESPACE" fdb-sstop shard); do
+                FDB_CLI_FLAGS="" fdb_cli "$NAMESPACE" "$p" SAVE >/dev/null
+              done
+
+              kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=fdb-sstop \
+                -o jsonpath='{range .items[*]}{.metadata.name}={.status.podIP}{"\n"}{end}' \
+                > "$state/ips-before"
+              cat "$state/ips-before"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sstop
+            tail: 200
+
+    - name: stop the cluster
+      try:
+        - apply:
+            file: stop.yaml
+        - assert:
+            file: assert-stop-succeeded.yaml
+        - assert:
+            file: assert-stopped.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "all pods to disappear" bash -c '
+                remaining=$(kubectl get pods -n "'"$NAMESPACE"'" \
+                  -l "app.kubernetes.io/instance=fdb-sstop" \
+                  -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}" | grep -c . || true)
+                [ "$remaining" -eq 0 ] || { echo "$remaining pod(s) still running" >&2; exit 1; }
+                echo "all pods are gone"
+              '
+
+              claims="$(kubectl get pvc -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-sstop" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -c . || true)"
+              if [ "$claims" -lt 6 ]; then
+                echo "expected the 6 data volumes to be retained, found $claims" >&2
+                kubectl get pvc -n "$NAMESPACE" >&2
+                exit 1
+              fi
+              echo "$claims volumes were retained across the stop"
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-sstop-stop-ops
+
+    - name: start the cluster again
+      try:
+        - apply:
+            file: start.yaml
+        - assert:
+            file: assert-start-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-sstop-start-ops
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sstop
+            tail: 200
+
+    - name: the restarted cluster re-formed and kept its data
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=fdb-sstop \
+                -o jsonpath='{range .items[*]}{.metadata.name}={.status.podIP}{"\n"}{end}' \
+                > "$state/ips-after"
+              # Informational: the failure mode needs the pod IPs to change, which
+              # they almost always do, but a reused IP is not a test failure.
+              echo "pod IPs before and after the stop:"
+              paste -d' ' "$state/ips-before" "$state/ips-after"
+
+              # Every node, not just one entry point: a pod that never re-met its
+              # peers still answers, it just reports a failed cluster. One retry
+              # budget for all of them, so a regression fails in minutes.
+              fdb_retry "every pod to see a healthy cluster" bash -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                for p in $(fdb_sharding_pods "'"$NAMESPACE"'" fdb-sstop shard); do
+                  fdb_assert_slots_covered "'"$NAMESPACE"'" "$p" || exit 1
+                done
+              '
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-sstop shard)"
+              fdb_retry "every node to be connected" bash -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                nodes=$(FDB_CLI_FLAGS="" fdb_cli "'"$NAMESPACE"'" "'"$pod"'" CLUSTER NODES | tr -d "\r")
+                echo "$nodes"
+                total=$(echo "$nodes" | grep -c .)
+                [ "$total" -eq 6 ] || { echo "expected 6 nodes, found $total" >&2; exit 1; }
+                bad=$(echo "$nodes" | awk "\$3 ~ /fail|handshake|noaddr/ || \$8 != \"connected\"" | grep -c . || true)
+                [ "$bad" -eq 0 ] || { echo "$bad node(s) are not healthy and connected" >&2; exit 1; }
+                masters=$(echo "$nodes" | awk "\$3 ~ /master/" | grep -c .)
+                [ "$masters" -eq 3 ] || { echo "expected 3 masters, found $masters" >&2; exit 1; }
+              '
+
+              fdb_retry "every key to be readable again" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-sstop 200
+
+              # Reads through -c only ever reach the primaries, and the cluster bus
+              # being connected says nothing about replication. Check each replica's
+              # link and that the replicas hold as many keys as the primaries.
+              fdb_retry "every replica to replicate again" bash -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                count_keys() {
+                  total=0
+                  for p in $(kubectl get pods -n "'"$NAMESPACE"'" \
+                    -l "app.kubernetes.io/instance=fdb-sstop,kubeblocks.io/role=$1" \
+                    -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}"); do
+                    if [ "$1" = secondary ]; then
+                      fdb_assert_replication_up "'"$NAMESPACE"'" "$p" >&2 || return 1
+                    fi
+                    n=$(FDB_CLI_FLAGS="" fdb_cli "'"$NAMESPACE"'" "$p" DBSIZE | tr -d "\r")
+                    total=$((total + n))
+                  done
+                  echo "$total"
+                }
+                primaries=$(count_keys primary) || exit 1
+                replicas=$(count_keys secondary) || exit 1
+                [ "$primaries" -ge 200 ] || { echo "primaries hold $primaries keys, expected at least 200" >&2; exit 1; }
+                [ "$replicas" -eq "$primaries" ] || {
+                  echo "replicas hold $replicas keys, primaries hold $primaries" >&2; exit 1; }
+                echo "primaries and replicas both hold $primaries keys"
+              '
+
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-sstop-after 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-sstop-after 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-sstop
+            tail: 300
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

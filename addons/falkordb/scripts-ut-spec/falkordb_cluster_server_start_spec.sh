@@ -602,7 +602,222 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
     End
   End
 
+  Describe "meet_known_peer_by_fqdn()"
+    get_pod_service_port_by_network_mode() {
+      echo "6379"
+    }
+
+    Context "when the peer is not reachable yet"
+      get_cluster_nodes_info() {
+        echo "Failed to execute the get cluster nodes info command" >&2
+        echo ""
+      }
+
+      It "reports the peer as pending without probe noise on stderr"
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
+        The status should equal 1
+        The stdout should include "peer falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc is not reachable yet"
+        The stderr should equal ""
+      End
+    End
+
+    Context "when the peer announces a new address"
+      get_cluster_nodes_info() {
+        echo "aaa 10.42.0.99:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 1 connected 0-5460"
+        echo "bbb 10.42.0.12:6379@16379,falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc master,fail? - 0 0 2 connected 5461-10922"
+      }
+
+      send_cluster_meet() {
+        echo "meet from $1:$2 to $3 $4 $5"
+        return 0
+      }
+
+      setup() {
+        service_port="6379"
+      }
+      Before "setup"
+
+      It "meets the peer at the address from its own myself entry"
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
+        The status should be success
+        The stdout should include "meet from 127.0.0.1:6379 to 10.42.0.99 6379 16379"
+        The stdout should not include "10.42.0.12"
+      End
+    End
+
+    Context "when the pod was recreated with a new node ID"
+      get_cluster_nodes_info() {
+        echo "zzz 10.42.0.99:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 0 connected"
+      }
+
+      send_cluster_meet() {
+        echo "unexpected meet"
+        return 0
+      }
+
+      It "leaves the new incarnation alone"
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
+        The status should equal 2
+        The stdout should include "runs node zzz instead of the known aaa"
+        The stdout should not include "unexpected meet"
+      End
+    End
+
+    Context "when the meet fails"
+      get_cluster_nodes_info() {
+        echo "aaa 10.42.0.99:31000@31888,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 1 connected"
+      }
+
+      send_cluster_meet() {
+        echo "meet to $3 $4 $5"
+        return 1
+      }
+
+      It "reports the peer as pending"
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
+        The status should equal 1
+        The stdout should include "meet to 10.42.0.99 31000 31888"
+      End
+    End
+  End
+
+  Describe "rejoin_known_peers_by_fqdn()"
+    setup() {
+      export CURRENT_POD_NAME="falkordb-shard-abc-0"
+      export CURRENT_SHARD_POD_FQDN_LIST="falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc,falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc"
+      export ALL_SHARDS_POD_FQDN_LIST_SHARD_ABC="falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc,falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc"
+      export ALL_SHARDS_POD_FQDN_LIST_SHARD_XYZ="falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc,falkordb-shard-xyz-1.falkordb-shard-xyz-headless.default.svc"
+      service_port="6379"
+      rejoin_peer_max_attempts=3
+      rm -f ./met_peers
+    }
+    Before "setup"
+
+    un_setup() {
+      unset CURRENT_POD_NAME
+      unset CURRENT_SHARD_POD_FQDN_LIST
+      unset ALL_SHARDS_POD_FQDN_LIST_SHARD_ABC
+      unset ALL_SHARDS_POD_FQDN_LIST_SHARD_XYZ
+      unset ANNOUNCE_HOSTNAME_OVERRIDE
+      rejoin_peer_max_attempts=12
+      rm -f ./met_peers
+    }
+    After "un_setup"
+
+    Context "when the local node does not know any peer"
+      get_cluster_nodes_info() {
+        echo "aaa :6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 0 connected"
+      }
+
+      meet_known_peer_by_fqdn() {
+        echo "unexpected meet $1"
+        return 0
+      }
+
+      It "skips the rejoin"
+        When call rejoin_known_peers_by_fqdn
+        The status should be success
+        The stdout should include "local node does not know any peer, skip rejoin known peers"
+        The stdout should not include "unexpected meet"
+      End
+    End
+
+    Context "when every pod restarted with stale peer addresses"
+      # the local nodes.conf still records the pre-restart pod IPs; xyz-1 was never part of the cluster
+      get_cluster_nodes_info() {
+        echo "aaa 10.42.0.99:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 1 connected 0-8191"
+        echo "bbb 10.42.0.11:6379@16379,falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc slave aaa 0 0 1 connected"
+        echo "ccc 10.42.0.12:6379@16379,falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc master - 0 0 2 connected 8192-16383"
+      }
+
+      # every peer comes up on the second attempt
+      meet_known_peer_by_fqdn() {
+        echo "attempt meet $1 as $2"
+        if grep -qxF "$1" ./met_peers 2>/dev/null; then
+          echo "met $1"
+          return 0
+        fi
+        echo "$1" >> ./met_peers
+        return 1
+      }
+
+      It "waits for and meets only the known peers with their known node IDs"
+        When call rejoin_known_peers_by_fqdn
+        The status should be success
+        The stdout should include "attempt meet falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc as bbb"
+        The stdout should include "attempt meet falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc as ccc"
+        The stdout should include "met falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc"
+        The stdout should include "met falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc"
+        The stdout should not include "attempt meet falkordb-shard-abc-0."
+        The stdout should not include "attempt meet falkordb-shard-xyz-1."
+        The stdout should include "all reachable known peers have been met"
+      End
+    End
+
+    Context "when a known pod was recreated"
+      get_cluster_nodes_info() {
+        echo "aaa 10.42.0.99:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 1 connected 0-16383"
+        echo "bbb 10.42.0.11:6379@16379,falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc slave aaa 0 0 1 connected"
+      }
+
+      meet_known_peer_by_fqdn() {
+        echo "attempt meet $1"
+        return 2
+      }
+
+      It "does not retry it"
+        When call rejoin_known_peers_by_fqdn
+        The status should be success
+        The lines of stdout should equal 2
+        The stdout should include "all reachable known peers have been met"
+      End
+    End
+
+    Context "when the announce hostname is overridden"
+      get_cluster_nodes_info() {
+        echo "aaa 10.42.0.99:6379@16379,falkordb-shard-abc-0.db.example.com myself,master - 0 0 1 connected 0-16383"
+        echo "bbb 10.42.0.11:6379@16379,falkordb-shard-abc-1.db.example.com slave aaa 0 0 1 connected"
+      }
+
+      meet_known_peer_by_fqdn() {
+        echo "met $1 as $2"
+        return 0
+      }
+
+      It "matches peers by their overridden hostname"
+        export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).db.example.com'
+        When call rejoin_known_peers_by_fqdn
+        The status should be success
+        The stdout should include "met falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc as bbb"
+        The stdout should not include "met falkordb-shard-xyz"
+      End
+    End
+
+    Context "when a known peer never comes back"
+      get_cluster_nodes_info() {
+        echo "aaa 10.42.0.99:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 1 connected 0-16383"
+        echo "ccc 10.42.0.12:6379@16379,falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc master - 0 0 2 connected"
+      }
+
+      meet_known_peer_by_fqdn() {
+        echo "attempt meet $1"
+        return 1
+      }
+
+      It "stops waiting after the bounded number of attempts"
+        When call rejoin_known_peers_by_fqdn
+        The status should be success
+        The lines of stdout should equal 4
+        The stdout should include "stopped waiting for known peers: falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc ccc"
+      End
+    End
+  End
+
   Describe "scale_redis_cluster_replica()"
+    rejoin_known_peers_by_fqdn() {
+      echo "rejoin known peers by fqdn"
+    }
+
     Context "when redis server is not ready"
       check_redis_server_ready_with_retry() {
         return 1
@@ -875,6 +1090,19 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         The stdout should include "queried cluster view of: falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc"
         The stdout should not include "queried cluster view of: falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc"
         The stdout should include "current_comp_primary_node is empty, skip scale out replica"
+      End
+
+      rejoin_precedes_topology_lookup() {
+        local rejoin_line lookup_line
+        rejoin_line=$(echo "$rejoin_precedes_topology_lookup" | grep -n "rejoin known peers by fqdn" | head -1 | cut -d: -f1)
+        lookup_line=$(echo "$rejoin_precedes_topology_lookup" | grep -n "queried cluster view of" | head -1 | cut -d: -f1)
+        [ -n "$rejoin_line" ] && [ -n "$lookup_line" ] && [ "$rejoin_line" -lt "$lookup_line" ]
+      }
+
+      It "re-meets the known peers before looking up the topology"
+        When run scale_redis_cluster_replica
+        The status should be success
+        The stdout should satisfy rejoin_precedes_topology_lookup
       End
     End
 

@@ -68,27 +68,33 @@ the cell in, see [Testing another version](#testing-another-version).
 Every column was measured by
 [run 31582752684](https://github.com/FalkorDB/kubeblocks-addons/actions/runs/31582752684),
 four shards each, which is the first run to include `1.2.0-alpha.2` and the
-first with the A1/A5/A6 fixes in it. CI runs 26 of the 28 scenarios —
+first with the A1/A5/A6 fixes in it. That run covered 26 of the then 28
+scenarios —
 [12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore) and
-[14-rebuild-instance](e2e/tests/14-rebuild-instance) are excluded — so the rows
-those two cover are not measured by any column. Of the 26 that do run, the only
+[14-rebuild-instance](e2e/tests/14-rebuild-instance) were excluded — so the rows
+those two cover are not measured by any column. CI now runs 28 of 29: 12 is back
+in with the ape-dts bump (A2), and only 14 is still excluded. Of the 26 that do run, the only
 failures were the three restore scenarios on `alpha.2`/`alpha.3` and sharded
 scale-in on `1.0.2`; `1.1.0-beta.9` and `1.2.0-alpha.1` were green on all four
 shards. `alpha.1` shard 2 failed on the first attempt in `actions/checkout` with
 `server certificate verification failed`, before a single test ran, and passed
 on re-run.
 
-C1 is a bug in ape-dts rather than in KubeBlocks, so it holds sharded restore
-down on every version regardless of what the platform does.
+C1 was a bug in ape-dts rather than in KubeBlocks, so it held sharded restore
+down on every version regardless of what the platform did. It is fixed in
+ape-dts `2.0.26.1`, which the chart now uses, but the table above predates that
+bump: the sharded backup and restore rows are measurements of the old image
+until the next CI sweep refills them.
 
 The practical readings:
 
 - **The addon installs cleanly on every version tested.** Nothing is rejected;
   what breaks, breaks at runtime.
-- **Sharded backup and restore are unresolved everywhere.** C1 blocks the
-  restore half on every version, and because the scenario is excluded from CI
-  the backup half is unmeasured on all but `1.2.0-alpha.1`, where it was last
-  run by hand. No version in this table is clean on sharded data protection.
+- **Sharded backup and restore are unverified everywhere.** As measured, C1
+  blocked the restore half on every version and the backup half was only run by
+  hand on `1.2.0-alpha.1`. With C1 fixed and the scenario back in CI, the
+  remaining known blocker for sharded restore is B1/B2 on `1.2.0-alpha.2`+, but
+  no version is confirmed clean on sharded data protection until the next sweep.
 - **`1.0.2` — the last stable release — passed every CI scenario except sharded
   scale-in**, and that gap is now closed, but only when the chart is installed
   with `legacyShardingPreTerminate=true`. `1.0.2` never implemented the
@@ -169,7 +175,7 @@ hand on `1.0.x` needs the first of those set explicitly.
 | id | Item | Affects | Status | Waiting on |
 |---|---|---|---|---|
 | A1 | The three ComponentDefinitions set `systemAccounts[].passwordGenerationPolicy`, which `1.2.0-alpha.3` renamed to `passwordConfig`. It is not rejected: the field is absent from that release's `systemAccounts` item schema and the schema does not preserve unknown fields, so the API server prunes it silently. | `1.2.0-alpha.3`+ | **fixed** | Nothing. The spelling is now a chart value, `systemAccountPasswordField`, because no release serves both names except the 1.1 line — writing both is not an option either, since `kubectl apply` defaults to strict decoding and rejects the unknown one even though Helm prunes it. [e2e/setup/kb-cluster.sh](e2e/setup/kb-cluster.sh) maps `KB_VERSION` to the right spelling. 27 of the addons in this repo still carry the bare old name. |
-| A2 | Sharded backup/restore ([e2e/tests/12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore)) is excluded from CI. | all | excluded from CI | C1 |
+| A2 | Sharded backup/restore ([e2e/tests/12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore)) was excluded from CI. | all | **un-gated**, runs in CI again with ape-dts `2.0.26.1` | A CI sweep to refill the "Backup, sharded" and "Restore, sharded" rows. |
 | A3 | `RebuildInstance` ([e2e/tests/14-rebuild-instance](e2e/tests/14-rebuild-instance)) is excluded from CI. It passes locally on `local-path`, where the race below is reliably won. | all | excluded from CI | B7 |
 | A4 | Application-created ACL accounts are not captured by backups. | all | open, product limitation | A decision on whether to capture them. Identical in the in-tree `redis` addon. |
 | A5 | [e2e/tests/15-sentinel-scaling](e2e/tests/15-sentinel-scaling) timed out waiting for a promotion after the primary was killed with five sentinels watching. Sentinel *did* see the outage — `+sdown`, `+odown`, four `+try-failover` — but every attempt ended in `-failover-abort-not-elected`: no candidate reached the majority of 3. The scenario killed the primary as soon as each new sentinel monitored the master, without waiting for the five to discover each other, and a sentinel that knows no peers votes for itself. Failed on `1.1.0-beta.9` and `1.2.0-alpha.1`, passed on `1.0.2` and `1.2.0-alpha.3` in the same run — a test race, not a version boundary. | CI only | **fixed** | Nothing. The scenario now waits for every sentinel to report `num-other-sentinels` 4 before killing the primary. |
@@ -192,7 +198,7 @@ hand on `1.0.x` needs the first of those set explicitly.
 
 | id | Item | Affects | Status | Waiting on |
 |---|---|---|---|---|
-| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | fix **merged** upstream ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), 2026-08-10) | A *release* carrying it. Every published tag, including `v2.0.26` and `v2.0.26-alpha.22`, predates the merge, so `values.yaml` is still pinned to `2.0.26-alpha.16`. Bump `apeDts.tag`, `apeDts.reshardTag` and `apeDtsImage.tag` and un-gate A2 when a tag containing `1a593863` ships. |
+| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | **fixed** in ape-dts `v2.0.26.1` ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), cherry-picked as `01d64f8a`) | Nothing. `apeDtsImage.tag` (restore) and `image.apeDts.reshardTag` (rebalance) are on `2.0.26.1` and A2 is un-gated. The table above still shows the measurements taken before the bump. |
 
 ## Chart version history
 
@@ -206,17 +212,16 @@ hand on `1.0.x` needs the first of those set explicitly.
 | 1.0.2 | 4.14.10 | 2026-02-16 |
 | 1.0.1 | 4.14.10 | 2025-12-29 |
 
-Supported FalkorDB service versions: 4.20.1 (default), 4.18.11, 4.18.8, 4.14.12,
-4.14.10, 4.12.5.
+Supported FalkorDB service versions: 4.20.2 (default), 4.20.1, 4.18.11, 4.18.8,
+4.14.12, 4.14.10, 4.12.5.
 
 ## e2e coverage
 
-28 scenarios in [e2e/tests](e2e/tests). Two are excluded from CI and are expected
-to fail until their blockers clear:
+29 scenarios in [e2e/tests](e2e/tests). One is excluded from CI and is expected
+to fail until its blocker clears:
 
 | Scenario | Excluded | Blocker |
 |---|---|---|
-| [12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore) | yes | C1 |
 | [14-rebuild-instance](e2e/tests/14-rebuild-instance) | yes | B7 |
 
 Exclusion is by label, so CI runs `make e2e E2E_SELECTOR='e2e.falkordb/ci!=unsupported'`

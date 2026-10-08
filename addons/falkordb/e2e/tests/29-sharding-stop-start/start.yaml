@@ -1,0 +1,7 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-sstop-start-ops
+spec:
+  clusterName: fdb-sstop
+  type: Start
