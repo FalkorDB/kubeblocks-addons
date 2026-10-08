@@ -169,7 +169,7 @@ hand on `1.0.x` needs the first of those set explicitly.
 | id | Item | Affects | Status | Waiting on |
 |---|---|---|---|---|
 | A1 | The three ComponentDefinitions set `systemAccounts[].passwordGenerationPolicy`, which `1.2.0-alpha.3` renamed to `passwordConfig`. It is not rejected: the field is absent from that release's `systemAccounts` item schema and the schema does not preserve unknown fields, so the API server prunes it silently. | `1.2.0-alpha.3`+ | **fixed** | Nothing. The spelling is now a chart value, `systemAccountPasswordField`, because no release serves both names except the 1.1 line — writing both is not an option either, since `kubectl apply` defaults to strict decoding and rejects the unknown one even though Helm prunes it. [e2e/setup/kb-cluster.sh](e2e/setup/kb-cluster.sh) maps `KB_VERSION` to the right spelling. 27 of the addons in this repo still carry the bare old name. |
-| A2 | Sharded backup/restore ([e2e/tests/12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore)) is excluded from CI. | all | excluded from CI | C1 |
+| A2 | Sharded backup/restore ([e2e/tests/12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore)) was excluded from CI. | all | **un-gated**, runs in CI again with ape-dts `2.0.26.1` | A CI sweep to refill the "Backup, sharded" and "Restore, sharded" rows. |
 | A3 | `RebuildInstance` ([e2e/tests/14-rebuild-instance](e2e/tests/14-rebuild-instance)) is excluded from CI. It passes locally on `local-path`, where the race below is reliably won. | all | excluded from CI | B7 |
 | A4 | Application-created ACL accounts are not captured by backups. | all | open, product limitation | A decision on whether to capture them. Identical in the in-tree `redis` addon. |
 | A5 | [e2e/tests/15-sentinel-scaling](e2e/tests/15-sentinel-scaling) timed out waiting for a promotion after the primary was killed with five sentinels watching. Sentinel *did* see the outage — `+sdown`, `+odown`, four `+try-failover` — but every attempt ended in `-failover-abort-not-elected`: no candidate reached the majority of 3. The scenario killed the primary as soon as each new sentinel monitored the master, without waiting for the five to discover each other, and a sentinel that knows no peers votes for itself. Failed on `1.1.0-beta.9` and `1.2.0-alpha.1`, passed on `1.0.2` and `1.2.0-alpha.3` in the same run — a test race, not a version boundary. | CI only | **fixed** | Nothing. The scenario now waits for every sentinel to report `num-other-sentinels` 4 before killing the primary. |
@@ -192,7 +192,7 @@ hand on `1.0.x` needs the first of those set explicitly.
 
 | id | Item | Affects | Status | Waiting on |
 |---|---|---|---|---|
-| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | fix **merged** upstream ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), 2026-08-10) | A *release* carrying it. Every published tag, including `v2.0.26` and `v2.0.26-alpha.22`, predates the merge, so `values.yaml` is still pinned to `2.0.26-alpha.16`. Bump `apeDts.tag`, `apeDts.reshardTag` and `apeDtsImage.tag` and un-gate A2 when a tag containing `1a593863` ships. |
+| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | **fixed** in ape-dts `v2.0.26.1` ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), cherry-picked as `01d64f8a`) | Nothing. `apeDts.tag`, `apeDts.reshardTag` and `apeDtsImage.tag` are on `2.0.26.1` and A2 is un-gated. The table above still shows the measurements taken before the bump. |
 
 ## Chart version history
 
@@ -211,12 +211,11 @@ Supported FalkorDB service versions: 4.20.1 (default), 4.18.11, 4.18.8, 4.14.12,
 
 ## e2e coverage
 
-28 scenarios in [e2e/tests](e2e/tests). Two are excluded from CI and are expected
-to fail until their blockers clear:
+29 scenarios in [e2e/tests](e2e/tests). One is excluded from CI and is expected
+to fail until its blocker clears:
 
 | Scenario | Excluded | Blocker |
 |---|---|---|
-| [12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore) | yes | C1 |
 | [14-rebuild-instance](e2e/tests/14-rebuild-instance) | yes | B7 |
 
 Exclusion is by label, so CI runs `make e2e E2E_SELECTOR='e2e.falkordb/ci!=unsupported'`
