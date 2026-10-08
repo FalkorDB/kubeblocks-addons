@@ -78,17 +78,21 @@ shards. `alpha.1` shard 2 failed on the first attempt in `actions/checkout` with
 `server certificate verification failed`, before a single test ran, and passed
 on re-run.
 
-C1 is a bug in ape-dts rather than in KubeBlocks, so it holds sharded restore
-down on every version regardless of what the platform does.
+C1 was a bug in ape-dts rather than in KubeBlocks, so it held sharded restore
+down on every version regardless of what the platform did. It is fixed in
+ape-dts `2.0.26.1`, which the chart now uses, but the table above predates that
+bump: the sharded backup and restore rows are measurements of the old image
+until the next CI sweep refills them.
 
 The practical readings:
 
 - **The addon installs cleanly on every version tested.** Nothing is rejected;
   what breaks, breaks at runtime.
-- **Sharded backup and restore are unresolved everywhere.** C1 blocks the
-  restore half on every version, and because the scenario is excluded from CI
-  the backup half is unmeasured on all but `1.2.0-alpha.1`, where it was last
-  run by hand. No version in this table is clean on sharded data protection.
+- **Sharded backup and restore are unverified everywhere.** As measured, C1
+  blocked the restore half on every version and the backup half was only run by
+  hand on `1.2.0-alpha.1`. With C1 fixed and the scenario back in CI, the
+  remaining known blocker for sharded restore is B1/B2 on `1.2.0-alpha.2`+, but
+  no version is confirmed clean on sharded data protection until the next sweep.
 - **`1.0.2` — the last stable release — passed every CI scenario except sharded
   scale-in**, and that gap is now closed, but only when the chart is installed
   with `legacyShardingPreTerminate=true`. `1.0.2` never implemented the
@@ -192,7 +196,7 @@ hand on `1.0.x` needs the first of those set explicitly.
 
 | id | Item | Affects | Status | Waiting on |
 |---|---|---|---|---|
-| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | **fixed** in ape-dts `v2.0.26.1` ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), cherry-picked as `01d64f8a`) | Nothing. `apeDts.tag`, `apeDts.reshardTag` and `apeDtsImage.tag` are on `2.0.26.1` and A2 is un-gated. The table above still shows the measurements taken before the bump. |
+| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | **fixed** in ape-dts `v2.0.26.1` ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), cherry-picked as `01d64f8a`) | Nothing. `apeDtsImage.tag` (restore) and `image.apeDts.reshardTag` (rebalance) are on `2.0.26.1` and A2 is un-gated. The table above still shows the measurements taken before the bump. |
 
 ## Chart version history
 

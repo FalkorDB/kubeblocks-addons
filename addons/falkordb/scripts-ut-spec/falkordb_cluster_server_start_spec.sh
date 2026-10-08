@@ -609,13 +609,15 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
 
     Context "when the peer is not reachable yet"
       get_cluster_nodes_info() {
+        echo "Failed to execute the get cluster nodes info command" >&2
         echo ""
       }
 
-      It "reports the peer as pending"
-        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc"
-        The status should be failure
+      It "reports the peer as pending without probe noise on stderr"
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
+        The status should equal 1
         The stdout should include "peer falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc is not reachable yet"
+        The stderr should equal ""
       End
     End
 
@@ -636,10 +638,28 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       Before "setup"
 
       It "meets the peer at the address from its own myself entry"
-        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc"
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
         The status should be success
         The stdout should include "meet from 127.0.0.1:6379 to 10.42.0.99 6379 16379"
         The stdout should not include "10.42.0.12"
+      End
+    End
+
+    Context "when the pod was recreated with a new node ID"
+      get_cluster_nodes_info() {
+        echo "zzz 10.42.0.99:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 0 connected"
+      }
+
+      send_cluster_meet() {
+        echo "unexpected meet"
+        return 0
+      }
+
+      It "leaves the new incarnation alone"
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
+        The status should equal 2
+        The stdout should include "runs node zzz instead of the known aaa"
+        The stdout should not include "unexpected meet"
       End
     End
 
@@ -654,8 +674,8 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       It "reports the peer as pending"
-        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc"
-        The status should be failure
+        When call meet_known_peer_by_fqdn "falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc" "aaa"
+        The status should equal 1
         The stdout should include "meet to 10.42.0.99 31000 31888"
       End
     End
@@ -679,7 +699,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       unset ALL_SHARDS_POD_FQDN_LIST_SHARD_ABC
       unset ALL_SHARDS_POD_FQDN_LIST_SHARD_XYZ
       unset ANNOUNCE_HOSTNAME_OVERRIDE
-      rejoin_peer_max_attempts=60
+      rejoin_peer_max_attempts=12
       rm -f ./met_peers
     }
     After "un_setup"
@@ -712,7 +732,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
 
       # every peer comes up on the second attempt
       meet_known_peer_by_fqdn() {
-        echo "attempt meet $1"
+        echo "attempt meet $1 as $2"
         if grep -qxF "$1" ./met_peers 2>/dev/null; then
           echo "met $1"
           return 0
@@ -721,14 +741,35 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         return 1
       }
 
-      It "waits for and meets only the known peers by fqdn"
+      It "waits for and meets only the known peers with their known node IDs"
         When call rejoin_known_peers_by_fqdn
         The status should be success
+        The stdout should include "attempt meet falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc as bbb"
+        The stdout should include "attempt meet falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc as ccc"
         The stdout should include "met falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc"
         The stdout should include "met falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc"
         The stdout should not include "attempt meet falkordb-shard-abc-0."
         The stdout should not include "attempt meet falkordb-shard-xyz-1."
-        The stdout should include "all known peers have been met"
+        The stdout should include "all reachable known peers have been met"
+      End
+    End
+
+    Context "when a known pod was recreated"
+      get_cluster_nodes_info() {
+        echo "aaa 10.42.0.99:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc myself,master - 0 0 1 connected 0-16383"
+        echo "bbb 10.42.0.11:6379@16379,falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc slave aaa 0 0 1 connected"
+      }
+
+      meet_known_peer_by_fqdn() {
+        echo "attempt meet $1"
+        return 2
+      }
+
+      It "does not retry it"
+        When call rejoin_known_peers_by_fqdn
+        The status should be success
+        The lines of stdout should equal 2
+        The stdout should include "all reachable known peers have been met"
       End
     End
 
@@ -739,7 +780,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       meet_known_peer_by_fqdn() {
-        echo "met $1"
+        echo "met $1 as $2"
         return 0
       }
 
@@ -747,7 +788,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         export ANNOUNCE_HOSTNAME_OVERRIDE='$(POD_NAME).db.example.com'
         When call rejoin_known_peers_by_fqdn
         The status should be success
-        The stdout should include "met falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc"
+        The stdout should include "met falkordb-shard-abc-1.falkordb-shard-abc-headless.default.svc as bbb"
         The stdout should not include "met falkordb-shard-xyz"
       End
     End
@@ -763,11 +804,11 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         return 1
       }
 
-      It "gives up after the bounded number of attempts"
+      It "stops waiting after the bounded number of attempts"
         When call rejoin_known_peers_by_fqdn
         The status should be success
-        The lines of stdout should equal 3
-        The stderr should include "gave up waiting for known peers: falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc"
+        The lines of stdout should equal 4
+        The stdout should include "stopped waiting for known peers: falkordb-shard-xyz-0.falkordb-shard-xyz-headless.default.svc ccc"
       End
     End
   End

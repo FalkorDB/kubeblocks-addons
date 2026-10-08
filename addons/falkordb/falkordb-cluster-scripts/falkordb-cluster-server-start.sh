@@ -32,7 +32,7 @@ retry_times=3
 check_ready_times=30
 retry_delay_second=2
 # how long the start script waits for known peers to come up after a full restart
-rejoin_peer_max_attempts=60
+rejoin_peer_max_attempts=12
 rejoin_peer_retry_delay_second=5
 
 # variables for scale out replica
@@ -302,30 +302,44 @@ is_rebuild_instance() {
   return 1
 }
 
-# usage: meet_known_peer_by_fqdn <pod_fqdn>
+# usage: meet_known_peer_by_fqdn <pod_fqdn> <known_node_id>
 # reach the peer through its stable pod fqdn, read the address it announces now from its own
 # "myself" entry and send CLUSTER MEET from the local node to that address.
+# returns 0 when met, 1 when the peer is not reachable yet, and 2 when the pod now runs a
+# different node ID than the one the local node knows: it was recreated, and meeting it would
+# pull an empty node into the cluster before its own start script rejoins it as a replica.
 meet_known_peer_by_fqdn() {
   local pod_fqdn="$1"
+  local known_node_id="$2"
   local pod_name="${pod_fqdn%%.*}"
   local pod_port
   pod_port=$(get_pod_service_port_by_network_mode "$pod_name")
 
+  # an unreachable peer is the expected state while it boots, so keep the probe quiet
   local peer_nodes_info
-  peer_nodes_info=$(get_cluster_nodes_info "$pod_fqdn" "$pod_port")
+  peer_nodes_info=$(get_cluster_nodes_info "$pod_fqdn" "$pod_port" 2>/dev/null)
+  local peer_myself_line
+  peer_myself_line=$(echo "$peer_nodes_info" | awk '$3 ~ /myself/ {print; exit}')
+  local peer_node_id
+  peer_node_id=$(echo "$peer_myself_line" | awk '{print $1}')
   # myself line address field: ip:port@bus_port[,hostname]
   local peer_addr
-  peer_addr=$(echo "$peer_nodes_info" | awk '$3 ~ /myself/ {print $2; exit}' | awk -F ',' '{print $1}')
+  peer_addr=$(echo "$peer_myself_line" | awk '{print $2}' | awk -F ',' '{print $1}')
   local peer_ip="${peer_addr%%:*}"
   local peer_port="${peer_addr#*:}"
   peer_port="${peer_port%%@*}"
   local peer_bus_port="${peer_addr##*@}"
-  if is_empty "$peer_addr" || is_empty "$peer_ip" || is_empty "$peer_port" || is_empty "$peer_bus_port"; then
+  if is_empty "$peer_node_id" || is_empty "$peer_addr" || is_empty "$peer_ip" || is_empty "$peer_port" || is_empty "$peer_bus_port"; then
     echo "peer $pod_fqdn is not reachable yet"
     return 1
   fi
 
-  if send_cluster_meet "127.0.0.1" "$service_port" "$peer_ip" "$peer_port" "$peer_bus_port"; then
+  if [ "$peer_node_id" != "$known_node_id" ]; then
+    echo "peer $pod_fqdn runs node $peer_node_id instead of the known $known_node_id, leave it to rejoin by itself"
+    return 2
+  fi
+
+  if send_cluster_meet "127.0.0.1" "$service_port" "$peer_ip" "$peer_port" "$peer_bus_port" 2>/dev/null; then
     echo "met known peer $pod_fqdn at $peer_ip:$peer_port@$peer_bus_port"
     return 0
   fi
@@ -336,17 +350,20 @@ meet_known_peer_by_fqdn() {
 # boots at the same time with a nodes.conf that still records its peers' previous pod IPs,
 # and the cluster bus only ever dials those IPs. No peer is up yet to report the topology,
 # so without this nobody re-meets anybody and the cluster stays at cluster_state:fail.
-# Wait for every peer this node already knows, reach it by its stable fqdn and meet it at
-# the address it announces now: the handshake matches the node ID and replaces the stale
-# address. Peers the local node does not know are left alone, so an unjoined pod is never
-# pulled into the cluster here.
+# Reach every peer this node already knows by its stable fqdn and meet it at the address it
+# announces now: the handshake matches the node ID and replaces the stale address. Only the
+# exact nodes in the local nodes.conf are met (same hostname and node ID), so an unjoined or
+# recreated pod is never pulled into the cluster here.
+# The wait is short on purpose: a peer that boots later runs this same step and meets this
+# node then, so waiting longer only delays the rest of the start script.
 rejoin_known_peers_by_fqdn() {
   local local_nodes_info
   local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port")
-  # hostname of every peer the local nodes.conf knows (field 2 is ip:port@bus_port,hostname)
-  local known_peer_hostnames
-  known_peer_hostnames=$(echo "$local_nodes_info" | awk '$3 !~ /myself/ {print $2}' | awk -F ',' 'NF > 1 {print $2}')
-  if is_empty "$known_peer_hostnames"; then
+  # "hostname node_id" of every peer the local nodes.conf knows
+  # (field 2 is ip:port@bus_port,hostname)
+  local known_peers
+  known_peers=$(echo "$local_nodes_info" | awk '$3 !~ /myself/ {n = split($2, addr, ","); if (n > 1) print addr[2], $1}')
+  if is_empty "$known_peers"; then
     echo "local node does not know any peer, skip rejoin known peers"
     return 0
   fi
@@ -357,15 +374,17 @@ rejoin_known_peers_by_fqdn() {
     all_pod_fqdns="$CURRENT_SHARD_POD_FQDN_LIST"
   fi
 
+  # entries are "pod_fqdn known_node_id"
   local pending_peers=()
-  local pod_fqdn pod_hostname
+  local pod_fqdn pod_hostname known_node_id
   for pod_fqdn in $(echo "$all_pod_fqdns" | tr ',' '\n'); do
     if [ "${pod_fqdn%%.*}" == "$CURRENT_POD_NAME" ]; then
       continue
     fi
     pod_hostname=$(get_target_pod_cluster_announce_hostname "$pod_fqdn" "${pod_fqdn%%.*}")
-    if echo "$known_peer_hostnames" | grep -qxF "$pod_hostname"; then
-      pending_peers+=("$pod_fqdn")
+    known_node_id=$(echo "$known_peers" | awk -v host="$pod_hostname" '$1 == host {print $2; exit}')
+    if ! is_empty "$known_node_id"; then
+      pending_peers+=("$pod_fqdn $known_node_id")
     fi
   done
   if [ ${#pending_peers[@]} -eq 0 ]; then
@@ -374,22 +393,24 @@ rejoin_known_peers_by_fqdn() {
   fi
 
   local attempt=1
-  local still_pending
+  local still_pending peer meet_status
   while true; do
     still_pending=()
-    for pod_fqdn in "${pending_peers[@]}"; do
-      if ! meet_known_peer_by_fqdn "$pod_fqdn"; then
-        still_pending+=("$pod_fqdn")
+    for peer in "${pending_peers[@]}"; do
+      read -r pod_fqdn known_node_id <<< "$peer"
+      meet_known_peer_by_fqdn "$pod_fqdn" "$known_node_id" && meet_status=0 || meet_status=$?
+      if [ "$meet_status" -eq 1 ]; then
+        still_pending+=("$peer")
       fi
     done
     pending_peers=("${still_pending[@]}")
     if [ ${#pending_peers[@]} -eq 0 ]; then
-      echo "all known peers have been met"
+      echo "all reachable known peers have been met"
       return 0
     fi
     if [ "$attempt" -ge "$rejoin_peer_max_attempts" ]; then
-      # gossip from the peers that were met can still carry the rest
-      echo "gave up waiting for known peers: ${pending_peers[*]}" >&2
+      # each of these meets this node from its own start script once it is up
+      echo "stopped waiting for known peers: ${pending_peers[*]}"
       return 0
     fi
     attempt=$((attempt + 1))

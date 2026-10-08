@@ -115,7 +115,7 @@ image:
     ## `global.imageRegistry` to move every image at once.
     registry: docker.io
     repository: apecloud/ape-dts
-    tag: 2.0.26.1
+    ## used by the rebalance OpsDefinition; the restore jobs use `apeDtsImage`
     reshardTag: 2.0.26.1
 
 # See the apeDts note above: keep this on the same release.
