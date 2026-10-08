@@ -68,10 +68,12 @@ the cell in, see [Testing another version](#testing-another-version).
 Every column was measured by
 [run 31582752684](https://github.com/FalkorDB/kubeblocks-addons/actions/runs/31582752684),
 four shards each, which is the first run to include `1.2.0-alpha.2` and the
-first with the A1/A5/A6 fixes in it. CI runs 26 of the 28 scenarios —
+first with the A1/A5/A6 fixes in it. That run covered 26 of the then 28
+scenarios —
 [12-sharding-backup-restore](e2e/tests/12-sharding-backup-restore) and
-[14-rebuild-instance](e2e/tests/14-rebuild-instance) are excluded — so the rows
-those two cover are not measured by any column. Of the 26 that do run, the only
+[14-rebuild-instance](e2e/tests/14-rebuild-instance) were excluded — so the rows
+those two cover are not measured by any column. CI now runs 28 of 29: 12 is back
+in with the ape-dts bump (A2), and only 14 is still excluded. Of the 26 that do run, the only
 failures were the three restore scenarios on `alpha.2`/`alpha.3` and sharded
 scale-in on `1.0.2`; `1.1.0-beta.9` and `1.2.0-alpha.1` were green on all four
 shards. `alpha.1` shard 2 failed on the first attempt in `actions/checkout` with
@@ -210,8 +212,8 @@ hand on `1.0.x` needs the first of those set explicitly.
 | 1.0.2 | 4.14.10 | 2026-02-16 |
 | 1.0.1 | 4.14.10 | 2025-12-29 |
 
-Supported FalkorDB service versions: 4.20.1 (default), 4.18.11, 4.18.8, 4.14.12,
-4.14.10, 4.12.5.
+Supported FalkorDB service versions: 4.20.2 (default), 4.20.1, 4.18.11, 4.18.8,
+4.14.12, 4.14.10, 4.12.5.
 
 ## e2e coverage
 
