@@ -184,7 +184,7 @@ spec:
                     -l "app.kubernetes.io/instance=fdb-sstop,kubeblocks.io/role=$1" \
                     -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}"); do
                     if [ "$1" = secondary ]; then
-                      fdb_assert_replication_up "'"$NAMESPACE"'" "$p" || return 1
+                      fdb_assert_replication_up "'"$NAMESPACE"'" "$p" >&2 || return 1
                     fi
                     n=$(FDB_CLI_FLAGS="" fdb_cli "'"$NAMESPACE"'" "$p" DBSIZE | tr -d "\r")
                     total=$((total + n))
