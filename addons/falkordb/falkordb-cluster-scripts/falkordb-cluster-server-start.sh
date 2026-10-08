@@ -31,6 +31,9 @@ redis_acl_file_bak="/data/users.acl.bak"
 retry_times=3
 check_ready_times=30
 retry_delay_second=2
+# how long the start script waits for known peers to come up after a full restart
+rejoin_peer_max_attempts=60
+rejoin_peer_retry_delay_second=5
 
 # variables for scale out replica
 current_comp_primary_node=()
@@ -299,6 +302,101 @@ is_rebuild_instance() {
   return 1
 }
 
+# usage: meet_known_peer_by_fqdn <pod_fqdn>
+# reach the peer through its stable pod fqdn, read the address it announces now from its own
+# "myself" entry and send CLUSTER MEET from the local node to that address.
+meet_known_peer_by_fqdn() {
+  local pod_fqdn="$1"
+  local pod_name="${pod_fqdn%%.*}"
+  local pod_port
+  pod_port=$(get_pod_service_port_by_network_mode "$pod_name")
+
+  local peer_nodes_info
+  peer_nodes_info=$(get_cluster_nodes_info "$pod_fqdn" "$pod_port")
+  # myself line address field: ip:port@bus_port[,hostname]
+  local peer_addr
+  peer_addr=$(echo "$peer_nodes_info" | awk '$3 ~ /myself/ {print $2; exit}' | awk -F ',' '{print $1}')
+  local peer_ip="${peer_addr%%:*}"
+  local peer_port="${peer_addr#*:}"
+  peer_port="${peer_port%%@*}"
+  local peer_bus_port="${peer_addr##*@}"
+  if is_empty "$peer_addr" || is_empty "$peer_ip" || is_empty "$peer_port" || is_empty "$peer_bus_port"; then
+    echo "peer $pod_fqdn is not reachable yet"
+    return 1
+  fi
+
+  if send_cluster_meet "127.0.0.1" "$service_port" "$peer_ip" "$peer_port" "$peer_bus_port"; then
+    echo "met known peer $pod_fqdn at $peer_ip:$peer_port@$peer_bus_port"
+    return 0
+  fi
+  return 1
+}
+
+# After a full stop (Stop/Start, a node or Kubernetes restart, a parallel update) every pod
+# boots at the same time with a nodes.conf that still records its peers' previous pod IPs,
+# and the cluster bus only ever dials those IPs. No peer is up yet to report the topology,
+# so without this nobody re-meets anybody and the cluster stays at cluster_state:fail.
+# Wait for every peer this node already knows, reach it by its stable fqdn and meet it at
+# the address it announces now: the handshake matches the node ID and replaces the stale
+# address. Peers the local node does not know are left alone, so an unjoined pod is never
+# pulled into the cluster here.
+rejoin_known_peers_by_fqdn() {
+  local local_nodes_info
+  local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port")
+  # hostname of every peer the local nodes.conf knows (field 2 is ip:port@bus_port,hostname)
+  local known_peer_hostnames
+  known_peer_hostnames=$(echo "$local_nodes_info" | awk '$3 !~ /myself/ {print $2}' | awk -F ',' 'NF > 1 {print $2}')
+  if is_empty "$known_peer_hostnames"; then
+    echo "local node does not know any peer, skip rejoin known peers"
+    return 0
+  fi
+
+  local all_pod_fqdns
+  all_pod_fqdns=$(get_all_shards_pod_fqdns)
+  if is_empty "$all_pod_fqdns"; then
+    all_pod_fqdns="$CURRENT_SHARD_POD_FQDN_LIST"
+  fi
+
+  local pending_peers=()
+  local pod_fqdn pod_hostname
+  for pod_fqdn in $(echo "$all_pod_fqdns" | tr ',' '\n'); do
+    if [ "${pod_fqdn%%.*}" == "$CURRENT_POD_NAME" ]; then
+      continue
+    fi
+    pod_hostname=$(get_target_pod_cluster_announce_hostname "$pod_fqdn" "${pod_fqdn%%.*}")
+    if echo "$known_peer_hostnames" | grep -qxF "$pod_hostname"; then
+      pending_peers+=("$pod_fqdn")
+    fi
+  done
+  if [ ${#pending_peers[@]} -eq 0 ]; then
+    echo "no known peer found in the pod fqdn list, skip rejoin known peers"
+    return 0
+  fi
+
+  local attempt=1
+  local still_pending
+  while true; do
+    still_pending=()
+    for pod_fqdn in "${pending_peers[@]}"; do
+      if ! meet_known_peer_by_fqdn "$pod_fqdn"; then
+        still_pending+=("$pod_fqdn")
+      fi
+    done
+    pending_peers=("${still_pending[@]}")
+    if [ ${#pending_peers[@]} -eq 0 ]; then
+      echo "all known peers have been met"
+      return 0
+    fi
+    if [ "$attempt" -ge "$rejoin_peer_max_attempts" ]; then
+      # gossip from the peers that were met can still carry the rest
+      echo "gave up waiting for known peers: ${pending_peers[*]}" >&2
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep_when_ut_mode_false "$rejoin_peer_retry_delay_second"
+  done
+}
+
 remove_rebuild_instance_flag() {
   if [ -f /data/rebuild.flag ]; then
     rm -f /data/rebuild.flag
@@ -326,6 +424,10 @@ scale_redis_cluster_replica() {
   else
     echo "the nodes.conf file after redis server start is not exist"
   fi
+
+  # a restarted member re-meets its peers at their current addresses first, so the topology
+  # lookup below works even when every pod of the cluster restarted at once
+  rejoin_known_peers_by_fqdn
 
   current_shard_pod_count=$(echo "${CURRENT_SHARD_POD_NAME_LIST}" | tr ',' '\n' | wc -l)
   for target_node_name in $(echo "${CURRENT_SHARD_POD_NAME_LIST}" | tr ',' '\n'); do
