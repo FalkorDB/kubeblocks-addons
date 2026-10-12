@@ -338,12 +338,14 @@ fdb_assert_shards_own_slots() {
     }')"
   primaries="$(echo "$nodes" | grep -c . || true)"
   if [ "$primaries" -ne "$expected" ]; then
-    fdb_fail "found $primaries primaries, expected $expected:"$'\n'"$nodes"
+    fdb_fail "found $primaries primaries, expected $expected:"
+    echo "$nodes" >&2
     return 1
   fi
   floor=$((16384 / expected / 2))
   if echo "$nodes" | awk -v floor="$floor" '$2 < floor {bad = 1} END {exit !bad}'; then
-    fdb_fail "a primary owns fewer than $floor slots:"$'\n'"$nodes"
+    fdb_fail "a primary owns fewer than $floor slots:"
+    echo "$nodes" >&2
     return 1
   fi
   fdb_log "all $expected primaries own at least $floor slots each"
