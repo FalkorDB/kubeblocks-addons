@@ -1460,8 +1460,9 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         return 0
       }
 
+      # one shard of two pods: its share is every slot
       count_node_slots() {
-        echo "8192"
+        echo "16384"
       }
 
       setup() {
@@ -1474,6 +1475,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         export ALL_SHARDS_COMPONENT_LIST="falkordb-shard-98x"
         export ALL_SHARDS_DELETING_COMPONENT_LIST=""
         export ALL_SHARDS_UNDELETED_COMPONENT_LIST="falkordb-shard-98x"
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
         export SERVICE_PORT="6379"
       }
       Before "setup"
@@ -1488,6 +1490,7 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         unset ALL_SHARDS_COMPONENT_LIST
         unset ALL_SHARDS_DELETING_COMPONENT_LIST
         unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+        unset CURRENT_SHARD_COMPONENT_NAME
         unset SERVICE_PORT
       }
       After "un_setup"
@@ -1565,9 +1568,86 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       It "reshards its share of slots instead of reporting it scaled out"
         When call scale_out_redis_cluster_shard
         The status should be success
-        The stdout should include "The current component shard has joined the cluster but owns no slots, continue to reshard."
+        The stdout should include "The current component shard has joined the cluster but owns 0 of its 8192 slots, continue to reshard."
         The stdout should not include "The current component shard is already scaled out"
         The stdout should include "resharding 8192 slots to cluster_id_123"
+        The stdout should include "FalkorDB cluster scale out shard reshard successfully"
+      End
+    End
+
+    Context "when the current component shard owns only part of its share"
+      # a retry after a reshard interrupted part way: the primary owns some slots,
+      # but fewer than its share
+      count_node_slots() {
+        echo "100"
+      }
+
+      init_current_comp_default_nodes_for_scale_out() {
+        declare -gA scale_out_shard_default_primary_node
+        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
+        declare -gA scale_out_shard_default_other_nodes
+        scale_out_shard_default_other_nodes["falkordb-shard-98x-1"]="10.42.0.2:6379"
+      }
+
+      get_cluster_id() {
+        echo "cluster_id_123"
+      }
+
+      check_slots_covered() {
+        return 0
+      }
+
+      check_current_shard_other_nodes_are_joined() {
+        return 0
+      }
+
+      find_exist_available_node() {
+        echo "10.42.0.3:6379"
+      }
+
+      check_secondary_replicated_to_primary() {
+        return 0
+      }
+
+      scale_out_shard_reshard() {
+        echo "resharding $3 slots to $2"
+        return 0
+      }
+
+      setup() {
+        export CURRENT_SHARD_COMPONENT_SHORT_NAME="falkordb-shard-98x"
+        export ALL_SHARDS_POD_NAME_LIST_COMBINED="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1"
+        export ALL_SHARDS_POD_FQDN_LIST_COMBINED="10.42.0.1,10.42.0.2,10.42.0.3,10.42.0.4"
+        export CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE="falkordb-shard-98x-0,falkordb-shard-98x-1"
+        export CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE="10.42.0.1,10.42.0.2"
+        export ALL_SHARDS_COMPONENT_LIST="falkordb-shard-98x,falkordb-shard-7hy"
+        export ALL_SHARDS_DELETING_COMPONENT_LIST=""
+        export ALL_SHARDS_UNDELETED_COMPONENT_LIST="falkordb-shard-98x,falkordb-shard-7hy"
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        export SERVICE_PORT="6379"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_COMPONENT_SHORT_NAME
+        unset ALL_SHARDS_POD_NAME_LIST_COMBINED
+        unset ALL_SHARDS_POD_FQDN_LIST_COMBINED
+        unset CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE
+        unset CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE
+        unset ALL_SHARDS_COMPONENT_LIST
+        unset ALL_SHARDS_DELETING_COMPONENT_LIST
+        unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+        unset CURRENT_SHARD_COMPONENT_NAME
+        unset SERVICE_PORT
+      }
+      After "un_setup"
+
+      It "reshards the rest of its share instead of reporting it scaled out"
+        When call scale_out_redis_cluster_shard
+        The status should be success
+        The stdout should include "The current component shard has joined the cluster but owns 100 of its 8192 slots, continue to reshard."
+        The stdout should not include "The current component shard is already scaled out"
+        The stdout should include "resharding 8092 slots to cluster_id_123"
         The stdout should include "FalkorDB cluster scale out shard reshard successfully"
       End
     End

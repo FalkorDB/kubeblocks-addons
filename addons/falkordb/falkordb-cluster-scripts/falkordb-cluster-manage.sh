@@ -1093,6 +1093,19 @@ check_current_shard_other_nodes_are_joined() {
   return 0
 }
 
+## the share of the 16384 slots each shard should own once scaled out; fails when
+## the current shard's pods cannot be counted
+scale_out_slots_per_shard() {
+  local current_comp_pod_count
+  local all_comp_pod_count
+  current_comp_pod_count=$(echo "$CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE" | tr ',' '\n' | grep -c "^$CURRENT_SHARD_COMPONENT_NAME-")
+  all_comp_pod_count=$(echo "$ALL_SHARDS_POD_NAME_LIST_COMBINED" | tr ',' '\n' | grep -c ".*")
+  if [ "$current_comp_pod_count" -eq 0 ] || [ "$all_comp_pod_count" -lt "$current_comp_pod_count" ]; then
+    return 1
+  fi
+  echo $((16384 / (all_comp_pod_count / current_comp_pod_count)))
+}
+
 scale_out_redis_cluster_shard() {
   if is_empty "$CURRENT_SHARD_COMPONENT_SHORT_NAME" || is_empty "$ALL_SHARDS_POD_NAME_LIST_COMBINED" || is_empty "$ALL_SHARDS_POD_FQDN_LIST_COMBINED" || is_empty "$CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE" || is_empty "$CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE"; then
     echo "Error: Required environment variable CURRENT_SHARD_COMPONENT_SHORT_NAME, ALL_SHARDS_POD_NAME_LIST_COMBINED, ALL_SHARDS_POD_FQDN_LIST_COMBINED, CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE and CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE are not set when scale out redis cluster shard" >&2
@@ -1121,19 +1134,23 @@ scale_out_redis_cluster_shard() {
   primary_node_fqdn=$(echo "$primary_node_with_port" | awk -F ':' '{print $1}')
   primary_node_port=$(echo "$primary_node_with_port" | awk -F ':' '{print $2}')
   mapping_primary_cluster_id=$(get_cluster_id "$primary_node_fqdn" "$primary_node_port")
+  local slots_per_shard
+  slots_per_shard=$(scale_out_slots_per_shard) || slots_per_shard=""
+
   current_primary_joined=false
   if check_slots_covered "$primary_node_with_port" "$SERVICE_PORT"; then
     if check_current_shard_other_nodes_are_joined "$primary_node_fqdn" "$primary_node_port"; then
       ## slots covered cluster-wide and every node met is not enough: a retry after
-      ## an interrupted reshard sees exactly that while this shard owns no slots, and
-      ## returning here would leave it serving nothing with the Cluster reported ready
+      ## an interrupted reshard sees exactly that while this shard owns none or only
+      ## part of its share, and returning here would leave it short with the Cluster
+      ## reported ready
       local joined_slots
       joined_slots=$(count_node_slots "$primary_node_fqdn" "$primary_node_port" "$mapping_primary_cluster_id")
-      if [ $? -eq 0 ] && [ "${joined_slots:-0}" -gt 0 ]; then
+      if [ $? -eq 0 ] && [ -n "$slots_per_shard" ] && [ "${joined_slots:-0}" -ge "$slots_per_shard" ]; then
         echo "The current component shard is already scaled out, no need to scale out again."
         return 0
       fi
-      echo "The current component shard has joined the cluster but owns no slots, continue to reshard."
+      echo "The current component shard has joined the cluster but owns ${joined_slots:-0} of its $slots_per_shard slots, continue to reshard."
     fi
     current_primary_joined=true
   fi
@@ -1183,18 +1200,12 @@ scale_out_redis_cluster_shard() {
 
   # do the reshard
   # TODO: optimize the number of reshard slots according to the cluster status
-  local total_slots
-  local current_comp_pod_count
-  local all_comp_pod_count
-  local shard_count
-  local slots_per_shard
   local current_slots
   local remaining_slots
-  total_slots=16384
-  current_comp_pod_count=$(echo "$CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE" | tr ',' '\n' | grep -c "^$CURRENT_SHARD_COMPONENT_NAME-")
-  all_comp_pod_count=$(echo "$ALL_SHARDS_POD_NAME_LIST_COMBINED" | tr ',' '\n' | grep -c ".*")
-  shard_count=$((all_comp_pod_count / current_comp_pod_count))
-  slots_per_shard=$((total_slots / shard_count))
+  if is_empty "$slots_per_shard"; then
+    echo "Failed to compute the slots per shard for scale out reshard" >&2
+    return 1
+  fi
   # only move the slots this shard is still missing, otherwise a retry after a
   # partially completed reshard would move a second full share of slots
   current_slots=$(count_node_slots "$primary_node_fqdn" "$primary_node_port" "$mapping_primary_cluster_id")
