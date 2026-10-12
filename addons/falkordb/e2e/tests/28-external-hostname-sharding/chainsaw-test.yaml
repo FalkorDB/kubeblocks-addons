@@ -163,6 +163,8 @@ spec:
 
               fdb_retry "the slots to be covered" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               # CLUSTER SHARDS reports what the nodes told each other, so a
               # hostname here means the announcement really travelled over

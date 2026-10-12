@@ -120,6 +120,8 @@ spec:
               # misconfigured bus shows up here rather than as a connection error.
               fdb_retry "all 16384 slots to be covered over TLS" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               known="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER INFO | tr -d '\r' |
                 awk -F: '/^cluster_known_nodes:/ {print $2; exit}')"
@@ -196,6 +198,8 @@ spec:
               # state, which still reports the cluster as ok on the source node.
               fdb_retry "all 16384 slots to be covered after the scale-out" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "the new shard to own its share of slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 4
               fdb_retry "every key to survive the migration" \
                 fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtls 200
               fdb_assert_graph_node "$NAMESPACE" "$pod" e2e-shtls-graph

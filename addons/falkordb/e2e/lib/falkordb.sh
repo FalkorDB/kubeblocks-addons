@@ -306,6 +306,49 @@ fdb_assert_slots_covered() {
   fdb_log "all 16384 slots are assigned and the cluster state is ok"
 }
 
+# fdb_assert_shards_own_slots <namespace> <pod> <expected shards>
+# Fails unless exactly <expected shards> primaries are in the cluster and each one
+# owns at least half of its even share of the 16384 slots.
+#
+# fdb_assert_slots_covered alone cannot tell a shard that joined but never got
+# its slots: the other shards still cover every slot and the cluster reports ok.
+# The half-share floor leaves room for an uneven rebalance while still catching a
+# shard left with none or only a sliver of its share.
+fdb_assert_shards_own_slots() {
+  local namespace="$1" pod="$2" expected="$3" nodes size primaries floor
+  size="$(fdb_cli "$namespace" "$pod" CLUSTER INFO |
+    tr -d '\r' | awk -F: '/^cluster_size:/ {print $2; exit}')"
+  if [ "$size" != "$expected" ]; then
+    fdb_fail "cluster_size is '$size', expected $expected"
+    return 1
+  fi
+
+  # CLUSTER NODES: <id> <addr> <flags> <master> <ping> <pong> <epoch> <link> <slot>...
+  # A slot field is a single slot or a range; [slot-<-id] entries are in-flight
+  # migrations and do not count as owned.
+  nodes="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
+    awk '$3 ~ /master/ && $3 !~ /fail/ {
+      owned = 0
+      for (i = 9; i <= NF; i++) {
+        if ($i ~ /^\[/) continue
+        n = split($i, r, "-")
+        owned += (n == 2) ? r[2] - r[1] + 1 : 1
+      }
+      print $2, owned
+    }')"
+  primaries="$(echo "$nodes" | grep -c . || true)"
+  if [ "$primaries" -ne "$expected" ]; then
+    fdb_fail "found $primaries primaries, expected $expected:"$'\n'"$nodes"
+    return 1
+  fi
+  floor=$((16384 / expected / 2))
+  if echo "$nodes" | awk -v floor="$floor" '$2 < floor {bad = 1} END {exit !bad}'; then
+    fdb_fail "a primary owns fewer than $floor slots:"$'\n'"$nodes"
+    return 1
+  fi
+  fdb_log "all $expected primaries own at least $floor slots each"
+}
+
 # fdb_shard_count <namespace> <cluster>
 # Prints the number of shard Components currently belonging to the cluster.
 fdb_shard_count() {

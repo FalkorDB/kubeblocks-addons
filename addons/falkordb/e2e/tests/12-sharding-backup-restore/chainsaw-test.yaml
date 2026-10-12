@@ -40,6 +40,8 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shbk shard)"
               fdb_retry "all 16384 slots to be covered" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
       catch:
         - events: {}
 
@@ -213,6 +215,8 @@ spec:
               # range fails rather than returning wrong data.
               fdb_retry "the restored cluster to cover all 16384 slots" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every restored shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               # -c follows MOVED redirects, so reading all 300 keys through a
               # single entry point exercises every shard's restored dataset.
