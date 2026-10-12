@@ -46,6 +46,8 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-cops shard)"
               fdb_retry "all 16384 slots to be covered" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               # Enough keys that every shard owns some of them, so a rebalance
               # that drops a slot range cannot hide behind an empty shard.
@@ -99,6 +101,8 @@ spec:
               for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-cops shard); do
                 fdb_retry "$pod to report a complete slot map" \
                   fdb_assert_slots_covered "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see every shard own its slots after the rebalance" \
+                  fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
               done
 
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-cops shard)"

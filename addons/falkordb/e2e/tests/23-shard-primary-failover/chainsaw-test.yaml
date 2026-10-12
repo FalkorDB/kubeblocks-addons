@@ -57,6 +57,8 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shfo shard)"
               fdb_retry "all 16384 slots to be covered" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               # 3 shards x 2 replicas, and the roles have to be labelled before
               # anything below can pick a victim by role.
@@ -176,6 +178,8 @@ spec:
               # The shard must not have lost its slots in the process.
               fdb_retry "the slot map to stay complete" \
                 fdb_assert_slots_covered "$NAMESPACE" "$survivor"
+              fdb_retry "every shard to still own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$survivor" 3
               fdb_assert_shard_count "$NAMESPACE" fdb-shfo shard 3
 
               fdb_retry "every key to still be readable" \

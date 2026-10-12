@@ -34,6 +34,8 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
               fdb_retry "all 16384 slots to be covered" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
     - name: seed keys spread across the whole keyspace
       try:
@@ -83,6 +85,8 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
               fdb_retry "all 16384 slots to be covered after scale-out" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "the new shard to own its share of slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 4
               # The new shard only holds data if slots were actually migrated to it.
               fdb_retry "every seeded key to still be readable" \
                 fdb_verify_keys "$NAMESPACE" "$pod" e2e-shard 200
@@ -119,5 +123,7 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
               fdb_retry "all 16384 slots to be covered after scale-in" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "the remaining shards to own the removed shard's slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
               fdb_retry "every seeded key to survive the shard removal" \
                 fdb_verify_keys "$NAMESPACE" "$pod" e2e-shard 200

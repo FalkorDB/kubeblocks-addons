@@ -37,6 +37,8 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-heal shard)"
               fdb_retry "all 16384 slots to be covered" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               # Enough keys that every shard is guaranteed to own some of them.
               fdb_write_keys "$NAMESPACE" "$pod" e2e-heal 200
@@ -89,6 +91,8 @@ spec:
                 fdb_assert_slots_covered "$NAMESPACE" "$victim"
               fdb_retry "the cluster view from $survivor to be healthy" \
                 fdb_assert_slots_covered "$NAMESPACE" "$survivor"
+              fdb_retry "every shard to own its slots again" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$survivor" 3
               fdb_assert_shard_count "$NAMESPACE" fdb-heal shard 3
 
               known="$(fdb_cli "$NAMESPACE" "$survivor" CLUSTER INFO |

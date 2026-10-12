@@ -36,6 +36,8 @@ spec:
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-sstop shard)"
               fdb_retry "all 16384 slots to be covered" \
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               # Enough keys that every shard is guaranteed to own some of them.
               fdb_write_keys "$NAMESPACE" "$pod" e2e-sstop 200
@@ -169,6 +171,9 @@ spec:
                 masters=$(echo "$nodes" | awk "\$3 ~ /master/" | grep -c .)
                 [ "$masters" -eq 3 ] || { echo "expected 3 masters, found $masters" >&2; exit 1; }
               '
+
+              fdb_retry "every shard to own its slots after the restart" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
 
               fdb_retry "every key to be readable again" \
                 fdb_verify_keys "$NAMESPACE" "$pod" e2e-sstop 200
