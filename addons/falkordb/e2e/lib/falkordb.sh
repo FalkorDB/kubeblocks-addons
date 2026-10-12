@@ -308,12 +308,15 @@ fdb_assert_slots_covered() {
 
 # fdb_assert_shards_own_slots <namespace> <pod> <expected shards>
 # Fails unless exactly <expected shards> primaries are in the cluster and each one
-# owns at least half of its even share of the 16384 slots.
+# owns its full even share of the 16384 slots, give or take 1%.
 #
 # fdb_assert_slots_covered alone cannot tell a shard that joined but never got
 # its slots: the other shards still cover every slot and the cluster reports ok.
-# The half-share floor leaves room for an uneven rebalance while still catching a
-# shard left with none or only a sliver of its share.
+# Every path the addon takes splits the slots evenly: creation and rebalance do
+# so to within a slot, and a scale-out reshard gives the new shard exactly its
+# share while each old shard keeps its share give or take a slot or two of
+# rounding. The 1% slack only absorbs that rounding; a shard whose reshard was
+# cut short still fails.
 fdb_assert_shards_own_slots() {
   local namespace="$1" pod="$2" expected="$3" nodes size primaries floor
   size="$(fdb_cli "$namespace" "$pod" CLUSTER INFO |
@@ -342,7 +345,7 @@ fdb_assert_shards_own_slots() {
     echo "$nodes" >&2
     return 1
   fi
-  floor=$((16384 / expected / 2))
+  floor=$((16384 / expected - 16384 / expected / 100))
   if echo "$nodes" | awk -v floor="$floor" '$2 < floor {bad = 1} END {exit !bad}'; then
     fdb_fail "a primary owns fewer than $floor slots:"
     echo "$nodes" >&2
