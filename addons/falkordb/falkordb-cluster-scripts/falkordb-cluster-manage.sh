@@ -1124,8 +1124,16 @@ scale_out_redis_cluster_shard() {
   current_primary_joined=false
   if check_slots_covered "$primary_node_with_port" "$SERVICE_PORT"; then
     if check_current_shard_other_nodes_are_joined "$primary_node_fqdn" "$primary_node_port"; then
-      echo "The current component shard is already scaled out, no need to scale out again."
-      return 0
+      ## slots covered cluster-wide and every node met is not enough: a retry after
+      ## an interrupted reshard sees exactly that while this shard owns no slots, and
+      ## returning here would leave it serving nothing with the Cluster reported ready
+      local joined_slots
+      joined_slots=$(count_node_slots "$primary_node_fqdn" "$primary_node_port" "$mapping_primary_cluster_id")
+      if [ $? -eq 0 ] && [ "${joined_slots:-0}" -gt 0 ]; then
+        echo "The current component shard is already scaled out, no need to scale out again."
+        return 0
+      fi
+      echo "The current component shard has joined the cluster but owns no slots, continue to reshard."
     fi
     current_primary_joined=true
   fi
