@@ -34,6 +34,15 @@ spec:
           valueFrom:
             envRef:
               envName: CLUSTER_NAMESPACE
+        - name: SERVICE_PORT
+          valueFrom:
+            envRef:
+              envName: SERVICE_PORT
+        - name: REDIS_CLI_TLS_CMD
+          optional: true
+          valueFrom:
+            envRef:
+              envName: REDIS_CLI_TLS_CMD
   actions:
     - name: rebalance
       workload:
@@ -44,35 +53,12 @@ spec:
           {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
           {{- end }}
           containers:
-          - name: busybox-init
-            image: {{ include "busybox.image" . }}
-            command: ["/bin/sh", "-c"]
-            args:
-              - |
-                POD_FQDN=$CURRENT_POD_NAME.$CURRENT_SHARD_COMPONENT_NAME-headless.$CLUSTER_NAMESPACE.svc.$CLUSTER_DOMAIN
-                REDIS_URL="redis://${REDIS_DEFAULT_USER}:${REDIS_DEFAULT_PASSWORD}@${POD_FQDN}"
-                echo ${REDIS_URL}
-                cat <<EOF > /tmp/reshard.ini
-                [extractor]
-                db_type=redis
-                extract_type=reshard
-                url=${REDIS_URL}
-                [sinker]
-                sink_type=dummy
-                EOF
-            volumeMounts:
-            - name: reshard-config
-              mountPath: /tmp
-          - name: falkordb-rebalance
-            image: {{ include "apeDts.reshard.image" . }}
-            imagePullPolicy: IfNotPresent
-            command: ["/ape-dts"]
-            args:
-              - /tmp/reshard.ini
-            volumeMounts:
-            - name: reshard-config
-              mountPath: /tmp
+            - name: falkordb-rebalance
+              image: {{ include "falkordb.defaultImage" . }}
+              imagePullPolicy: IfNotPresent
+              command:
+                - bash
+                - -c
+                - |
+                  {{- .Files.Get "falkordb-cluster-scripts/falkordb-cluster-rebalance.sh" | nindent 18 }}
           restartPolicy: Never
-          volumes:
-          - name: reshard-config
-            emptyDir: {}

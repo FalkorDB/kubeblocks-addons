@@ -198,7 +198,7 @@ hand on `1.0.x` needs the first of those set explicitly.
 
 | id | Item | Affects | Status | Waiting on |
 |---|---|---|---|---|
-| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | **fixed** in ape-dts `v2.0.26.1` ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), cherry-picked as `01d64f8a`) | Nothing. `apeDtsImage.tag` (restore) and `image.apeDts.reshardTag` (rebalance) are on `2.0.26.1` and A2 is un-gated. The table above still shows the measurements taken before the bump. |
+| C1 | ape-dts mis-parses FalkorDB's `telemetry{<graph>}` stream keys (RDB type byte 26); the parser desyncs, panics, then hangs instead of exiting, so a sharded restore stalls with a partial dataset. | all | **fixed** in ape-dts `v2.0.26.1` ([ape-dts#564](https://github.com/apecloud/ape-dts/pull/564), cherry-picked as `01d64f8a`) | Nothing. `apeDtsImage.tag` (restore) is on `2.0.26.1`; rebalance no longer uses ape-dts and A2 is un-gated. The table above still shows the measurements taken before the bump. |
 
 ## Chart version history
 

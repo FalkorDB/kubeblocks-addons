@@ -266,10 +266,6 @@ Usage:
 {{- end -}}
 {{- end -}}
 
-{{- define "apeDts.reshard.image" -}}
-{{ include "falkordb.registry" (dict "ctx" . "registry" .Values.image.apeDts.registry) }}/{{ .Values.image.apeDts.repository}}:{{ .Values.image.apeDts.reshardTag }}
-{{- end }}
-
 {{- /*
 The `default` system account, rendered under whichever spelling of the password
 policy field the target KubeBlocks release serves. See `systemAccountPasswordField`

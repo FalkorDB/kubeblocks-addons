@@ -12,12 +12,12 @@ spec:
     nothing else - the podInfoExtractor env wiring, the sharding-name lookup and
     the scripts they mount were all unverified.
 
-    Rebalance is the riskier of the two. It runs /ape-dts as a bare container
-    command with no timeout, which is exactly the shape that made a sharded
-    restore hang forever until the RDB stream parser was fixed. A rebalance that
-    moves slots while ape-dts silently gives up leaves the cluster with holes in
-    its keyspace, so the assertions below check the slot map and the data rather
-    than the OpsRequest phase alone.
+    Rebalance is the riskier of the two. KubeBlocks runs it once per shard, all
+    at the same time, and only the shard whose primary has the smallest node ID
+    may move slots; the others have to stand down. A rebalance that moves slots
+    and gives up half way leaves the cluster with holes in its keyspace, so the
+    assertions below check the slot map and the data rather than the
+    OpsRequest phase alone.
   steps:
     - name: create the sharded cluster
       try:
@@ -72,7 +72,7 @@ spec:
             kind: OpsRequest
             name: fdb-cops-rebalance
         # The rebalance runs as a Job, so its container logs are the only place
-        # an ape-dts failure is visible; the OpsRequest just reports Failed.
+        # a redis-cli failure is visible; the OpsRequest just reports Failed.
         - script:
             content: |
               kubectl get jobs -n "$NAMESPACE" -o wide
