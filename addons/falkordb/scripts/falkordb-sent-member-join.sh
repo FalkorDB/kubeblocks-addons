@@ -83,7 +83,12 @@ sentinel_cli() {
   local host="$1"
   local command="$2"
   (
-    export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    # An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, see sentinel_cli_argv.
+    if ! is_empty "${SENTINEL_PASSWORD}"; then
+      export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    else
+      unset REDISCLI_AUTH
+    fi
     # shellcheck disable=SC2086
     printf '%s\n' "$command" | redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port"
   )
