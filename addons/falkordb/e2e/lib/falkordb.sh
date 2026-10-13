@@ -210,10 +210,12 @@ fdb_assert_sentinel_user() {
     fdb_fail "$pod does not know $user, users are: $users"
     return 1
   fi
-  # The password travels through the environment, not argv.
-  out="$(kubectl exec -n "$namespace" "$pod" -c "$FDB_SENTINEL_CONTAINER" -- \
-    sh -c 'REDISCLI_AUTH="$2" exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" --user "$1" '"$FDB_CLI_FLAGS"' PING' \
-    _ "$user" "$password" 2>&1 | tr -d '\r')"
+  # The password goes over stdin into REDISCLI_AUTH, so it is in no process's
+  # arguments, neither kubectl's here nor sh's or redis-cli's in the pod.
+  out="$(printf '%s\n' "$password" | kubectl exec -i -n "$namespace" "$pod" -c "$FDB_SENTINEL_CONTAINER" -- \
+    sh -c 'IFS= read -r REDISCLI_AUTH; export REDISCLI_AUTH
+      exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" --user "$1" '"$FDB_CLI_FLAGS"' PING' \
+    _ "$user" 2>&1 | tr -d '\r')"
   case "$out" in
     PONG) fdb_log "$user authenticated against $pod" ;;
     *)
