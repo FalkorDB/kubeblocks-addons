@@ -152,6 +152,8 @@ Describe "FalkorDB Cluster Rebalance Script Tests"
     Context "when the cluster has no password"
       no_password() {
         REDIS_DEFAULT_PASSWORD=""
+        # so a REDISCLI_AUTH exported by the caller cannot leak into the stub
+        unset REDISCLI_AUTH
         redis-cli() {
           echo "auth:${REDISCLI_AUTH-unset} args:$*" >> "$redis_cli_log"
           case "$*" in

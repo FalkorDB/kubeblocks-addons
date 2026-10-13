@@ -87,6 +87,8 @@ Describe "FalkorDB Reset Master Script Tests"
         export SENTINEL_POD_NAME_LIST="falkordb-sentinel-0"
         unset SENTINEL_PASSWORD
         unset CUSTOM_SENTINEL_MASTER_NAME
+        # so a REDISCLI_AUTH exported by the caller cannot leak into the stub
+        unset REDISCLI_AUTH
       }
       BeforeEach 'setup_env'
 
