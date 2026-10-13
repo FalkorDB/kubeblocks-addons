@@ -1,0 +1,188 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsDefinition
+metadata:
+  name: falkordb-register-to-sentinel
+  labels:
+    {{- include "falkordb.labels" . | nindent 4 }}
+spec:
+  ## this ops targets the falkordb data component. The data component registers the
+  ## sentinels only once, in postProvision, and memberJoin does not fire for a
+  ## sentinel that was rebuilt (same pod name, fresh /data volume), so a rebuilt
+  ## sentinel comes back monitoring no master and with only the users from its
+  ## start script. Run this ops with REBUILD_SENTINEL_POD_NAME afterwards to
+  ## register that sentinel again and copy the ACL of an established sentinel onto it.
+  componentInfos:
+    ## matches falkordb-<major>-<chartVersion>, not falkordb-sent-* or falkordb-cluster-*
+    - componentDefinitionName: ^falkordb-\d+
+  podInfoExtractors:
+    - name: register-to-sentinel
+      podSelector:
+        ## select the falkordb primary pod, so that CURRENT_POD_IP/CURRENT_POD_HOST_IP
+        ## point to the primary pod (required by fixed pod ip / host network modes)
+        role: primary
+        multiPodSelectionPolicy: Any
+      env:
+        - name: CLUSTER_NAMESPACE
+          valueFrom:
+            envRef:
+              envName: CLUSTER_NAMESPACE
+        - name: REDIS_COMPONENT_NAME
+          valueFrom:
+            envRef:
+              envName: REDIS_COMPONENT_NAME
+        - name: REDIS_POD_NAME_LIST
+          valueFrom:
+            envRef:
+              envName: REDIS_POD_NAME_LIST
+        - name: REDIS_POD_FQDN_LIST
+          valueFrom:
+            envRef:
+              envName: REDIS_POD_FQDN_LIST
+        - name: REDIS_DEFAULT_PASSWORD
+          valueFrom:
+            envRef:
+              envName: REDIS_DEFAULT_PASSWORD
+        - name: REDIS_SENTINEL_USER
+          valueFrom:
+            envRef:
+              envName: REDIS_SENTINEL_USER
+        - name: REDIS_SENTINEL_PASSWORD
+          valueFrom:
+            envRef:
+              envName: REDIS_SENTINEL_PASSWORD
+        - name: SERVICE_PORT
+          valueFrom:
+            envRef:
+              envName: SERVICE_PORT
+        - name: CURRENT_POD_IP
+          valueFrom:
+            envRef:
+              envName: CURRENT_POD_IP
+        - name: CURRENT_POD_HOST_IP
+          valueFrom:
+            envRef:
+              envName: CURRENT_POD_HOST_IP
+        ## The sentinel variables only resolve when the cluster has a sentinel
+        ## component, the rest only in the matching network mode or when the
+        ## cluster sets them. Without `optional` a missing env fails the whole
+        ## OpsRequest.
+        - name: SENTINEL_COMPONENT_NAME
+          optional: true
+          valueFrom:
+            envRef:
+              envName: SENTINEL_COMPONENT_NAME
+        - name: SENTINEL_POD_NAME_LIST
+          optional: true
+          valueFrom:
+            envRef:
+              envName: SENTINEL_POD_NAME_LIST
+        - name: SENTINEL_POD_FQDN_LIST
+          optional: true
+          valueFrom:
+            envRef:
+              envName: SENTINEL_POD_FQDN_LIST
+        - name: SENTINEL_PASSWORD
+          optional: true
+          valueFrom:
+            envRef:
+              envName: SENTINEL_PASSWORD
+        - name: SENTINEL_SERVICE_PORT
+          optional: true
+          valueFrom:
+            envRef:
+              envName: SENTINEL_SERVICE_PORT
+        - name: CUSTOM_SENTINEL_MASTER_NAME
+          optional: true
+          valueFrom:
+            envRef:
+              envName: CUSTOM_SENTINEL_MASTER_NAME
+        - name: ANNOUNCE_HOSTNAME_OVERRIDE
+          optional: true
+          valueFrom:
+            envRef:
+              envName: ANNOUNCE_HOSTNAME_OVERRIDE
+        - name: REDIS_CLI_TLS_CMD
+          optional: true
+          valueFrom:
+            envRef:
+              envName: REDIS_CLI_TLS_CMD
+        - name: REDIS_ADVERTISED_PORT
+          optional: true
+          valueFrom:
+            envRef:
+              envName: REDIS_ADVERTISED_PORT
+        - name: REDIS_LB_ADVERTISED_PORT
+          optional: true
+          valueFrom:
+            envRef:
+              envName: REDIS_LB_ADVERTISED_PORT
+        - name: REDIS_LB_ADVERTISED_HOST
+          optional: true
+          valueFrom:
+            envRef:
+              envName: REDIS_LB_ADVERTISED_HOST
+        - name: REDIS_HOST_NETWORK_PORT
+          optional: true
+          valueFrom:
+            envRef:
+              envName: REDIS_HOST_NETWORK_PORT
+  parametersSchema:
+    openAPIV3Schema:
+      properties:
+        REBUILD_SENTINEL_POD_NAME:
+          description: |
+            REBUILD_SENTINEL_POD_NAME is the name of the sentinel pod that was rebuilt.
+            Only that sentinel is registered, and the ACL of an established sentinel is
+            copied onto it. If not set, every sentinel is registered and no ACL is synced.
+          type: string
+  actions:
+    - name: register-to-sentinel
+      ## only parameters listed here are passed to the workload as env.
+      parameters: ["REBUILD_SENTINEL_POD_NAME"]
+      workload:
+        type: Pod
+        podInfoExtractorName: register-to-sentinel
+        backoffLimit: 1
+        podSpec:
+          {{- if .Values.imagePullSecrets }}
+          {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
+          {{- end }}
+          containers:
+            - name: register-to-sentinel
+              image: {{ include "falkordb.defaultImage" . }}
+              imagePullPolicy: IfNotPresent
+              command:
+                - bash
+                - -c
+                - |
+                  set -e
+                  # the ops pod does not mount the scripts ConfigMap, so the scripts and
+                  # the common library they source are written here first (same
+                  # functions as falkordb-scripts-template).
+                  mkdir -p /scripts
+                  cat > /scripts/common.sh <<'COMMON_SH_EOF'
+                  {{- include "kblib.commons.call_func_with_retry" $ | nindent 18 }}
+                  {{- include "kblib.commons.extract_obj_ordinal" $ | nindent 18 }}
+                  {{- include "kblib.compvars.get_target_pod_fqdn_from_pod_fqdn_vars" $ | nindent 18 }}
+                  {{- include "kblib.pods.min_lexicographical_order_pod" $ | nindent 18 }}
+                  {{- include "kblib.ututils.set_xtrace_when_ut_mode_false" $ | nindent 18 }}
+                  {{- include "kblib.ututils.unset_xtrace_when_ut_mode_false" $ | nindent 18 }}
+                  {{- include "kblib.ututils.sleep_when_ut_mode_false" $ | nindent 18 }}
+                  {{- include "kblib.strings.contains" $ | nindent 18 }}
+                  {{- include "kblib.strings.is_empty" $ | nindent 18 }}
+                  {{- include "kblib.strings.equals" $ | nindent 18 }}
+                  {{- include "kblib.strings.split" $ | nindent 18 }}
+                  {{- include "kblib.envs.env_exist" $ | nindent 18 }}
+                  {{- include "kblib.envs.env_exists" $ | nindent 18 }}
+                  COMMON_SH_EOF
+                  cat > /scripts/falkordb-register-to-sentinel.sh <<'REGISTER_TO_SENTINEL_EOF'
+                  {{- .Files.Get "scripts/falkordb-register-to-sentinel.sh" | nindent 18 }}
+                  REGISTER_TO_SENTINEL_EOF
+                  cat > /scripts/falkordb-sent-member-join.sh <<'SENT_MEMBER_JOIN_EOF'
+                  {{- .Files.Get "scripts/falkordb-sent-member-join.sh" | nindent 18 }}
+                  SENT_MEMBER_JOIN_EOF
+                  cat > /scripts/falkordb-sent-rebuild-sync-acl.sh <<'SENT_REBUILD_SYNC_ACL_EOF'
+                  {{- .Files.Get "scripts/falkordb-sent-rebuild-sync-acl.sh" | nindent 18 }}
+                  SENT_REBUILD_SYNC_ACL_EOF
+                  bash /scripts/falkordb-register-to-sentinel.sh
+                  bash /scripts/falkordb-sent-rebuild-sync-acl.sh

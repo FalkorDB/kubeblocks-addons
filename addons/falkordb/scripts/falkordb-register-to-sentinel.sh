@@ -24,6 +24,9 @@ test || __() {
   set -ex;
 }
 
+# Set by the falkordb-register-to-sentinel OpsDefinition after a sentinel pod was
+# rebuilt: only that sentinel is registered, the others already monitor the master.
+REBUILD_SENTINEL_POD_NAME=${REBUILD_SENTINEL_POD_NAME:-""}
 redis_announce_host_value=""
 redis_announce_port_value=""
 redis_default_service_port=${SERVICE_PORT:-6379}
@@ -335,6 +338,10 @@ register_to_sentinel_wrapper() {
     master_name="$CUSTOM_SENTINEL_MASTER_NAME"
   fi
   sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
+  if ! is_empty "$REBUILD_SENTINEL_POD_NAME"; then
+    register_to_rebuilt_sentinel
+    return $?
+  fi
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
     if [ "$IS_REDIS5" == "true" ]; then
        register_to_sentinel_for_redis5 "${sentinel_pod_fqdn}"
@@ -342,6 +349,83 @@ register_to_sentinel_wrapper() {
        register_to_sentinel_for_redis "${sentinel_pod_fqdn}"
     fi
   done
+}
+
+# usage: query_sentinel_master_addr <sentinel_host> <master_name>
+# Prints `<host> <port>` of the master the sentinel monitors under that name, and
+# nothing when it does not monitor it or cannot be reached.
+query_sentinel_master_addr() {
+  local sentinel_host=$1
+  local master_name=$2
+  local sentinel_port=${SENTINEL_SERVICE_PORT:-26379}
+  local output
+  # REDIS_CLI_TLS_CMD holds several flags, so it is split on purpose.
+  # shellcheck disable=SC2086
+  if is_empty "$SENTINEL_PASSWORD"; then
+    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_host" -p "$sentinel_port" SENTINEL get-master-addr-by-name "$master_name" 2>/dev/null)
+  else
+    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_host" -p "$sentinel_port" -a "$SENTINEL_PASSWORD" --no-auth-warning SENTINEL get-master-addr-by-name "$master_name" 2>/dev/null)
+  fi
+  local host port
+  host=$(echo "$output" | sed -n 1p)
+  port=$(echo "$output" | sed -n 2p)
+  # anything but a host and a numeric port is either "not monitored" or an error reply.
+  if is_empty "$host" || [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  echo "$host $port"
+}
+
+# The master as the established sentinels see it now. After a failover this is no
+# longer the lexicographically smallest pod that postProvision registers, and a
+# rebuilt sentinel pointed at a replica would never agree with its peers.
+current_master_addr_from_peers() {
+  local rebuilt_sentinel_pod_fqdn=$1
+  local peer addr
+  for peer in "${sentinel_pod_fqdn_list[@]}"; do
+    if equals "$peer" "$rebuilt_sentinel_pod_fqdn"; then
+      continue
+    fi
+    addr=$(query_sentinel_master_addr "$peer" "$master_name")
+    if ! is_empty "$addr"; then
+      echo "$addr"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Registers only the sentinel named by REBUILD_SENTINEL_POD_NAME. A rebuilt
+# sentinel keeps its pod name but gets a fresh /data volume, so it comes back
+# monitoring nothing, and memberJoin does not fire for it.
+register_to_rebuilt_sentinel() {
+  local sentinel_pod_fqdn rebuilt_sentinel_pod_fqdn=""
+  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+    if [[ "$sentinel_pod_fqdn" == "$REBUILD_SENTINEL_POD_NAME."* ]]; then
+      rebuilt_sentinel_pod_fqdn="$sentinel_pod_fqdn"
+      break
+    fi
+  done
+  if is_empty "$rebuilt_sentinel_pod_fqdn"; then
+    echo "Error: sentinel pod $REBUILD_SENTINEL_POD_NAME is not in SENTINEL_POD_FQDN_LIST: $SENTINEL_POD_FQDN_LIST" >&2
+    return 1
+  fi
+
+  local master_addr
+  if master_addr=$(current_master_addr_from_peers "$rebuilt_sentinel_pod_fqdn"); then
+    local master_host="${master_addr% *}"
+    local master_port="${master_addr#* }"
+    echo "register to rebuilt sentinel:$rebuilt_sentinel_pod_fqdn with the master its peers monitor: redis_primary_host=$master_host, redis_primary_port=$master_port"
+    register_to_sentinel "$rebuilt_sentinel_pod_fqdn" "$master_name" "$master_host" "$master_port"
+    return $?
+  fi
+
+  echo "no other sentinel monitors $master_name, registering the rebuilt sentinel with the default primary."
+  if [ "$IS_REDIS5" == "true" ]; then
+    register_to_sentinel_for_redis5 "$rebuilt_sentinel_pod_fqdn"
+  else
+    register_to_sentinel_for_redis "$rebuilt_sentinel_pod_fqdn"
+  fi
 }
 
 # Notice: make sure post provision action execute in redis primary pod by kbagent

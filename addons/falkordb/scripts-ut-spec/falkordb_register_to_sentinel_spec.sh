@@ -124,6 +124,124 @@ Describe 'register_to_sentinel.sh'
     End
   End
 
+  Describe 'register_to_sentinel_wrapper() for a rebuilt sentinel'
+    register_to_sentinel() {
+      # shellcheck disable=SC2145
+      echo "mocked register_to_sentinel $@"
+    }
+
+    # sent-0 was failed over away from the min-lex pod: its peers monitor fdb-falkordb-1.
+    query_sentinel_master_addr() {
+      case "$1" in
+        fdb-falkordb-sent-0.*) echo "fdb-falkordb-1.fdb-falkordb-headless.test.svc 6379" ;;
+        *) echo "" ;;
+      esac
+    }
+
+    rebuild_setup() {
+      SENTINEL_POD_FQDN_LIST="fdb-falkordb-sent-0.fdb-falkordb-sent-headless.test.svc,fdb-falkordb-sent-1.fdb-falkordb-sent-headless.test.svc,fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc"
+      REDIS_POD_NAME_LIST='fdb-falkordb-0,fdb-falkordb-1'
+      REDIS_POD_FQDN_LIST="fdb-falkordb-0.fdb-falkordb-headless.test.svc,fdb-falkordb-1.fdb-falkordb-headless.test.svc"
+      REDIS_COMPONENT_NAME='fdb-falkordb'
+      REBUILD_SENTINEL_POD_NAME='fdb-falkordb-sent-2'
+      unset REDIS_ADVERTISED_PORT REDIS_LB_ADVERTISED_PORT REDIS_HOST_NETWORK_PORT CUSTOM_SENTINEL_MASTER_NAME
+    }
+    Before 'rebuild_setup'
+    After 'unset REBUILD_SENTINEL_POD_NAME CUSTOM_SENTINEL_MASTER_NAME'
+
+    It 'registers only the rebuilt sentinel, with the master its peers monitor'
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "mocked register_to_sentinel fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc fdb-falkordb fdb-falkordb-1.fdb-falkordb-headless.test.svc 6379"
+      The stdout should not include "register_to_sentinel fdb-falkordb-sent-0"
+      The stdout should not include "register_to_sentinel fdb-falkordb-sent-1"
+    End
+
+    It 'does not match a sentinel whose name only starts with the rebuilt one'
+      SENTINEL_POD_FQDN_LIST="fdb-falkordb-sent-0.fdb-falkordb-sent-headless.test.svc,fdb-falkordb-sent-10.fdb-falkordb-sent-headless.test.svc,fdb-falkordb-sent-1.fdb-falkordb-sent-headless.test.svc"
+      REBUILD_SENTINEL_POD_NAME='fdb-falkordb-sent-1'
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "mocked register_to_sentinel fdb-falkordb-sent-1.fdb-falkordb-sent-headless.test.svc"
+      The stdout should not include "register_to_sentinel fdb-falkordb-sent-10"
+    End
+
+    It 'asks the peers under the custom master name'
+      CUSTOM_SENTINEL_MASTER_NAME='mymaster'
+      query_sentinel_master_addr() {
+        if [ "$2" = "mymaster" ]; then echo "10.0.0.9 6380"; fi
+      }
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "mocked register_to_sentinel fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc mymaster 10.0.0.9 6380"
+    End
+
+    It 'never asks the rebuilt sentinel itself for the master'
+      query_sentinel_master_addr() {
+        case "$1" in
+          fdb-falkordb-sent-2.*) echo "stale-host 6379" ;;
+          fdb-falkordb-sent-1.*) echo "fdb-falkordb-1.fdb-falkordb-headless.test.svc 6379" ;;
+        esac
+      }
+      REBUILD_SENTINEL_POD_NAME='fdb-falkordb-sent-2'
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "redis_primary_host=fdb-falkordb-1.fdb-falkordb-headless.test.svc"
+      The stdout should not include "stale-host"
+    End
+
+    It 'falls back to the default primary when no peer monitors the master'
+      query_sentinel_master_addr() { echo ""; }
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "no other sentinel monitors fdb-falkordb"
+      The stdout should include "register to sentinel:fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc with pod host: redis_primary_host=fdb-falkordb-0.fdb-falkordb-headless.test.svc"
+      The stdout should not include "register_to_sentinel fdb-falkordb-sent-0"
+    End
+
+    It 'fails when the rebuilt sentinel is not in SENTINEL_POD_FQDN_LIST'
+      REBUILD_SENTINEL_POD_NAME='fdb-falkordb-sent-9'
+      When call register_to_sentinel_wrapper
+      The status should be failure
+      The stderr should include "sentinel pod fdb-falkordb-sent-9 is not in SENTINEL_POD_FQDN_LIST"
+      The stdout should not include "mocked register_to_sentinel"
+    End
+  End
+
+  Describe 'query_sentinel_master_addr()'
+    After 'unset SENTINEL_PASSWORD; rm -f ./redis-cli-args.log'
+
+    It 'prints the host and port the sentinel reports'
+      redis-cli() { printf '10.0.0.9\n6379\n'; }
+      When call query_sentinel_master_addr "fdb-falkordb-sent-0" "fdb-falkordb"
+      The status should be success
+      The output should eq "10.0.0.9 6379"
+    End
+
+    It 'passes the sentinel password'
+      SENTINEL_PASSWORD="s3cret"
+      redis-cli() { echo "$*" > ./redis-cli-args.log; printf '10.0.0.9\n6379\n'; }
+      When call query_sentinel_master_addr "fdb-falkordb-sent-0" "fdb-falkordb"
+      The output should eq "10.0.0.9 6379"
+      The contents of file "./redis-cli-args.log" should include "-a s3cret"
+      The contents of file "./redis-cli-args.log" should include "SENTINEL get-master-addr-by-name fdb-falkordb"
+    End
+
+    It 'prints nothing when the sentinel does not monitor the master'
+      redis-cli() { echo ""; }
+      When call query_sentinel_master_addr "fdb-falkordb-sent-0" "fdb-falkordb"
+      The status should be success
+      The output should eq ""
+    End
+
+    It 'prints nothing for an error reply'
+      redis-cli() { echo "NOAUTH Authentication required."; }
+      When call query_sentinel_master_addr "fdb-falkordb-sent-0" "fdb-falkordb"
+      The status should be success
+      The output should eq ""
+    End
+  End
+
   Describe 'construct_sentinel_sub_command()'
     It 'constructs the sentinel monitor sub command correctly'
       When call construct_sentinel_sub_command "monitor" "redis-redis" "redis-redis-0.redis-redis.default.svc.cluster.local" "6379"
