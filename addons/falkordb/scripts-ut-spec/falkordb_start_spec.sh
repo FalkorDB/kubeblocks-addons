@@ -818,4 +818,44 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should eq "redis-server /etc/redis/redis.conf"
     End
   End
+
+  Describe "start_redis_server()"
+    # Stand-in for util-linux `script -q -f -e -c <cmd> /dev/null`, which runs
+    # <cmd> and exits with its status (the host's script may be BSD-flavoured).
+    script() {
+      while [ $# -gt 0 ]; do
+        if [ "$1" = "-c" ]; then eval "$2"; return $?; fi
+        shift
+      done
+    }
+
+    It "exits with the server's non-zero status when the server crashes"
+      build_redis_server_start_cmd() { echo "sh -c 'echo crashed; exit 139'"; }
+      When call start_redis_server
+      The status should eq 139
+      The stdout should include "[falkordb] crashed"
+      The stdout should include "falkordb server exited with status 139"
+    End
+
+    It "exits successfully when the server shuts down cleanly"
+      build_redis_server_start_cmd() { echo "sh -c 'echo bye; exit 0'"; }
+      When call start_redis_server
+      The status should be success
+      The stdout should include "[falkordb] bye"
+    End
+
+    It "prints the crash report one clean, tagged line at a time"
+      # A pty hands back "\r\n" line endings, and "\r\r\n" for the INFO section
+      # of a crash report, which already uses "\r\n".
+      build_redis_server_start_cmd() {
+        echo "printf '1:M 13 Oct 2026 10:00:00.000 # Redis crashed by signal: 11\\r\\n# Server\\r\\r\\n\\r\\n'; exit 139"
+      }
+      When call start_redis_server
+      The status should eq 139
+      The line 2 of stdout should eq "[falkordb] # Redis crashed by signal: 11"
+      The line 3 of stdout should eq "[falkordb] # Server"
+      The line 4 of stdout should eq "[falkordb] "
+      The stdout should not include "$(printf '\r')"
+    End
+  End
 End
