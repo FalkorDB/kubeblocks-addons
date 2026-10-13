@@ -91,13 +91,16 @@ Describe "FalkorDB Reset Master Script Tests"
       BeforeEach 'setup_env'
 
       redis-cli() {
-        echo "args:$*" >&2
+        echo "auth:${REDISCLI_AUTH-unset} args:$*" >&2
         echo "1"
       }
 
-      It "does not pass the -a flag"
+      # An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, which a
+      # password-less sentinel rejects.
+      It "does not authenticate at all"
         When run reset_master_in_sentinels
         The status should be success
+        The stderr should include "auth:unset"
         The stderr should not include " -a "
         The output should include "succeeded"
       End

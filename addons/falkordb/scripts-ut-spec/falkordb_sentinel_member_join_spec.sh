@@ -264,10 +264,11 @@ Describe "FalkorDB Sentinel Member Join Script Tests"
     acl_setup() {
       stub_sentinel_cli_argv
       rm -f "$sentinel_acl_log"
+      SENTINEL_POD_NAME_LIST="fdb-falkordb-sent-1,fdb-falkordb-sent-0,fdb-falkordb-sent-2"
       CURRENT_POD_NAME="fdb-falkordb-sent-0"
     }
     Before 'acl_setup'
-    After 'unset CURRENT_POD_NAME'
+    After 'unset CURRENT_POD_NAME SENTINEL_POD_NAME_LIST'
 
     It "rewrites every user except default on the joining sentinel"
       When call sync_acl_to_joining_member
@@ -323,14 +324,16 @@ SAVE"
       The stdout should not include "#a1"
     End
 
-    Context "when this sentinel monitors no master"
-      empty_conf() { : > "$redis_sentinel_real_conf"; }
-      Before 'empty_conf'
+    # Only one sentinel may be the source, or one lacking an account that is
+    # being created right now would delete it after another one set it.
+    Context "when another sentinel is the ACL source"
+      not_source() { CURRENT_POD_NAME="fdb-falkordb-sent-1"; }
+      Before 'not_source'
 
-      It "does not sync its ACL"
+      It "leaves the sync to it"
         When call sync_acl_to_joining_member
         The status should be success
-        The stdout should include "not syncing its ACL"
+        The stdout should include "fdb-falkordb-sent-0 copies its ACL onto the joining member, not this sentinel"
         The path "$sentinel_acl_log" should not be exist
       End
     End
@@ -342,8 +345,33 @@ SAVE"
       It "does not sync onto itself"
         When call sync_acl_to_joining_member
         The status should be success
-        The stdout should include "not syncing its ACL onto itself"
+        The stdout should include "not this sentinel"
         The path "$sentinel_acl_log" should not be exist
+      End
+    End
+
+    Context "when the joining member has the smallest name"
+      joining_first() {
+        KB_JOIN_MEMBER_POD_FQDN="fdb-falkordb-sent-0.fdb-falkordb-sent-headless.test.svc"
+        CURRENT_POD_NAME="fdb-falkordb-sent-1"
+      }
+      Before 'joining_first'
+
+      It "uses the next sentinel as the source"
+        When call sync_acl_to_joining_member
+        The status should be success
+        The stdout should include "now matches this sentinel"
+      End
+    End
+
+    Context "when there is no other sentinel"
+      only_joining() { SENTINEL_POD_NAME_LIST="fdb-falkordb-sent-2"; }
+      Before 'only_joining'
+
+      It "fails"
+        When call sync_acl_to_joining_member
+        The status should be failure
+        The stderr should include "no sentinel other than the joining member"
       End
     End
 
@@ -418,8 +446,11 @@ SAVE"
         esac
       }
       rm -f "$sentinel_acl_log"
+      SENTINEL_POD_NAME_LIST="fdb-falkordb-sent-0,fdb-falkordb-sent-1,fdb-falkordb-sent-2"
+      CURRENT_POD_NAME="fdb-falkordb-sent-0"
     }
     Before 'member_join_setup'
+    After 'unset CURRENT_POD_NAME SENTINEL_POD_NAME_LIST'
 
     It "hands over the monitor configuration and the ACL"
       When call member_join

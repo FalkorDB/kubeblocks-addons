@@ -95,8 +95,15 @@ sentinel_cli() {
 sentinel_cli_argv() {
   local host="$1"
   shift
-  # shellcheck disable=SC2086
-  REDISCLI_AUTH="${SENTINEL_PASSWORD}" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port" "$@"
+  # An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, which a
+  # password-less sentinel rejects, so it is only set when there is a password.
+  if ! is_empty "${SENTINEL_PASSWORD}"; then
+    # shellcheck disable=SC2086
+    REDISCLI_AUTH="${SENTINEL_PASSWORD}" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port" "$@"
+  else
+    # shellcheck disable=SC2086
+    redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port" "$@"
+  fi
 }
 
 wait_for_joining_sentinel() {
@@ -222,26 +229,40 @@ split_acl_rules() {
   fi
 }
 
+# The sentinel whose ACL the joining member copies: the lexicographically
+# smallest pod in SENTINEL_POD_NAME_LIST other than the joining member.
+acl_source_pod_name() {
+  local target="$1"
+  echo "$SENTINEL_POD_NAME_LIST" | tr ',' '\n' | while IFS= read -r pod; do
+    if ! is_empty "$pod" && [[ "$target" != "$pod."* ]]; then
+      echo "$pod"
+    fi
+  done | LC_ALL=C sort | head -n 1
+}
+
 # Makes the ACL of the joining sentinel match this one: every user is rewritten
 # from scratch (`reset` first, so rules the target had are not merged in), and
 # users this sentinel does not have are deleted. `default` is left alone, its
 # password comes from SENTINEL_PASSWORD on every sentinel.
 #
-# Every already configured sentinel runs this against the joining member. They
-# all hold the same ACL because the account OpsDefinition targets every
-# sentinel, so the concurrent runs converge on the same result.
+# The action runs on every sentinel, but only one of them may be the source.
+# With several, a sentinel that briefly lacks an account (one being created
+# or removed right now) would delete it again after another sentinel set it,
+# and the result would depend on which sync finished last.
 sync_acl_to_joining_member() {
   local target="$KB_JOIN_MEMBER_POD_FQDN"
   if is_empty "$target"; then
     echo "Error: Required environment variable KB_JOIN_MEMBER_POD_FQDN is not set." >&2
     return 1
   fi
-  if is_empty "$(monitored_master_names)"; then
-    echo "this sentinel monitors no master yet, not syncing its ACL."
-    return 0
+  local source_pod
+  source_pod=$(acl_source_pod_name "$target")
+  if is_empty "$source_pod"; then
+    echo "Error: no sentinel other than the joining member to copy the ACL from." >&2
+    return 1
   fi
-  if ! is_empty "$CURRENT_POD_NAME" && [[ "$target" == "$CURRENT_POD_NAME."* ]]; then
-    echo "this sentinel is the joining member, not syncing its ACL onto itself."
+  if ! equals "$CURRENT_POD_NAME" "$source_pod"; then
+    echo "$source_pod copies its ACL onto the joining member, not this sentinel."
     return 0
   fi
 

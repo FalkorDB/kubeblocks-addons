@@ -26,6 +26,18 @@ sentinel_master_name() {
   fi
 }
 
+# An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, which a
+# password-less sentinel rejects, so it is only set when there is a password.
+sentinel_cli() {
+  if [ -n "${SENTINEL_PASSWORD}" ]; then
+    # shellcheck disable=SC2086
+    REDISCLI_AUTH="${SENTINEL_PASSWORD}" redis-cli $REDIS_CLI_TLS_CMD "$@"
+  else
+    # shellcheck disable=SC2086
+    redis-cli $REDIS_CLI_TLS_CMD "$@"
+  fi
+}
+
 reset_master_in_sentinels() {
   if [ -z "${SENTINEL_POD_NAME_LIST}" ]; then
     exit 0
@@ -41,8 +53,7 @@ reset_master_in_sentinels() {
     # The password goes through REDISCLI_AUTH so it stays out of the process
     # arguments. SENTINEL RESET replies with the number of masters it reset, so
     # 0 means this sentinel does not monitor the master under that name.
-    # shellcheck disable=SC2086
-    if output=$(REDISCLI_AUTH="${SENTINEL_PASSWORD}" redis-cli $REDIS_CLI_TLS_CMD -h "$fqdn" -p "$sentinel_service_port" sentinel reset "${master_name}") \
+    if output=$(sentinel_cli -h "$fqdn" -p "$sentinel_service_port" sentinel reset "${master_name}") \
       && [[ "$output" =~ ^[0-9]+$ ]] && [ "$output" -gt 0 ]; then
       echo "reset master in sentinel ${sentinel_pod} succeeded"
     else

@@ -47,8 +47,15 @@ falkordb_cli() {
   if [ -n "$REDIS_DEFAULT_USER" ]; then
     user_args=(--user "$REDIS_DEFAULT_USER")
   fi
-  # shellcheck disable=SC2086
-  REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" redis-cli $REDIS_CLI_TLS_CMD "${user_args[@]}" "$@"
+  # An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, which a
+  # password-less server rejects, so it is only set when there is a password.
+  if [ -n "$REDIS_DEFAULT_PASSWORD" ]; then
+    # shellcheck disable=SC2086
+    REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" redis-cli $REDIS_CLI_TLS_CMD "${user_args[@]}" "$@"
+  else
+    # shellcheck disable=SC2086
+    redis-cli $REDIS_CLI_TLS_CMD "${user_args[@]}" "$@"
+  fi
 }
 
 # Prints the node ID of the primary of the shard this job runs for: the node
@@ -61,10 +68,15 @@ own_shard_primary_id() {
   }'
 }
 
-# Prints the smallest node ID among the healthy primaries.
+# Prints the smallest node ID among the healthy primaries: flagged master,
+# not failing, and with a connected cluster-bus link (field 8). A primary that
+# lost its link must not win, or every job could stand down while the leader's
+# own job, if any, cannot reach the cluster.
 leader_primary_id() {
   local cluster_nodes="$1"
-  echo "$cluster_nodes" | awk '$3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ { print $1 }' | LC_ALL=C sort | head -n 1
+  echo "$cluster_nodes" \
+    | awk '$3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" { print $1 }' \
+    | LC_ALL=C sort | head -n 1
 }
 
 is_rebalance_leader() {

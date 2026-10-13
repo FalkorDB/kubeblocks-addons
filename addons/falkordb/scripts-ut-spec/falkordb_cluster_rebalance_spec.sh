@@ -85,6 +85,11 @@ Describe "FalkorDB Cluster Rebalance Script Tests"
       The output should eq "a1a1"
     End
 
+    It "ignores primaries whose cluster-bus link is down"
+      When call leader_primary_id "$(cluster_nodes_from b2b2 | sed 's/^\(a1a1 .*\) connected /\1 disconnected /')"
+      The output should eq "b2b2"
+    End
+
     It "ignores failed primaries"
       When call leader_primary_id "$(cluster_nodes_from b2b2 | sed 's/^a1a1 \([^ ]*\) master /a1a1 \1 master,fail /')"
       The output should eq "b2b2"
@@ -141,6 +146,27 @@ Describe "FalkorDB Cluster Rebalance Script Tests"
         The output should include "rebalance falkordb cluster slots"
         The contents of file "$redis_cli_log" should include "args:--tls --insecure --user default -h"
         The contents of file "$redis_cli_log" should include "args:--tls --insecure --user default --cluster rebalance"
+      End
+    End
+
+    Context "when the cluster has no password"
+      no_password() {
+        REDIS_DEFAULT_PASSWORD=""
+        redis-cli() {
+          echo "auth:${REDISCLI_AUTH-unset} args:$*" >> "$redis_cli_log"
+          case "$*" in
+            *"cluster nodes"*) cluster_nodes_from a1a1 ;;
+          esac
+        }
+      }
+      Before "no_password"
+
+      It "does not authenticate at all"
+        When call rebalance
+        The status should be success
+        The output should include "rebalance falkordb cluster slots"
+        The contents of file "$redis_cli_log" should include "auth:unset"
+        The contents of file "$redis_cli_log" should not include "auth: "
       End
     End
 
