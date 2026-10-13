@@ -857,5 +857,17 @@ Describe "FalkorDB Start Bash Script Tests"
       The line 4 of stdout should eq "[falkordb] "
       The stdout should not include "$(printf '\r')"
     End
+
+    It "exits with the server's status and tags its lines when script is unavailable"
+      command() {
+        if [ "$1" = "-v" ] && [ "$2" = "script" ]; then return 1; fi
+        builtin command "$@"
+      }
+      build_redis_server_start_cmd() { echo "sh -c 'echo 1:M 13 Oct 2026 10:00:00.000 crashed; exit 139'"; }
+      When call start_redis_server
+      The status should eq 139
+      The line 2 of stdout should eq "[falkordb] crashed"
+      The stdout should include "falkordb server exited with status 139"
+    End
   End
 End
