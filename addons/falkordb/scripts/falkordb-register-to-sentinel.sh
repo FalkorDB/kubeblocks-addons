@@ -30,7 +30,9 @@ REBUILD_SENTINEL_POD_NAME=${REBUILD_SENTINEL_POD_NAME:-""}
 redis_announce_host_value=""
 redis_announce_port_value=""
 redis_default_service_port=${SERVICE_PORT:-6379}
-if [ -f /data/.fixed_pod_ip_enabled ]; then
+# The start script creates /data/.fixed_pod_ip_enabled from FIXED_POD_IP_ENABLED.
+# The falkordb-register-to-sentinel ops pod has no /data, so it passes the env instead.
+if [ -f /data/.fixed_pod_ip_enabled ] || [ "${FIXED_POD_IP_ENABLED:-}" == "true" ]; then
   # if the file /data/.fixed_pod_ip_enabled exists, it means that the redis pod is running in fixed pod ip mode.
   FIXED_POD_IP_ENABLED=true
 else
@@ -353,25 +355,36 @@ register_to_sentinel_wrapper() {
 
 # usage: query_sentinel_master_addr <sentinel_host> <master_name>
 # Prints `<host> <port>` of the master the sentinel monitors under that name, and
-# nothing when it does not monitor it or cannot be reached.
+# nothing when it does not monitor it. Fails, with the reason on stderr, when the
+# sentinel cannot be asked: redis-cli exits non-zero when it cannot connect, but
+# exits 0 for an error reply such as NOAUTH, so the reply is checked as well.
 query_sentinel_master_addr() {
   local sentinel_host=$1
   local master_name=$2
   local sentinel_port=${SENTINEL_SERVICE_PORT:-26379}
-  local output
+  local output status
   # REDIS_CLI_TLS_CMD holds several flags, so it is split on purpose.
   # shellcheck disable=SC2086
   if is_empty "$SENTINEL_PASSWORD"; then
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_host" -p "$sentinel_port" SENTINEL get-master-addr-by-name "$master_name" 2>/dev/null)
+    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_host" -p "$sentinel_port" SENTINEL get-master-addr-by-name "$master_name" 2>&1)
   else
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_host" -p "$sentinel_port" -a "$SENTINEL_PASSWORD" --no-auth-warning SENTINEL get-master-addr-by-name "$master_name" 2>/dev/null)
+    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_host" -p "$sentinel_port" -a "$SENTINEL_PASSWORD" --no-auth-warning SENTINEL get-master-addr-by-name "$master_name" 2>&1)
+  fi
+  status=$?
+  if [ $status -ne 0 ]; then
+    echo "sentinel $sentinel_host cannot be reached: $output" >&2
+    return 1
+  fi
+  # a master the sentinel does not monitor is a nil reply, printed as an empty line.
+  if is_empty "$output" || equals "$output" "(nil)"; then
+    return 0
   fi
   local host port
   host=$(echo "$output" | sed -n 1p)
   port=$(echo "$output" | sed -n 2p)
-  # anything but a host and a numeric port is either "not monitored" or an error reply.
-  if is_empty "$host" || [[ ! "$port" =~ ^[0-9]+$ ]]; then
-    return 0
+  if is_empty "$host" || [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$(echo "$output" | wc -l)" -ne 2 ]; then
+    echo "sentinel $sentinel_host answered with an error: $output" >&2
+    return 1
   fi
   echo "$host $port"
 }
@@ -379,19 +392,27 @@ query_sentinel_master_addr() {
 # The master as the established sentinels see it now. After a failover this is no
 # longer the lexicographically smallest pod that postProvision registers, and a
 # rebuilt sentinel pointed at a replica would never agree with its peers.
+# Returns 1 when every peer answered and none monitors the master, and 2 when no
+# peer reported it but some could not be asked, in which case nothing is known.
 current_master_addr_from_peers() {
   local rebuilt_sentinel_pod_fqdn=$1
-  local peer addr
+  local peer addr unanswered=0
   for peer in "${sentinel_pod_fqdn_list[@]}"; do
     if equals "$peer" "$rebuilt_sentinel_pod_fqdn"; then
       continue
     fi
-    addr=$(query_sentinel_master_addr "$peer" "$master_name")
+    if ! addr=$(query_sentinel_master_addr "$peer" "$master_name"); then
+      unanswered=$((unanswered + 1))
+      continue
+    fi
     if ! is_empty "$addr"; then
       echo "$addr"
       return 0
     fi
   done
+  if [ "$unanswered" -gt 0 ]; then
+    return 2
+  fi
   return 1
 }
 
@@ -411,16 +432,39 @@ register_to_rebuilt_sentinel() {
     return 1
   fi
 
-  local master_addr
-  if master_addr=$(current_master_addr_from_peers "$rebuilt_sentinel_pod_fqdn"); then
-    local master_host="${master_addr% *}"
-    local master_port="${master_addr#* }"
-    echo "register to rebuilt sentinel:$rebuilt_sentinel_pod_fqdn with the master its peers monitor: redis_primary_host=$master_host, redis_primary_port=$master_port"
-    register_to_sentinel "$rebuilt_sentinel_pod_fqdn" "$master_name" "$master_host" "$master_port"
-    return $?
-  fi
+  local master_addr status=0
+  master_addr=$(current_master_addr_from_peers "$rebuilt_sentinel_pod_fqdn") || status=$?
+  case $status in
+    0)
+      local master_host="${master_addr% *}"
+      local master_port="${master_addr#* }"
+      echo "register to rebuilt sentinel:$rebuilt_sentinel_pod_fqdn with the master its peers monitor: redis_primary_host=$master_host, redis_primary_port=$master_port"
+      register_to_sentinel "$rebuilt_sentinel_pod_fqdn" "$master_name" "$master_host" "$master_port"
+      return $?
+      ;;
+    2)
+      # a peer that could not be asked may well monitor the master elsewhere, so
+      # registering a guess could split the fleet.
+      echo "Error: no reachable sentinel reported the master $master_name and some could not be asked, not registering $rebuilt_sentinel_pod_fqdn. Retry once the sentinels are reachable." >&2
+      return 1
+      ;;
+  esac
 
-  echo "no other sentinel monitors $master_name, registering the rebuilt sentinel with the default primary."
+  # Every peer answered that it monitors nothing. The ops runs on the current
+  # primary, so register that pod rather than the lexicographically smallest one,
+  # which is a replica after any failover.
+  local current_pod_fqdn=""
+  if ! is_empty "$CURRENT_POD_NAME"; then
+    current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$REDIS_POD_FQDN_LIST" "$CURRENT_POD_NAME") || true
+  fi
+  if ! is_empty "$current_pod_fqdn"; then
+    redis_default_primary_pod_name="$CURRENT_POD_NAME"
+    redis_default_primary_pod_fqdn="$current_pod_fqdn"
+    redis_announce_host_value=""
+    redis_announce_port_value=""
+    parse_redis_primary_announce_addr "$CURRENT_POD_NAME"
+  fi
+  echo "no other sentinel monitors $master_name, registering the rebuilt sentinel with the primary $redis_default_primary_pod_name."
   if [ "$IS_REDIS5" == "true" ]; then
     register_to_sentinel_for_redis5 "$rebuilt_sentinel_pod_fqdn"
   else

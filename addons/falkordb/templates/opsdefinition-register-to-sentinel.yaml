@@ -10,7 +10,7 @@ spec:
   ## sentinel that was rebuilt (same pod name, fresh /data volume), so a rebuilt
   ## sentinel comes back monitoring no master and with only the users from its
   ## start script. Run this ops with REBUILD_SENTINEL_POD_NAME afterwards to
-  ## register that sentinel again and copy the ACL of an established sentinel onto it.
+  ## copy the ACL of an established sentinel onto that sentinel, then register it.
   componentInfos:
     ## matches falkordb-<major>-<chartVersion>, not falkordb-sent-* or falkordb-cluster-*
     - componentDefinitionName: ^falkordb-\d+
@@ -62,6 +62,11 @@ spec:
           valueFrom:
             envRef:
               envName: CURRENT_POD_HOST_IP
+        ## the primary the ops runs on, registered when no sentinel peer knows the master
+        - name: CURRENT_POD_NAME
+          valueFrom:
+            envRef:
+              envName: CURRENT_POD_NAME
         ## The sentinel variables only resolve when the cluster has a sentinel
         ## component, the rest only in the matching network mode or when the
         ## cluster sets them. Without `optional` a missing env fails the whole
@@ -96,6 +101,12 @@ spec:
           valueFrom:
             envRef:
               envName: CUSTOM_SENTINEL_MASTER_NAME
+        ## the ops pod has no /data/.fixed_pod_ip_enabled, set by the start script from this env
+        - name: FIXED_POD_IP_ENABLED
+          optional: true
+          valueFrom:
+            envRef:
+              envName: FIXED_POD_IP_ENABLED
         - name: ANNOUNCE_HOSTNAME_OVERRIDE
           optional: true
           valueFrom:
@@ -184,5 +195,8 @@ spec:
                   cat > /scripts/falkordb-sent-rebuild-sync-acl.sh <<'SENT_REBUILD_SYNC_ACL_EOF'
                   {{- .Files.Get "scripts/falkordb-sent-rebuild-sync-acl.sh" | nindent 18 }}
                   SENT_REBUILD_SYNC_ACL_EOF
-                  bash /scripts/falkordb-register-to-sentinel.sh
+                  # the ACL first: the next run picks its ACL source among the sentinels
+                  # that monitor the master, so a sentinel must not monitor it before
+                  # its ACL is complete. Without REBUILD_SENTINEL_POD_NAME it is a no-op.
                   bash /scripts/falkordb-sent-rebuild-sync-acl.sh
+                  bash /scripts/falkordb-register-to-sentinel.sh

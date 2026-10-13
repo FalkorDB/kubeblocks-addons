@@ -144,10 +144,10 @@ Describe 'register_to_sentinel.sh'
       REDIS_POD_FQDN_LIST="fdb-falkordb-0.fdb-falkordb-headless.test.svc,fdb-falkordb-1.fdb-falkordb-headless.test.svc"
       REDIS_COMPONENT_NAME='fdb-falkordb'
       REBUILD_SENTINEL_POD_NAME='fdb-falkordb-sent-2'
-      unset REDIS_ADVERTISED_PORT REDIS_LB_ADVERTISED_PORT REDIS_HOST_NETWORK_PORT CUSTOM_SENTINEL_MASTER_NAME
+      unset REDIS_ADVERTISED_PORT REDIS_LB_ADVERTISED_PORT REDIS_HOST_NETWORK_PORT CUSTOM_SENTINEL_MASTER_NAME CURRENT_POD_NAME
     }
     Before 'rebuild_setup'
-    After 'unset REBUILD_SENTINEL_POD_NAME CUSTOM_SENTINEL_MASTER_NAME'
+    After 'unset REBUILD_SENTINEL_POD_NAME CUSTOM_SENTINEL_MASTER_NAME CURRENT_POD_NAME'
 
     It 'registers only the rebuilt sentinel, with the master its peers monitor'
       When call register_to_sentinel_wrapper
@@ -183,6 +183,8 @@ Describe 'register_to_sentinel.sh'
           fdb-falkordb-sent-1.*) echo "fdb-falkordb-1.fdb-falkordb-headless.test.svc 6379" ;;
         esac
       }
+      # the rebuilt sentinel comes first, so asking it would be noticed.
+      SENTINEL_POD_FQDN_LIST="fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc,fdb-falkordb-sent-0.fdb-falkordb-sent-headless.test.svc,fdb-falkordb-sent-1.fdb-falkordb-sent-headless.test.svc"
       REBUILD_SENTINEL_POD_NAME='fdb-falkordb-sent-2'
       When call register_to_sentinel_wrapper
       The status should be success
@@ -190,13 +192,60 @@ Describe 'register_to_sentinel.sh'
       The stdout should not include "stale-host"
     End
 
-    It 'falls back to the default primary when no peer monitors the master'
+    It 'falls back to the primary the ops runs on when no peer monitors the master'
+      query_sentinel_master_addr() { echo ""; }
+      CURRENT_POD_NAME='fdb-falkordb-1'
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "no other sentinel monitors fdb-falkordb, registering the rebuilt sentinel with the primary fdb-falkordb-1"
+      The stdout should include "register to sentinel:fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc with pod host: redis_primary_host=fdb-falkordb-1.fdb-falkordb-headless.test.svc"
+      The stdout should not include "register_to_sentinel fdb-falkordb-sent-0"
+    End
+
+    It 'announces the address of the primary the ops runs on in the fallback'
+      query_sentinel_master_addr() { echo ""; }
+      CURRENT_POD_NAME='fdb-falkordb-1'
+      REDIS_ADVERTISED_PORT="fdb-falkordb-falkordb-advertised-0:31000,fdb-falkordb-falkordb-advertised-1:32000"
+      CURRENT_POD_HOST_IP='10.0.0.7'
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "with announce addr: redis_primary_host=10.0.0.7, redis_announce_port_value=32000"
+    End
+
+    It 'falls back to the lexicographically smallest pod without CURRENT_POD_NAME'
       query_sentinel_master_addr() { echo ""; }
       When call register_to_sentinel_wrapper
       The status should be success
-      The stdout should include "no other sentinel monitors fdb-falkordb"
-      The stdout should include "register to sentinel:fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc with pod host: redis_primary_host=fdb-falkordb-0.fdb-falkordb-headless.test.svc"
-      The stdout should not include "register_to_sentinel fdb-falkordb-sent-0"
+      The stdout should include "registering the rebuilt sentinel with the primary fdb-falkordb-0"
+      The stdout should include "redis_primary_host=fdb-falkordb-0.fdb-falkordb-headless.test.svc"
+    End
+
+    It 'uses the master a peer reports even when another peer cannot be asked'
+      query_sentinel_master_addr() {
+        case "$1" in
+          fdb-falkordb-sent-0.*) echo "sentinel $1 cannot be reached: Connection refused" >&2; return 1 ;;
+          fdb-falkordb-sent-1.*) echo "fdb-falkordb-1.fdb-falkordb-headless.test.svc 6379" ;;
+        esac
+      }
+      When call register_to_sentinel_wrapper
+      The status should be success
+      The stdout should include "mocked register_to_sentinel fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc fdb-falkordb fdb-falkordb-1.fdb-falkordb-headless.test.svc 6379"
+      The stderr should include "cannot be reached"
+    End
+
+    It 'does not guess the master when a peer cannot be asked and none reports it'
+      query_sentinel_master_addr() {
+        case "$1" in
+          fdb-falkordb-sent-0.*) echo "sentinel $1 answered with an error: NOAUTH Authentication required." >&2; return 1 ;;
+          *) echo "" ;;
+        esac
+      }
+      CURRENT_POD_NAME='fdb-falkordb-1'
+      When call register_to_sentinel_wrapper
+      The status should be failure
+      The stderr should include "NOAUTH Authentication required."
+      The stderr should include "some could not be asked, not registering fdb-falkordb-sent-2"
+      The stdout should not include "mocked register_to_sentinel"
     End
 
     It 'fails when the rebuilt sentinel is not in SENTINEL_POD_FQDN_LIST'
@@ -234,11 +283,45 @@ Describe 'register_to_sentinel.sh'
       The output should eq ""
     End
 
-    It 'prints nothing for an error reply'
+    # redis-cli exits 0 for an error reply, it has to be told apart by its text.
+    It 'fails for an error reply'
       redis-cli() { echo "NOAUTH Authentication required."; }
       When call query_sentinel_master_addr "fdb-falkordb-sent-0" "fdb-falkordb"
-      The status should be success
+      The status should be failure
       The output should eq ""
+      The stderr should include "sentinel fdb-falkordb-sent-0 answered with an error: NOAUTH Authentication required."
+    End
+
+    It 'fails for a wrong password'
+      SENTINEL_PASSWORD="wrong"
+      redis-cli() { printf 'AUTH failed: WRONGPASS invalid username-password pair or user is disabled.\nNOAUTH Authentication required.\n'; }
+      When call query_sentinel_master_addr "fdb-falkordb-sent-0" "fdb-falkordb"
+      The status should be failure
+      The output should eq ""
+      The stderr should include "WRONGPASS"
+    End
+
+    It 'fails when the sentinel cannot be reached'
+      redis-cli() { echo "Could not connect to Redis at fdb-falkordb-sent-0:26379: Connection refused" >&2; return 1; }
+      When call query_sentinel_master_addr "fdb-falkordb-sent-0" "fdb-falkordb"
+      The status should be failure
+      The output should eq ""
+      The stderr should include "sentinel fdb-falkordb-sent-0 cannot be reached: Could not connect"
+    End
+  End
+
+  # The ops pod has no /data, so fixed pod IP mode has to come from the env.
+  Describe 'fixed pod ip mode detection'
+    It 'honours FIXED_POD_IP_ENABLED without /data/.fixed_pod_ip_enabled'
+      When run bash -c 'FIXED_POD_IP_ENABLED=true; __SOURCED__=1; source ../scripts/falkordb-register-to-sentinel.sh; echo "FIXED_POD_IP_ENABLED=$FIXED_POD_IP_ENABLED"'
+      The status should be success
+      The output should eq "FIXED_POD_IP_ENABLED=true"
+    End
+
+    It 'stays off when neither the file nor the env says otherwise'
+      When run bash -c 'unset FIXED_POD_IP_ENABLED; __SOURCED__=1; source ../scripts/falkordb-register-to-sentinel.sh; echo "FIXED_POD_IP_ENABLED=$FIXED_POD_IP_ENABLED"'
+      The status should be success
+      The output should eq "FIXED_POD_IP_ENABLED=false"
     End
   End
 
