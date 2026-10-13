@@ -34,6 +34,18 @@ spec:
           valueFrom:
             envRef:
               envName: REDIS_CLI_TLS_CMD
+        ## Only present when the cluster sets sentinel.customMasterName. Without
+        ## `optional` a missing env fails the whole OpsRequest.
+        - name: CUSTOM_SENTINEL_MASTER_NAME
+          optional: true
+          valueFrom:
+            envRef:
+              envName: CUSTOM_SENTINEL_MASTER_NAME
+        - name: SENTINEL_SERVICE_PORT
+          optional: true
+          valueFrom:
+            envRef:
+              envName: SENTINEL_SERVICE_PORT
   actions:
     - name: reset-master
       workload:

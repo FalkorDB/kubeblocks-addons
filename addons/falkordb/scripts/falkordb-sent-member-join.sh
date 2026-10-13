@@ -20,6 +20,12 @@
 # sentinel that is already monitoring does however hold that password in the
 # config file it rewrites for itself, so the joining member can be configured
 # from there without the sentinel component ever needing the credential.
+#
+# Sentinels do not replicate ACLs between themselves either, and a new sentinel
+# starts with only the users from its start script. Accounts created later
+# through the falkordb-sent-account-ops OpsDefinition would be rejected by it,
+# so the same sentinels that hand over the monitor configuration also copy
+# their ACL onto the joining member.
 
 # This is magic for shellspec ut framework. "test" is a `test [expression]` well known as a shell command.
 # Normally test without [expression] returns false. It means that __() { :; }
@@ -81,6 +87,16 @@ sentinel_cli() {
     # shellcheck disable=SC2086
     printf '%s\n' "$command" | redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port"
   )
+}
+
+# Like sentinel_cli, but passes the command as separate arguments. ACL rules
+# have to go this way: a selector such as `(~key* +get)` is one argument that
+# contains a space, which the stdin form would split in two.
+sentinel_cli_argv() {
+  local host="$1"
+  shift
+  # shellcheck disable=SC2086
+  REDISCLI_AUTH="${SENTINEL_PASSWORD}" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port" "$@"
 }
 
 wait_for_joining_sentinel() {
@@ -174,6 +190,117 @@ propagate_monitor_config_to_joining_member() {
   done <<< "$masters"
 }
 
+is_error_reply() {
+  echo "$1" | grep -qE "^(\(error\) )?(ERR|NOPERM|NOAUTH|WRONGPASS|WRONGTYPE)"
+}
+
+# Splits the rules of one `ACL LIST` line into the arguments of ACL SETUSER,
+# keeping each parenthesised selector together as a single argument. ACL rules
+# themselves never contain spaces, only selectors do. The result is left in
+# the acl_rule_args array.
+split_acl_rules() {
+  local rules="$1"
+  local -a words
+  local word selector=""
+  acl_rule_args=()
+  read -ra words <<< "$rules"
+  for word in "${words[@]}"; do
+    if ! is_empty "$selector"; then
+      selector="$selector $word"
+      if [[ "$word" == *")" ]]; then
+        acl_rule_args+=("$selector")
+        selector=""
+      fi
+    elif [[ "$word" == "("* && "$word" != *")" ]]; then
+      selector="$word"
+    else
+      acl_rule_args+=("$word")
+    fi
+  done
+  if ! is_empty "$selector"; then
+    acl_rule_args+=("$selector")
+  fi
+}
+
+# Makes the ACL of the joining sentinel match this one: every user is rewritten
+# from scratch (`reset` first, so rules the target had are not merged in), and
+# users this sentinel does not have are deleted. `default` is left alone, its
+# password comes from SENTINEL_PASSWORD on every sentinel.
+#
+# Every already configured sentinel runs this against the joining member. They
+# all hold the same ACL because the account OpsDefinition targets every
+# sentinel, so the concurrent runs converge on the same result.
+sync_acl_to_joining_member() {
+  local target="$KB_JOIN_MEMBER_POD_FQDN"
+  if is_empty "$target"; then
+    echo "Error: Required environment variable KB_JOIN_MEMBER_POD_FQDN is not set." >&2
+    return 1
+  fi
+  if is_empty "$(monitored_master_names)"; then
+    echo "this sentinel monitors no master yet, not syncing its ACL."
+    return 0
+  fi
+  if ! is_empty "$CURRENT_POD_NAME" && [[ "$target" == "$CURRENT_POD_NAME."* ]]; then
+    echo "this sentinel is the joining member, not syncing its ACL onto itself."
+    return 0
+  fi
+
+  local acl_list
+  if ! acl_list=$(sentinel_cli_argv 127.0.0.1 ACL LIST) || is_empty "$acl_list" || is_error_reply "$acl_list"; then
+    echo "Error: failed to read the ACL of this sentinel: $acl_list" >&2
+    return 1
+  fi
+
+  local source_users=""
+  local line username output
+  while IFS= read -r line; do
+    if [[ ! "$line" =~ ^user[[:space:]]+([^[:space:]]+)[[:space:]]*(.*)$ ]]; then
+      continue
+    fi
+    username="${BASH_REMATCH[1]}"
+    source_users="$source_users$username"$'\n'
+    if equals "$username" "default"; then
+      continue
+    fi
+    split_acl_rules "${BASH_REMATCH[2]}"
+    # The rules hold password hashes, so only the user name is logged.
+    echo "syncing ACL user $username to $target."
+    if ! output=$(sentinel_cli_argv "$target" ACL SETUSER "$username" reset "${acl_rule_args[@]}" 2>&1) \
+      || is_error_reply "$output"; then
+      echo "Error: failed to set ACL user $username on $target: $output" >&2
+      return 1
+    fi
+  done <<< "$acl_list"
+
+  local target_users
+  if ! target_users=$(sentinel_cli_argv "$target" ACL USERS) || is_error_reply "$target_users"; then
+    echo "Error: failed to list the ACL users of $target: $target_users" >&2
+    return 1
+  fi
+  while IFS= read -r username; do
+    if is_empty "$username" || equals "$username" "default" || grep -Fxq -- "$username" <<< "$source_users"; then
+      continue
+    fi
+    echo "deleting ACL user $username from $target, this sentinel does not have it."
+    if ! output=$(sentinel_cli_argv "$target" ACL DELUSER "$username" 2>&1) || is_error_reply "$output"; then
+      echo "Error: failed to delete ACL user $username on $target: $output" >&2
+      return 1
+    fi
+  done <<< "$target_users"
+
+  # Without ACL SAVE the joining sentinel loses the users on its next restart.
+  if ! output=$(sentinel_cli_argv "$target" ACL SAVE 2>&1) || ! equals "$output" "OK"; then
+    echo "Error: ACL SAVE failed on $target: $output" >&2
+    return 1
+  fi
+  echo "ACL of $target now matches this sentinel."
+}
+
+member_join() {
+  propagate_monitor_config_to_joining_member || return 1
+  sync_acl_to_joining_member || return 1
+}
+
 # This is magic for shellspec ut framework.
 # Sometime, functions are defined in a single shell script.
 # You will want to test it. but you do not want to run the script.
@@ -183,4 +310,4 @@ ${__SOURCED__:+false} : || return 0
 
 # main
 load_common_library
-propagate_monitor_config_to_joining_member
+member_join
