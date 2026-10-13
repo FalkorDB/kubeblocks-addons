@@ -1,0 +1,329 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sentinel-rebuild
+spec:
+  description: >-
+    Recover a sentinel whose volume was lost with the falkordb-register-to-sentinel
+    OpsDefinition and REBUILD_SENTINEL_POD_NAME.
+
+    A rebuilt sentinel keeps its pod name but starts from an empty /data, and
+    memberJoin does not fire for it. It comes back answering PING, so the pod is
+    Ready and the cluster Running, while it monitors no master and has only the
+    users from its start script. The data component registers sentinels only once,
+    in postProvision.
+
+    RebuildInstance itself cannot drive this here: the sentinel component has no
+    backup policy, and the PV rebind it needs is what keeps 14-rebuild-instance out
+    of CI. Deleting the sentinel's PVC together with its pod produces the same
+    state, which is what the ops has to repair.
+
+    The data primary is failed over first, so that it is no longer the
+    lexicographically smallest pod that postProvision registers. A rebuilt
+    sentinel pointed at that pod would monitor a replica.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+
+    - name: the cluster is replicating and monitored
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rsent falkordb 1 1
+              fdb_retry "the replica to link up" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-rsent falkordb
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rsent falkordb-sent); do
+                fdb_retry "$pod to monitor the master" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+
+              primary="$(fdb_primary "$NAMESPACE" fdb-rsent falkordb)"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-rsent 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+
+    - name: create a sentinel account that the rebuild has to restore
+      try:
+        - apply:
+            file: sent-account.yaml
+        - assert:
+            file: assert-sent-account-succeeded.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rsent falkordb-sent); do
+                users="$(fdb_sentinel_cli "$NAMESPACE" "$pod" ACL USERS | tr -d '\r')"
+                case "$users" in
+                  *e2e-sent*) fdb_log "$pod knows e2e-sent" ;;
+                  *)
+                    fdb_fail "$pod does not know e2e-sent, users are: $users"
+                    exit 1
+                    ;;
+                esac
+              done
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rsent-sent-account
+
+    - name: fail the primary over away from the smallest pod
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              smallest="$(fdb_pods "$NAMESPACE" fdb-rsent falkordb | head -1)"
+              primary="$(fdb_primary "$NAMESPACE" fdb-rsent falkordb)"
+              if [ "$primary" != "$smallest" ]; then
+                fdb_log "$primary is already the primary and not the smallest pod $smallest"
+                exit 0
+              fi
+
+              fdb_sentinel_relax_failover_cooldown "$NAMESPACE" fdb-rsent falkordb-sent fdb-rsent-falkordb
+              fdb_kill_pod "$NAMESPACE" "$primary"
+              fdb_retry "a pod other than $smallest to be promoted" sh -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                new="$(fdb_primary "'"$NAMESPACE"'" fdb-rsent falkordb)" || exit 1
+                [ "$new" != "'"$smallest"'" ] || { echo "$new is still the primary" >&2; exit 1; }
+                echo "$new was promoted"
+              '
+              fdb_retry "the old primary to rejoin as a replica" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rsent falkordb 1 1
+              fdb_retry "the replica to link up again" \
+                fdb_assert_all_replicas_linked "$NAMESPACE" fdb-rsent falkordb
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+
+    - name: lose the volume of a sentinel
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The smallest sentinel, so the ACL has to come from a peer rather
+              # than from the sentinel memberJoin would have picked as source.
+              target="$(fdb_pods "$NAMESPACE" fdb-rsent falkordb-sent | head -1)"
+              claim="$(kubectl get pod -n "$NAMESPACE" "$target" \
+                -o jsonpath='{.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}')"
+              [ -n "$claim" ] || { fdb_fail "$target has no data volume claim"; exit 1; }
+              old_uid="$(kubectl get pvc -n "$NAMESPACE" "$claim" -o jsonpath='{.metadata.uid}')"
+              echo "$target" > "$(fdb_state_dir)/target"
+
+              # The claim is protected while the pod uses it, so it only goes away
+              # once the pod does. KubeBlocks recreates both from the templates.
+              kubectl delete pvc -n "$NAMESPACE" "$claim" --wait=false
+              kubectl delete pod -n "$NAMESPACE" "$target" --wait=false
+              kubectl wait --for=delete pvc -n "$NAMESPACE" "$claim" --timeout=5m
+              fdb_log "the claim $claim of $target is gone"
+
+              kubectl wait --for=create pod -n "$NAMESPACE" "$target" --timeout=5m
+              kubectl wait --for=condition=Ready pod -n "$NAMESPACE" "$target" --timeout=10m
+              new_uid="$(kubectl get pvc -n "$NAMESPACE" "$claim" -o jsonpath='{.metadata.uid}')"
+              if [ -z "$new_uid" ] || [ "$new_uid" = "$old_uid" ]; then
+                fdb_fail "$target did not get a new claim (uid ${new_uid:-<none>}, was $old_uid)"
+                exit 1
+              fi
+              fdb_log "$target is Ready again on a fresh claim"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+
+    - name: the rebuilt sentinel has lost its state
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # If this ever starts failing because the sentinel recovered on its
+              # own, the platform has learned to handle a rebuilt sentinel and the
+              # ops below is no longer what restores it.
+              target="$(cat "$(fdb_state_dir)/target")"
+              fdb_retry "$target to answer with its start-up users" \
+                fdb_sentinel_master_count "$NAMESPACE" "$target" >/dev/null
+              count="$(fdb_sentinel_master_count "$NAMESPACE" "$target")"
+              if [ "$count" -ne 0 ]; then
+                fdb_fail "$target already monitors $count master(s) after losing its volume"
+                exit 1
+              fi
+              users="$(fdb_sentinel_cli "$NAMESPACE" "$target" ACL USERS | tr -d '\r')"
+              case "$users" in
+                *e2e-sent*)
+                  fdb_fail "$target still knows e2e-sent after losing its volume"
+                  exit 1
+                  ;;
+              esac
+              fdb_log "$target monitors nothing and does not know e2e-sent, as expected"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+
+    - name: run the register-to-sentinel ops for the rebuilt sentinel
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The pod name is only known at run time, so the OpsRequest cannot
+              # be a static file.
+              target="$(cat "$(fdb_state_dir)/target")"
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: operations.kubeblocks.io/v1alpha1
+              kind: OpsRequest
+              metadata:
+                name: fdb-rsent-register
+              spec:
+                clusterName: fdb-rsent
+                type: Custom
+                custom:
+                  opsDefinitionName: falkordb-register-to-sentinel
+                  components:
+                    - componentName: falkordb
+                      parameters:
+                        - name: REBUILD_SENTINEL_POD_NAME
+                          value: $target
+              EOF
+        - assert:
+            file: assert-register-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rsent-register
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+        - script:
+            content: |
+              # The ops pod logs say which step failed and why.
+              for pod in $(kubectl get pods -n "$NAMESPACE" -o name | grep register); do
+                echo "--- $pod"
+                kubectl logs -n "$NAMESPACE" "$pod" --all-containers --tail=200 || true
+              done
+
+    - name: the rebuilt sentinel is a working member again
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              target="$(cat "$(fdb_state_dir)/target")"
+              peer="$(fdb_pods "$NAMESPACE" fdb-rsent falkordb-sent | grep -vx "$target" | head -1)"
+
+              # It monitors the master the rest of the fleet monitors, which after
+              # the failover is not the pod postProvision registered.
+              fdb_assert_sentinel_monitoring "$NAMESPACE" "$target"
+              want="$(fdb_sentinel_master_addr "$NAMESPACE" "$peer" fdb-rsent-falkordb)"
+              got="$(fdb_sentinel_master_addr "$NAMESPACE" "$target" fdb-rsent-falkordb)"
+              if [ "$got" != "$want" ]; then
+                fdb_fail "$target monitors $got but $peer monitors $want"
+                exit 1
+              fi
+              fdb_log "$target monitors $got, like $peer"
+
+              # The account came back, and with its password rather than as an
+              # empty shell.
+              users="$(fdb_sentinel_cli "$NAMESPACE" "$target" ACL USERS | tr -d '\r')"
+              case "$users" in
+                *e2e-sent*) fdb_log "$target knows e2e-sent again" ;;
+                *)
+                  fdb_fail "$target does not know e2e-sent, users are: $users"
+                  exit 1
+                  ;;
+              esac
+              out="$(kubectl exec -n "$NAMESPACE" "$target" -c falkordb-sent -- \
+                sh -c 'exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" --user e2e-sent --pass sent-pass --no-auth-warning PING' \
+                2>&1 | tr -d '\r')"
+              case "$out" in
+                *PONG*) fdb_log "e2e-sent authenticated against $target" ;;
+                *)
+                  fdb_fail "e2e-sent could not authenticate against $target: $out"
+                  exit 1
+                  ;;
+              esac
+
+              # Discovery runs over the master's hello channel, which the rebuilt
+              # sentinel only joins once it monitors the master.
+              fdb_retry "$target to discover the other sentinels" \
+                fdb_assert_sentinel_peers "$NAMESPACE" "$target" 2
+
+              # The ops must leave the healthy sentinels alone.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rsent falkordb-sent); do
+                fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+
+    - name: the rebuilt sentinel follows the next failover
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              target="$(cat "$(fdb_state_dir)/target")"
+              peer="$(fdb_pods "$NAMESPACE" fdb-rsent falkordb-sent | grep -vx "$target" | head -1)"
+              before="$(fdb_sentinel_master_addr "$NAMESPACE" "$target" fdb-rsent-falkordb)"
+
+              # Monitoring the right address is not the same as taking part: a
+              # sentinel registered without auth-pass, or one its peers never
+              # heard from, keeps reporting the old master after a failover.
+              fdb_sentinel_relax_failover_cooldown "$NAMESPACE" fdb-rsent falkordb-sent fdb-rsent-falkordb
+              primary="$(fdb_primary "$NAMESPACE" fdb-rsent falkordb)"
+              fdb_kill_pod "$NAMESPACE" "$primary"
+              fdb_retry "a new primary to be elected" sh -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                new="$(fdb_primary "'"$NAMESPACE"'" fdb-rsent falkordb)" || exit 1
+                [ "$new" != "'"$primary"'" ] || { echo "$new is still the primary" >&2; exit 1; }
+              '
+              fdb_retry "$target to follow the failover" sh -c '
+                . "$E2E_LIB_DIR/falkordb.sh"
+                got="$(fdb_sentinel_master_addr "'"$NAMESPACE"'" "'"$target"'" fdb-rsent-falkordb)" || exit 1
+                want="$(fdb_sentinel_master_addr "'"$NAMESPACE"'" "'"$peer"'" fdb-rsent-falkordb)" || exit 1
+                [ "$got" != "'"$before"'" ] || { echo "$got is still the old master" >&2; exit 1; }
+                [ "$got" = "$want" ] || { echo "$got differs from $want on the peer" >&2; exit 1; }
+                echo "now monitors $got"
+              '
+
+              fdb_retry "the cluster to settle back to one primary and one replica" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rsent falkordb 1 1
+              new_primary="$(fdb_primary "$NAMESPACE" fdb-rsent falkordb)"
+              fdb_retry "the keys to be readable on the new primary" \
+                fdb_verify_keys "$NAMESPACE" "$new_primary" e2e-rsent 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rsent
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

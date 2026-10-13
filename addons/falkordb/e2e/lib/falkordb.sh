@@ -154,6 +154,38 @@ fdb_sentinel_relax_failover_cooldown() {
   done
 }
 
+# fdb_sentinel_master_count <namespace> <pod>
+# Prints how many masters the sentinel monitors. Unlike
+# fdb_assert_sentinel_monitoring it does not treat zero as a failure, so it can
+# assert that a sentinel monitors nothing. Fails when the sentinel cannot answer.
+fdb_sentinel_master_count() {
+  local namespace="$1" pod="$2" reply
+  reply="$(fdb_sentinel_cli "$namespace" "$pod" SENTINEL masters 2>&1 | tr -d '\r')"
+  case "$reply" in
+    *WRONGPASS* | *NOAUTH* | *NOPERM* | *"ERR "* | *"Error:"* | *"Connection refused"*)
+      fdb_fail "$pod did not answer SENTINEL masters: $reply"
+      return 1
+      ;;
+  esac
+  echo "$reply" | grep -c '^name$' || true
+}
+
+# fdb_sentinel_master_addr <namespace> <pod> <master>
+# Prints `<host> <port>` of the master the sentinel monitors under that name, and
+# fails when it does not monitor it.
+fdb_sentinel_master_addr() {
+  local namespace="$1" pod="$2" master="$3" addr
+  addr="$(fdb_sentinel_cli "$namespace" "$pod" SENTINEL get-master-addr-by-name "$master" 2>&1 |
+    tr -d '\r' | paste -sd' ' -)"
+  case "$addr" in
+    '' | *WRONGPASS* | *NOAUTH* | *NOPERM* | *"ERR "* | *"Error:"*)
+      fdb_fail "$pod does not report an address for $master: ${addr:-<empty reply>}"
+      return 1
+      ;;
+  esac
+  echo "$addr"
+}
+
 # fdb_pods <namespace> <cluster> <component>
 # Prints the pod names of a component, one per line, in ordinal order.
 fdb_pods() {
