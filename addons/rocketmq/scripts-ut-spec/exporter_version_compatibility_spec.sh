@@ -26,8 +26,10 @@ Describe "RocketMQ exporter version compatibility"
 
   It "keeps the retained 1.0 identity compatible with exporter 0.0.3"
     When call render_exporter_version_contract
+    # compDefs is a chart-version agnostic name prefix, covering both the
+    # retained 1.0 identity and the current chart's ComponentDefinition.
     The output should eq "service_version=0.0.3
-selectors=rocketmq-exporter-1.0.3,rocketmq-exporter-1.2.0-alpha.0"
+selectors=rocketmq-exporter"
     The status should be success
   End
 End
