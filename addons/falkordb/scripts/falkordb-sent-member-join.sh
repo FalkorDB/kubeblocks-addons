@@ -83,7 +83,12 @@ sentinel_cli() {
   local host="$1"
   local command="$2"
   (
-    export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    # An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, see sentinel_cli_argv.
+    if ! is_empty "${SENTINEL_PASSWORD}"; then
+      export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    else
+      unset REDISCLI_AUTH
+    fi
     # shellcheck disable=SC2086
     printf '%s\n' "$command" | redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port"
   )
@@ -266,9 +271,21 @@ sync_acl_to_joining_member() {
     return 0
   fi
 
+  copy_sentinel_acl 127.0.0.1 "this sentinel" "$target"
+}
+
+# Makes the ACL of <target> an exact copy of the ACL of <source_host>, see
+# sync_acl_to_joining_member. <source_label> only names the source in the logs.
+# Also used by the falkordb-register-to-sentinel OpsDefinition to restore the
+# ACL of a rebuilt sentinel, which does not go through memberJoin.
+copy_sentinel_acl() {
+  local source_host="$1"
+  local source_label="$2"
+  local target="$3"
+
   local acl_list
-  if ! acl_list=$(sentinel_cli_argv 127.0.0.1 ACL LIST) || is_empty "$acl_list" || is_error_reply "$acl_list"; then
-    echo "Error: failed to read the ACL of this sentinel: $acl_list" >&2
+  if ! acl_list=$(sentinel_cli_argv "$source_host" ACL LIST) || is_empty "$acl_list" || is_error_reply "$acl_list"; then
+    echo "Error: failed to read the ACL of $source_label: $acl_list" >&2
     return 1
   fi
 
@@ -302,19 +319,19 @@ sync_acl_to_joining_member() {
     if is_empty "$username" || equals "$username" "default" || grep -Fxq -- "$username" <<< "$source_users"; then
       continue
     fi
-    echo "deleting ACL user $username from $target, this sentinel does not have it."
+    echo "deleting ACL user $username from $target, $source_label does not have it."
     if ! output=$(sentinel_cli_argv "$target" ACL DELUSER "$username" 2>&1) || is_error_reply "$output"; then
       echo "Error: failed to delete ACL user $username on $target: $output" >&2
       return 1
     fi
   done <<< "$target_users"
 
-  # Without ACL SAVE the joining sentinel loses the users on its next restart.
+  # Without ACL SAVE the target loses the users on its next restart.
   if ! output=$(sentinel_cli_argv "$target" ACL SAVE 2>&1) || ! equals "$output" "OK"; then
     echo "Error: ACL SAVE failed on $target: $output" >&2
     return 1
   fi
-  echo "ACL of $target now matches this sentinel."
+  echo "ACL of $target now matches $source_label."
 }
 
 member_join() {

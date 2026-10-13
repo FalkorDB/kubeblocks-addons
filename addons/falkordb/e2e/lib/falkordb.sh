@@ -154,6 +154,77 @@ fdb_sentinel_relax_failover_cooldown() {
   done
 }
 
+# fdb_sentinel_master_count <namespace> <pod>
+# Prints how many masters the sentinel monitors. Unlike
+# fdb_assert_sentinel_monitoring it does not treat zero as a failure, so it can
+# assert that a sentinel monitors nothing. Fails when the sentinel cannot answer:
+# an unreachable sentinel must not pass for one that monitors nothing.
+fdb_sentinel_master_count() {
+  local namespace="$1" pod="$2" reply status=0
+  reply="$(fdb_sentinel_cli "$namespace" "$pod" SENTINEL masters 2>&1)" || status=$?
+  reply="$(echo "$reply" | tr -d '\r')"
+  if [ "$status" -ne 0 ]; then
+    fdb_fail "$pod could not be asked for SENTINEL masters (exit $status): $reply"
+    return 1
+  fi
+  case "$reply" in
+    *WRONGPASS* | *NOAUTH* | *NOPERM* | *"ERR "* | *"Error:"* | *"Could not connect"* | *"Connection refused"*)
+      fdb_fail "$pod did not answer SENTINEL masters: $reply"
+      return 1
+      ;;
+  esac
+  echo "$reply" | grep -c '^name$' || true
+}
+
+# fdb_sentinel_master_addr <namespace> <pod> <master>
+# Prints `<host> <port>` of the master the sentinel monitors under that name, and
+# fails when it does not monitor it or cannot answer. Anything but exactly a host
+# and a numeric port is a failure, so two pods failing the same way never compare
+# equal.
+fdb_sentinel_master_addr() {
+  local namespace="$1" pod="$2" master="$3" addr status=0 port
+  addr="$(fdb_sentinel_cli "$namespace" "$pod" SENTINEL get-master-addr-by-name "$master" 2>&1)" || status=$?
+  addr="$(echo "$addr" | tr -d '\r' | paste -sd' ' -)"
+  if [ "$status" -ne 0 ]; then
+    fdb_fail "$pod could not be asked for the address of $master (exit $status): $addr"
+    return 1
+  fi
+  port="${addr#* }"
+  case "$port" in
+    '' | *[!0-9]*) port="" ;;
+  esac
+  if [ "$(echo "$addr" | wc -w)" -ne 2 ] || [ -z "$port" ]; then
+    fdb_fail "$pod does not report an address for $master: ${addr:-<empty reply>}"
+    return 1
+  fi
+  echo "$addr"
+}
+
+# fdb_assert_sentinel_user <namespace> <pod> <user> <password>
+# Fails unless the sentinel knows the user and accepts its password. Listing the
+# user alone would also pass for one whose password was lost.
+fdb_assert_sentinel_user() {
+  local namespace="$1" pod="$2" user="$3" password="$4" users out
+  users="$(fdb_sentinel_cli "$namespace" "$pod" ACL USERS 2>&1 | tr -d '\r')"
+  if ! echo "$users" | grep -qx "$user"; then
+    fdb_fail "$pod does not know $user, users are: $users"
+    return 1
+  fi
+  # The password goes over stdin into REDISCLI_AUTH, so it is in no process's
+  # arguments, neither kubectl's here nor sh's or redis-cli's in the pod.
+  out="$(printf '%s\n' "$password" | kubectl exec -i -n "$namespace" "$pod" -c "$FDB_SENTINEL_CONTAINER" -- \
+    sh -c 'IFS= read -r REDISCLI_AUTH; export REDISCLI_AUTH
+      exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" --user "$1" '"$FDB_CLI_FLAGS"' PING' \
+    _ "$user" 2>&1 | tr -d '\r')"
+  case "$out" in
+    PONG) fdb_log "$user authenticated against $pod" ;;
+    *)
+      fdb_fail "$user could not authenticate against $pod: $out"
+      return 1
+      ;;
+  esac
+}
+
 # fdb_pods <namespace> <cluster> <component>
 # Prints the pod names of a component, one per line, in ordinal order.
 fdb_pods() {

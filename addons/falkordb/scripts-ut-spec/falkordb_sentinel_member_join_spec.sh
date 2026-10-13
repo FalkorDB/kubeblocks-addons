@@ -82,6 +82,35 @@ Describe "FalkorDB Sentinel Member Join Script Tests"
   }
   After 'un_setup'
 
+  Describe "sentinel_cli()"
+    # Runs the real sentinel_cli against a redis-cli that reports what it got.
+    real_sentinel_cli_setup() {
+      unset -f sentinel_cli
+      # shellcheck disable=SC1091
+      __SOURCED__=1 source ../scripts/falkordb-sent-member-join.sh
+      # the source resets the script globals, put back what init set.
+      ut_mode="true"
+      redis_sentinel_real_conf="./redis-sentinel.conf"
+      redis-cli() { echo "REDISCLI_AUTH=${REDISCLI_AUTH-<unset>} stdin=$(cat)"; }
+    }
+    Before 'real_sentinel_cli_setup'
+    After 'unset -f redis-cli; unset REDISCLI_AUTH'
+
+    It "passes the sentinel password through REDISCLI_AUTH"
+      SENTINEL_PASSWORD="s3cret"
+      When call sentinel_cli "fdb-falkordb-sent-0" "ping"
+      The output should eq "REDISCLI_AUTH=s3cret stdin=ping"
+    End
+
+    # an empty REDISCLI_AUTH makes redis-cli send AUTH "", which a password-less sentinel rejects.
+    It "does not set REDISCLI_AUTH without a sentinel password"
+      unset SENTINEL_PASSWORD
+      export REDISCLI_AUTH="inherited"
+      When call sentinel_cli "fdb-falkordb-sent-0" "ping"
+      The output should eq "REDISCLI_AUTH=<unset> stdin=ping"
+    End
+  End
+
   Describe "monitored_master_names()"
     It "lists every monitored master"
       When call monitored_master_names
