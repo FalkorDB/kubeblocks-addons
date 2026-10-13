@@ -88,6 +88,9 @@ Describe "FalkorDB Sentinel Member Join Script Tests"
       unset -f sentinel_cli
       # shellcheck disable=SC1091
       __SOURCED__=1 source ../scripts/falkordb-sent-member-join.sh
+      # the source resets the script globals, put back what init set.
+      ut_mode="true"
+      redis_sentinel_real_conf="./redis-sentinel.conf"
       redis-cli() { echo "REDISCLI_AUTH=${REDISCLI_AUTH-<unset>} stdin=$(cat)"; }
     }
     Before 'real_sentinel_cli_setup'
