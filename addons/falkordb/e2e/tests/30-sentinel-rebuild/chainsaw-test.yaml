@@ -248,33 +248,18 @@ spec:
 
               # The account came back, and with its password rather than as an
               # empty shell.
-              users="$(fdb_sentinel_cli "$NAMESPACE" "$target" ACL USERS | tr -d '\r')"
-              case "$users" in
-                *e2e-sent*) fdb_log "$target knows e2e-sent again" ;;
-                *)
-                  fdb_fail "$target does not know e2e-sent, users are: $users"
-                  exit 1
-                  ;;
-              esac
-              out="$(kubectl exec -n "$NAMESPACE" "$target" -c falkordb-sent -- \
-                sh -c 'exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" --user e2e-sent --pass sent-pass --no-auth-warning PING' \
-                2>&1 | tr -d '\r')"
-              case "$out" in
-                *PONG*) fdb_log "e2e-sent authenticated against $target" ;;
-                *)
-                  fdb_fail "e2e-sent could not authenticate against $target: $out"
-                  exit 1
-                  ;;
-              esac
+              fdb_assert_sentinel_user "$NAMESPACE" "$target" e2e-sent sent-pass
 
               # Discovery runs over the master's hello channel, which the rebuilt
               # sentinel only joins once it monitors the master.
               fdb_retry "$target to discover the other sentinels" \
                 fdb_assert_sentinel_peers "$NAMESPACE" "$target" 2
 
-              # The ops must leave the healthy sentinels alone.
+              # The ops must leave the healthy sentinels alone: the ACL is copied
+              # from them, never onto them.
               for pod in $(fdb_pods "$NAMESPACE" fdb-rsent falkordb-sent); do
                 fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+                fdb_assert_sentinel_user "$NAMESPACE" "$pod" e2e-sent sent-pass
               done
       catch:
         - events: {}
