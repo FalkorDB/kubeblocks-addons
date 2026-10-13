@@ -370,11 +370,24 @@ start_redis_server() {
   local exec_cmd
   exec_cmd=$(build_redis_server_start_cmd)
   echo "Starting falkordb server cmd: $exec_cmd"
+  # Each server line is tagged "[falkordb] ", replacing redis's own pid/role/timestamp
+  # prefix when present. Trailing carriage returns are dropped: `script` runs the
+  # server on a pty, which turns every "\n" into "\r\n" (and the INFO section of a
+  # crash report, already "\r\n", into "\r\r\n"), leaving stray ^M in the logs.
+  local log_format='s/\r+$//; s/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ //; s/^/[falkordb] /'
+  local server_status
   if command -v script >/dev/null 2>&1; then
-    script -q -f -e -c "$exec_cmd" /dev/null 2>&1 | sed -u -E 's/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ /[falkordb] /; t; s/^/[falkordb] /'
+    script -q -f -e -c "$exec_cmd" /dev/null 2>&1 | sed -u -E "$log_format"
+    server_status=${PIPESTATUS[0]}
   else
-    eval "$exec_cmd" 2>&1 | sed -u -E 's/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ /[falkordb] /; t; s/^/[falkordb] /'
+    eval "$exec_cmd" 2>&1 | sed -u -E "$log_format"
+    server_status=${PIPESTATUS[0]}
   fi
+  # A pipeline's status is that of its last command (sed), which would hide a
+  # crashed server behind exit code 0. Propagate the server's own status so the
+  # container exits non-zero and kubelet records the failure and restarts it.
+  echo "falkordb server exited with status $server_status"
+  return "$server_status"
 }
 
 # TODO: if instanceTemplate is specified, the pod service could not be parsed from the pod ordinal.
