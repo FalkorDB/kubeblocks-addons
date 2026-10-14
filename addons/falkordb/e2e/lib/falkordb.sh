@@ -533,48 +533,6 @@ fdb_custom_ops_logs() {
   done
 }
 
-# fdb_assert_single_rebalance_leader <namespace>
-# Fails unless exactly one falkordb-cluster-rebalance Job ran the rebalance and
-# every other one stood down.
-#
-# KubeBlocks runs the action once per shard, all at once. Two jobs that both
-# think they lead plan their moves from the same slot map and then migrate the
-# same slots against each other; that usually still ends in a covered slot map,
-# so the slot assertions alone can miss it. The job logs cannot.
-#
-# Finished Jobs may already have been garbage collected. Only an empty Job
-# listing is taken to mean that; a listing or a log that cannot be read, or Jobs
-# whose logs carry neither marker, fail the check instead of skipping it.
-fdb_assert_single_rebalance_leader() {
-  local namespace="$1" jobs job log logs="" leaders followers
-  if ! jobs="$(kubectl get jobs -n "$namespace" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"; then
-    fdb_fail "could not list the Jobs in $namespace"
-    return 1
-  fi
-  if [ -z "$jobs" ]; then
-    fdb_log "no Jobs left in $namespace, skipping the rebalance leader count"
-    return 0
-  fi
-  for job in $jobs; do
-    if ! log="$(kubectl logs -n "$namespace" "job/$job" --all-containers --tail=200 2>&1)"; then
-      fdb_fail "could not read the logs of job/$job: $log"
-      return 1
-    fi
-    logs="$logs
-=== $job ===
-$log"
-  done
-  leaders="$(echo "$logs" | grep -c 'rebalance falkordb cluster slots via node' || true)"
-  followers="$(echo "$logs" | grep -c 'is not the rebalance leader' || true)"
-  if [ "$leaders" -ne 1 ]; then
-    fdb_fail "$leaders rebalance Jobs ran the rebalance, expected exactly 1:"
-    echo "$logs" >&2
-    return 1
-  fi
-  fdb_log "exactly one rebalance Job led, $followers stood down"
-}
-
 # fdb_shard_count <namespace> <cluster>
 # Prints the number of shard Components currently belonging to the cluster.
 fdb_shard_count() {

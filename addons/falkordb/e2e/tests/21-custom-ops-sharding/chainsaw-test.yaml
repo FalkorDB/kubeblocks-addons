@@ -12,12 +12,12 @@ spec:
     nothing else - the podInfoExtractor env wiring, the sharding-name lookup and
     the scripts they mount were all unverified.
 
-    Rebalance is the riskier of the two. KubeBlocks runs it once per shard, all
-    at the same time, and only the shard whose primary has the smallest node ID
-    may move slots; the others have to stand down. A rebalance that moves slots
-    and gives up half way leaves the cluster with holes in its keyspace, so the
-    assertions below check the slot map and the data rather than the
-    OpsRequest phase alone.
+    Rebalance is the riskier of the two. KubeBlocks runs it as a single Job
+    for the whole sharding, on whichever pod comes first, and a Job that exits
+    0 without moving anything still makes the OpsRequest Succeed. A rebalance
+    that moves slots and gives up half way leaves the cluster with holes in
+    its keyspace. So the assertions below check the slot map and the data
+    rather than the OpsRequest phase alone.
 
     A freshly created cluster is already balanced, and redis-cli does nothing
     at all on a balanced cluster, so a rebalance run there passes whether or
@@ -155,7 +155,6 @@ spec:
               . "$E2E_LIB_DIR/falkordb.sh"
 
               fdb_assert_shard_count "$NAMESPACE" fdb-cops shard 3
-              fdb_assert_single_rebalance_leader "$NAMESPACE"
 
               # Every node has to agree the slot map is whole. Checking a single
               # entry point is not enough: a node that was migrated away from

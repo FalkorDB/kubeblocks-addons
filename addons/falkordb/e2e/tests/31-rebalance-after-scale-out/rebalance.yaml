@@ -6,8 +6,8 @@ spec:
   clusterName: fdb-rebal
   type: Custom
   custom:
-    # `shard` is the sharding name, so the action runs once for each of the
-    # four shards, the one added by the scale-out included.
+    # `shard` is the sharding name. KubeBlocks runs the action once for the
+    # whole sharding, on the first available pod of any of the four shards.
     opsDefinitionName: falkordb-cluster-rebalance
     components:
       - componentName: shard

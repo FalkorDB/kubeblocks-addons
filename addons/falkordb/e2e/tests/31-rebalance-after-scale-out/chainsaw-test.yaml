@@ -13,9 +13,9 @@ spec:
     rebalance OpsDefinition after a scale-out, which differs from
     21-custom-ops-sharding in two ways. The shard to fill owns no slots at
     all, and `redis-cli --cluster rebalance` skips such a primary unless it is
-    passed --cluster-use-empty-masters. And the action now runs once for each
-    of four shards, the new one included, whose primary takes part in the
-    leader election like any other even though it serves nothing.
+    passed --cluster-use-empty-masters. And KubeBlocks runs the action as a
+    single Job on whichever pod of the four shards comes first, so the Job has
+    to fill a shard that is usually not its own.
 
     A primary that joined but owns nothing is what a scale-out whose reshard
     never completed leaves behind, and it is also what anyone who added a
@@ -181,7 +181,6 @@ spec:
               . "$E2E_LIB_DIR/falkordb.sh"
 
               fdb_assert_shard_count "$NAMESPACE" fdb-rebal shard 4
-              fdb_assert_single_rebalance_leader "$NAMESPACE"
 
               for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-rebal shard); do
                 fdb_retry "$pod to report a complete slot map" \
