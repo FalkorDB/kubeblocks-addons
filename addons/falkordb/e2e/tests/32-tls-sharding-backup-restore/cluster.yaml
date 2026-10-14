@@ -1,0 +1,42 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-shtbk
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  topology: cluster
+  shardings:
+    - name: shard
+      shardingDef: falkordb-cluster
+      shards: 3
+      template:
+        name: falkordb
+        disableExporter: true
+        replicas: 1
+        tls: true
+        # One CA for every shard, for the reason given in 19-tls-sharding: the
+        # per-Component CAs KubeBlocks would issue cannot validate each other
+        # on the cluster bus.
+        issuer:
+          name: UserProvided
+          secretRef:
+            name: fdb-shtbk-tls
+            ca: ca.crt
+            cert: tls.crt
+            key: tls.key
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        volumeClaimTemplates:
+          - name: data
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 1Gi
