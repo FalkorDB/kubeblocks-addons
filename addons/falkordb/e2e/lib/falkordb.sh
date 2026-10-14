@@ -485,9 +485,12 @@ fdb_assert_slots_balanced() {
 fdb_assert_no_open_slots() {
   local namespace="$1" pod="$2" nodes open
   # Read the map first, so a failed CLUSTER NODES is not mistaken for a map
-  # with no migration in it.
-  if ! nodes="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r')" || [ -z "$nodes" ]; then
-    fdb_fail "$pod did not answer CLUSTER NODES"
+  # with no migration in it. redis-cli exits 0 on an error reply such as
+  # NOAUTH, so the exit status is not enough: a real map always has the
+  # node's own `myself` line.
+  nodes="$(fdb_cli "$namespace" "$pod" CLUSTER NODES 2>&1 | tr -d '\r')" || true
+  if ! echo "$nodes" | awk '$3 ~ /myself/ {found = 1} END {exit !found}'; then
+    fdb_fail "$pod did not answer CLUSTER NODES: ${nodes:-<empty reply>}"
     return 1
   fi
   open="$(echo "$nodes" | grep '\[' || true)"
