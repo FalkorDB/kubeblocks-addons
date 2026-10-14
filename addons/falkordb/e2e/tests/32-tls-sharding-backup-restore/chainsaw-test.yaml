@@ -301,6 +301,16 @@ spec:
               fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtbk-post 100
       catch:
         - events: {}
+        # A restore Job that exits 0 without writing anything lets the restore
+        # step pass, so its logs are only collected here, where the empty
+        # keyspace shows up.
+        - script:
+            content: |
+              for job in $(kubectl get jobs -n "$NAMESPACE" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+                echo "=== $job ==="
+                kubectl logs -n "$NAMESPACE" "job/$job" --all-containers --tail=200 || true
+              done
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-shtbk-r
             tail: 200
