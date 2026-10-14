@@ -18,6 +18,12 @@ spec:
     and gives up half way leaves the cluster with holes in its keyspace, so the
     assertions below check the slot map and the data rather than the
     OpsRequest phase alone.
+
+    A freshly created cluster is already balanced, and redis-cli does nothing
+    at all on a balanced cluster, so a rebalance run there passes whether or
+    not it works. The scenario skews the slot map first, moving 3000 slots
+    from one primary to another, and then requires the rebalance to even it
+    out again.
   steps:
     - name: create the sharded cluster
       try:
@@ -59,6 +65,64 @@ spec:
             selector: app.kubernetes.io/instance=fdb-cops
             tail: 200
 
+    - name: skew the slot map so the rebalance has work to do
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-cops shard)"
+              nodes="$(fdb_primary_slots "$NAMESPACE" "$pod")"
+              donor="$(echo "$nodes" | awk 'NR == 1 {print $1}')"
+              recipient="$(echo "$nodes" | awk 'NR == 2 {print $1}')"
+              echo "$donor" > "$(fdb_state_dir)/donor"
+
+              # 3000 slots leaves the donor with under half its share and the
+              # recipient with over one and a half, far past the 2% redis-cli
+              # tolerates before it considers a cluster unbalanced. The keys
+              # in those slots move with them, so the data checks below cover
+              # two migrations of the same slots, not one.
+              fdb_log "moving 3000 slots from $donor to $recipient"
+              if ! out="$(fdb_cluster_manager "$NAMESPACE" "$pod" reshard \
+                --cluster-from "$donor" --cluster-to "$recipient" \
+                --cluster-slots 3000 --cluster-yes 2>&1)"; then
+                echo "$out" | tail -50 >&2
+                fdb_fail "could not move slots from $donor to $recipient"
+                exit 1
+              fi
+
+              fdb_retry "the reshard to close every slot it opened" \
+                fdb_assert_no_open_slots "$NAMESPACE" "$pod"
+              fdb_retry "all 16384 slots to be covered after the reshard" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              owned="$(fdb_node_slots "$NAMESPACE" "$pod" "$donor")"
+              if [ "$owned" -gt 2500 ]; then
+                fdb_fail "$donor still owns $owned slots after giving 3000 away"
+                exit 1
+              fi
+              # Without this, everything after the rebalance would pass just as
+              # well if the rebalance had never run.
+              if fdb_assert_slots_balanced "$NAMESPACE" "$pod" 3 >/dev/null 2>&1; then
+                fdb_fail "the slot map is still balanced, the rebalance would have nothing to do:"
+                fdb_primary_slots "$NAMESPACE" "$pod" >&2
+                exit 1
+              fi
+              fdb_log "the slot map is skewed:"
+              fdb_primary_slots "$NAMESPACE" "$pod"
+
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-cops 200
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-cops
+            tail: 200
+
     - name: run the rebalance custom ops
       try:
         - apply:
@@ -75,14 +139,11 @@ spec:
         # a redis-cli failure is visible; the OpsRequest just reports Failed.
         - script:
             content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
               kubectl get jobs -n "$NAMESPACE" -o wide
-              for job in $(kubectl get jobs -n "$NAMESPACE" \
-                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
-                echo "=== $job ==="
-                kubectl logs -n "$NAMESPACE" "job/$job" --all-containers --tail=100 || true
-              done
+              fdb_custom_ops_logs "$NAMESPACE"
 
-    - name: the rebalance left a complete, readable cluster
+    - name: the rebalance evened out the slots and left a complete, readable cluster
       try:
         - script:
             env:
@@ -94,6 +155,7 @@ spec:
               . "$E2E_LIB_DIR/falkordb.sh"
 
               fdb_assert_shard_count "$NAMESPACE" fdb-cops shard 3
+              fdb_assert_single_rebalance_leader "$NAMESPACE"
 
               # Every node has to agree the slot map is whole. Checking a single
               # entry point is not enough: a node that was migrated away from
@@ -101,11 +163,18 @@ spec:
               for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-cops shard); do
                 fdb_retry "$pod to report a complete slot map" \
                   fdb_assert_slots_covered "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see no slot left in migration" \
+                  fdb_assert_no_open_slots "$NAMESPACE" "$pod"
                 fdb_retry "$pod to see every shard own its slots after the rebalance" \
                   fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
+                fdb_retry "$pod to see the slots evenly balanced" \
+                  fdb_assert_slots_balanced "$NAMESPACE" "$pod" 3
               done
 
               pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-cops shard)"
+              donor="$(cat "$(fdb_state_dir)/donor")"
+              owned="$(fdb_node_slots "$NAMESPACE" "$pod" "$donor")"
+              fdb_log "$donor, which was left with under 2500 slots, owns $owned again"
               fdb_retry "every key to survive the rebalance" \
                 fdb_verify_keys "$NAMESPACE" "$pod" e2e-cops 200
 
