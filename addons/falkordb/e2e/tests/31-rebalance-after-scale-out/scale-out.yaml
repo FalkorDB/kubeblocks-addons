@@ -1,0 +1,10 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-rebal-scale-out
+spec:
+  clusterName: fdb-rebal
+  type: HorizontalScaling
+  horizontalScaling:
+    - componentName: shard
+      shards: 4
