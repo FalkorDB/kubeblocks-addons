@@ -483,8 +483,14 @@ fdb_assert_slots_balanced() {
 # fdb_assert_slots_covered passes, but keys in that slot answer with ASK
 # redirects and the next reshard refuses to start until someone runs --cluster fix.
 fdb_assert_no_open_slots() {
-  local namespace="$1" pod="$2" open
-  open="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' | grep '\[' || true)"
+  local namespace="$1" pod="$2" nodes open
+  # Read the map first, so a failed CLUSTER NODES is not mistaken for a map
+  # with no migration in it.
+  if ! nodes="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r')" || [ -z "$nodes" ]; then
+    fdb_fail "$pod did not answer CLUSTER NODES"
+    return 1
+  fi
+  open="$(echo "$nodes" | grep '\[' || true)"
   if [ -n "$open" ]; then
     fdb_fail "$pod still sees slots in migration:"
     echo "$open" >&2
@@ -514,6 +520,7 @@ fdb_cluster_manager() {
 # fdb_custom_ops_logs <namespace>
 # Prints the logs of every Job in the namespace. Custom OpsRequests run their
 # actions as Jobs, and the logs are the only record of what each one did.
+# Diagnostics only: it keeps going past a Job whose logs cannot be read.
 fdb_custom_ops_logs() {
   local namespace="$1" job
   for job in $(kubectl get jobs -n "$namespace" \
@@ -532,17 +539,31 @@ fdb_custom_ops_logs() {
 # same slots against each other; that usually still ends in a covered slot map,
 # so the slot assertions alone can miss it. The job logs cannot.
 #
-# Finished Jobs may already have been garbage collected, in which case there is
-# nothing to count and this only logs that.
+# Finished Jobs may already have been garbage collected. Only an empty Job
+# listing is taken to mean that; a listing or a log that cannot be read, or Jobs
+# whose logs carry neither marker, fail the check instead of skipping it.
 fdb_assert_single_rebalance_leader() {
-  local namespace="$1" logs leaders followers
-  logs="$(fdb_custom_ops_logs "$namespace")"
-  leaders="$(echo "$logs" | grep -c 'rebalance falkordb cluster slots via node' || true)"
-  followers="$(echo "$logs" | grep -c 'is not the rebalance leader' || true)"
-  if [ "$leaders" -eq 0 ] && [ "$followers" -eq 0 ]; then
-    fdb_log "no rebalance Job logs left to inspect, skipping the leader count"
+  local namespace="$1" jobs job log logs="" leaders followers
+  if ! jobs="$(kubectl get jobs -n "$namespace" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"; then
+    fdb_fail "could not list the Jobs in $namespace"
+    return 1
+  fi
+  if [ -z "$jobs" ]; then
+    fdb_log "no Jobs left in $namespace, skipping the rebalance leader count"
     return 0
   fi
+  for job in $jobs; do
+    if ! log="$(kubectl logs -n "$namespace" "job/$job" --all-containers --tail=200 2>&1)"; then
+      fdb_fail "could not read the logs of job/$job: $log"
+      return 1
+    fi
+    logs="$logs
+=== $job ===
+$log"
+  done
+  leaders="$(echo "$logs" | grep -c 'rebalance falkordb cluster slots via node' || true)"
+  followers="$(echo "$logs" | grep -c 'is not the rebalance leader' || true)"
   if [ "$leaders" -ne 1 ]; then
     fdb_fail "$leaders rebalance Jobs ran the rebalance, expected exactly 1:"
     echo "$logs" >&2
