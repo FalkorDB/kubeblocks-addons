@@ -397,19 +397,7 @@ fdb_assert_shards_own_slots() {
     return 1
   fi
 
-  # CLUSTER NODES: <id> <addr> <flags> <master> <ping> <pong> <epoch> <link> <slot>...
-  # A slot field is a single slot or a range; [slot-<-id] entries are in-flight
-  # migrations and do not count as owned.
-  nodes="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
-    awk '$3 ~ /master/ && $3 !~ /fail/ {
-      owned = 0
-      for (i = 9; i <= NF; i++) {
-        if ($i ~ /^\[/) continue
-        n = split($i, r, "-")
-        owned += (n == 2) ? r[2] - r[1] + 1 : 1
-      }
-      print $2, owned
-    }')"
+  nodes="$(fdb_primary_slots "$namespace" "$pod")"
   primaries="$(echo "$nodes" | grep -c . || true)"
   if [ "$primaries" -ne "$expected" ]; then
     fdb_fail "found $primaries primaries, expected $expected:"
@@ -417,12 +405,132 @@ fdb_assert_shards_own_slots() {
     return 1
   fi
   floor=$((16384 / expected - 16384 / expected / 100))
-  if echo "$nodes" | awk -v floor="$floor" '$2 < floor {bad = 1} END {exit !bad}'; then
+  if echo "$nodes" | awk -v floor="$floor" '$3 < floor {bad = 1} END {exit !bad}'; then
     fdb_fail "a primary owns fewer than $floor slots:"
     echo "$nodes" >&2
     return 1
   fi
   fdb_log "all $expected primaries own at least $floor slots each"
+}
+
+# fdb_primary_slots <namespace> <pod>
+# Prints `<node id> <address> <slots owned>` for every healthy primary the pod
+# knows about, one per line, including primaries that own no slot at all.
+fdb_primary_slots() {
+  local namespace="$1" pod="$2"
+  # CLUSTER NODES: <id> <addr> <flags> <master> <ping> <pong> <epoch> <link> <slot>...
+  # A slot field is a single slot or a range; [slot-<-id] entries are in-flight
+  # migrations and do not count as owned.
+  fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
+    awk '$3 ~ /master/ && $3 !~ /fail/ {
+      owned = 0
+      for (i = 9; i <= NF; i++) {
+        if ($i ~ /^\[/) continue
+        n = split($i, r, "-")
+        owned += (n == 2) ? r[2] - r[1] + 1 : 1
+      }
+      print $1, $2, owned
+    }'
+}
+
+# fdb_node_slots <namespace> <pod> <node id>
+# Prints how many slots the given primary owns, as <pod> sees it. Fails when the
+# pod knows no healthy primary with that ID.
+fdb_node_slots() {
+  local namespace="$1" pod="$2" id="$3" owned
+  owned="$(fdb_primary_slots "$namespace" "$pod" | awk -v id="$id" '$1 == id {print $3; exit}')"
+  if [ -z "$owned" ]; then
+    fdb_fail "$pod knows no healthy primary $id"
+    return 1
+  fi
+  echo "$owned"
+}
+
+# fdb_assert_slots_balanced <namespace> <pod> <expected primaries>
+# Fails unless exactly <expected primaries> primaries share the slots evenly:
+# the fullest and the emptiest may differ by at most 1% of a share.
+#
+# fdb_assert_shards_own_slots only puts a floor under each primary, so one
+# primary can still hold far more than its share. Once `--cluster rebalance`
+# decides to move anything it moves every primary to its exact share, leaving
+# them within a slot or two of each other; the 1% only absorbs that rounding.
+fdb_assert_slots_balanced() {
+  local namespace="$1" pod="$2" expected="$3" nodes primaries spread limit
+  nodes="$(fdb_primary_slots "$namespace" "$pod")"
+  primaries="$(echo "$nodes" | grep -c . || true)"
+  if [ "$primaries" -ne "$expected" ]; then
+    fdb_fail "found $primaries primaries, expected $expected:"
+    echo "$nodes" >&2
+    return 1
+  fi
+  spread="$(echo "$nodes" | awk 'NR == 1 {min = $3; max = $3}
+    {if ($3 < min) min = $3; if ($3 > max) max = $3}
+    END {print max - min}')"
+  limit=$((16384 / expected / 100))
+  if [ "$spread" -gt "$limit" ]; then
+    fdb_fail "primaries differ by $spread slots, more than the $limit a balanced cluster allows:"
+    echo "$nodes" >&2
+    return 1
+  fi
+  fdb_log "all $expected primaries are balanced to within $spread slots"
+}
+
+# fdb_assert_no_open_slots <namespace> <pod>
+# Fails while any slot is still marked migrating or importing.
+#
+# A slot migration that gives up half way leaves the slot open on both sides.
+# Every slot is still assigned, so the cluster reports ok and
+# fdb_assert_slots_covered passes, but keys in that slot answer with ASK
+# redirects and the next reshard refuses to start until someone runs --cluster fix.
+fdb_assert_no_open_slots() {
+  local namespace="$1" pod="$2" nodes open
+  # Read the map first, so a failed CLUSTER NODES is not mistaken for a map
+  # with no migration in it. redis-cli exits 0 on an error reply such as
+  # NOAUTH, so the exit status is not enough: a real map always has the
+  # node's own `myself` line.
+  nodes="$(fdb_cli "$namespace" "$pod" CLUSTER NODES 2>&1 | tr -d '\r')" || true
+  if ! echo "$nodes" | awk '$3 ~ /myself/ {found = 1} END {exit !found}'; then
+    fdb_fail "$pod did not answer CLUSTER NODES: ${nodes:-<empty reply>}"
+    return 1
+  fi
+  open="$(echo "$nodes" | grep '\[' || true)"
+  if [ -n "$open" ]; then
+    fdb_fail "$pod still sees slots in migration:"
+    echo "$open" >&2
+    return 1
+  fi
+  fdb_log "$pod sees no slot in migration"
+}
+
+# fdb_cluster_manager <namespace> <pod> <subcommand> [args...]
+# Runs `redis-cli --cluster <subcommand> <pod's node> [args...]` inside the pod,
+# addressing the node by the same FQDN the addon's own scripts use.
+#
+# This is how a scenario puts the slot map into a state the addon never leaves
+# it in by itself, to prove the addon's tooling copes with it.
+fdb_cluster_manager() {
+  local namespace="$1" pod="$2" subcommand="$3" flags
+  shift 3
+  # `-c` only changes how redis-cli follows redirects for a plain command; the
+  # cluster manager has no use for it. Any TLS flags are still needed.
+  flags="$(echo " $FDB_CLI_FLAGS " | sed 's/ -c / /g')"
+  kubectl exec -n "$namespace" "$pod" -c "$FDB_CONTAINER" -- \
+    sh -c 'sub="$1"; shift
+      REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" exec redis-cli '"$flags"' \
+        --cluster "$sub" "$POD_FQDN:$SERVICE_PORT" "$@"' _ "$subcommand" "$@"
+}
+
+# fdb_custom_ops_logs <namespace>
+# Prints the logs of every Job in the namespace. Custom OpsRequests run their
+# actions as Jobs, and the logs are the only record of what each one did.
+# Diagnostics only: it keeps going past a Job whose logs cannot be read.
+fdb_custom_ops_logs() {
+  local namespace="$1" job
+  for job in $(kubectl get jobs -n "$namespace" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+    echo "=== $job ==="
+    kubectl logs -n "$namespace" "job/$job" --all-containers --tail=200 2>&1 || true
+  done
 }
 
 # fdb_shard_count <namespace> <cluster>

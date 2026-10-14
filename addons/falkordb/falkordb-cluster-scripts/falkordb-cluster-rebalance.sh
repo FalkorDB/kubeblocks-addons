@@ -4,14 +4,16 @@
 # including primaries that own no slot yet, with `redis-cli --cluster
 # rebalance`. Run by the falkordb-cluster-rebalance OpsDefinition.
 #
-# The OpsRequest targets the sharding, and KubeBlocks runs the action once per
-# shard, all at the same time. Concurrent rebalances plan their moves from the
-# same slot map and then migrate the same slots against each other, so only
-# one of them may run: the job of the shard whose primary has the smallest node
-# ID. The leader is picked from the live CLUSTER NODES rather than from the
-# shard names in the pod env, which can lag behind after a scale-out or
-# scale-in and leave no shard thinking it is the leader. The other jobs exit
-# successfully without touching the cluster.
+# The OpsRequest targets the sharding, and with `multiPodSelectionPolicy: Any`
+# KubeBlocks runs the action exactly once for the whole sharding, on the first
+# available pod in name order across every shard (getTargetPods in
+# pkg/operations/custom/utils.go, the same in 1.0, 1.1 and 1.2). So this job is
+# the only one, and it rebalances the whole cluster through its own pod's
+# node, whichever shard that pod is in. An
+# earlier version let only the shard whose primary had the smallest node ID
+# act, on the assumption that every shard ran a job; with a single job that
+# made the rebalance a no-op that still reported success whenever the chosen
+# pod was in another shard.
 #
 # Self-contained on purpose: the ops pod does not mount the scripts ConfigMap,
 # so this file must not source /scripts/common.sh.
@@ -58,48 +60,6 @@ falkordb_cli() {
   fi
 }
 
-# Prints the node ID of the primary of the shard this job runs for: the node
-# itself when it is a primary, its primary when it is a replica.
-own_shard_primary_id() {
-  local cluster_nodes="$1"
-  echo "$cluster_nodes" | awk '$3 ~ /myself/ {
-    if ($3 ~ /master/) { print $1 } else { print $4 }
-    exit
-  }'
-}
-
-# Prints the smallest node ID among the healthy primaries: flagged master,
-# not failing, and with a connected cluster-bus link (field 8). A primary that
-# lost its link must not win, or every job could stand down while the leader's
-# own job, if any, cannot reach the cluster.
-leader_primary_id() {
-  local cluster_nodes="$1"
-  echo "$cluster_nodes" \
-    | awk '$3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" { print $1 }' \
-    | LC_ALL=C sort | head -n 1
-}
-
-is_rebalance_leader() {
-  local host="$1"
-  local port="$2"
-  local cluster_nodes own_id leader_id
-  if ! cluster_nodes=$(falkordb_cli -h "$host" -p "$port" cluster nodes) || [ -z "$cluster_nodes" ]; then
-    echo "Error: failed to read CLUSTER NODES from $host:$port: $cluster_nodes" >&2
-    return 2
-  fi
-  own_id=$(own_shard_primary_id "$cluster_nodes")
-  leader_id=$(leader_primary_id "$cluster_nodes")
-  if [ -z "$own_id" ] || [ -z "$leader_id" ]; then
-    echo "Error: could not find the primaries in CLUSTER NODES from $host:$port." >&2
-    return 2
-  fi
-  if [ "$own_id" != "$leader_id" ]; then
-    echo "shard $CURRENT_SHARD_COMPONENT_NAME (primary $own_id) is not the rebalance leader, primary $leader_id's shard runs it."
-    return 1
-  fi
-  return 0
-}
-
 do_rebalance() {
   local node_endpoint="$1"
   echo "rebalance falkordb cluster slots via node: $node_endpoint"
@@ -107,16 +67,7 @@ do_rebalance() {
 }
 
 rebalance() {
-  local node_endpoint host port rc=0
-  node_endpoint=$(build_node_endpoint)
-  host="${node_endpoint%:*}"
-  port="${node_endpoint##*:}"
-  is_rebalance_leader "$host" "$port" || rc=$?
-  case "$rc" in
-    0) do_rebalance "$node_endpoint" ;;
-    1) return 0 ;;
-    *) return 1 ;;
-  esac
+  do_rebalance "$(build_node_endpoint)"
 }
 
 # This is magic for shellspec ut framework.

@@ -1,0 +1,13 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-rebal-rebalance
+spec:
+  clusterName: fdb-rebal
+  type: Custom
+  custom:
+    # `shard` is the sharding name. KubeBlocks runs the action once for the
+    # whole sharding, on the first available pod of any of the four shards.
+    opsDefinitionName: falkordb-cluster-rebalance
+    components:
+      - componentName: shard

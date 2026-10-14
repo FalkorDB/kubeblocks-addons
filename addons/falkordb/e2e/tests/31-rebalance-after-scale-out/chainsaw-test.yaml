@@ -1,0 +1,217 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rebalance-after-scale-out
+spec:
+  description: >-
+    Scale a sharded cluster out from 3 to 4 shards, leave the new shard with no
+    slots, and prove the falkordb-cluster-rebalance custom ops hands it its
+    share.
+
+    The addon's own scale-out reshards slots onto the new shard, and
+    03-scale-sharding covers that path. What it leaves untested is the
+    rebalance OpsDefinition after a scale-out, which differs from
+    21-custom-ops-sharding in two ways. The shard to fill owns no slots at
+    all, and `redis-cli --cluster rebalance` skips such a primary unless it is
+    passed --cluster-use-empty-masters. And KubeBlocks runs the action as a
+    single Job on whichever pod of the four shards comes first, so the Job has
+    to fill a shard that is usually not its own.
+
+    A primary that joined but owns nothing is what a scale-out whose reshard
+    never completed leaves behind, and it is also what anyone who added a
+    node by hand ends up with. The addon never leaves a shard that way on its
+    own, so the scenario drains the new shard after the scale-out, with the
+    same `--cluster-weight <id>=0` rebalance the addon's scale-in uses.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebal
+            tail: 200
+
+    - name: the cluster forms and holds data
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-rebal shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-rebal shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
+
+              # The new shard is told apart by its primary's node ID, which is
+              # the one ID missing from this list.
+              fdb_primary_slots "$NAMESPACE" "$pod" | awk '{print $1}' \
+                > "$(fdb_state_dir)/primaries-before"
+
+              # Enough keys that every shard owns some of them, so slots that
+              # move without their keys cannot hide behind an empty shard.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-rebal 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-rebal 200
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebal
+            tail: 200
+
+    - name: scale out from 3 to 4 shards
+      try:
+        - apply:
+            file: scale-out.yaml
+        - assert:
+            file: assert-scale-out-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rebal-scale-out
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebal
+            tail: 200
+
+    - name: empty the new shard, as a scale-out whose reshard never completed would
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-rebal shard 4
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-rebal shard)"
+              fdb_retry "the scale-out to give the new shard its share" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 4
+
+              state="$(fdb_state_dir)"
+              new="$(fdb_primary_slots "$NAMESPACE" "$pod" | awk '{print $1}' |
+                grep -vxF -f "$state/primaries-before" || true)"
+              if [ "$(echo "$new" | grep -c . || true)" -ne 1 ]; then
+                fdb_fail "expected exactly one new primary, found: ${new:-none}"
+                fdb_primary_slots "$NAMESPACE" "$pod" >&2
+                exit 1
+              fi
+              echo "$new" > "$state/new-primary"
+
+              fdb_log "draining every slot off the new primary $new"
+              if ! out="$(fdb_cluster_manager "$NAMESPACE" "$pod" rebalance \
+                --cluster-weight "$new=0" --cluster-yes 2>&1)"; then
+                echo "$out" | tail -50 >&2
+                fdb_fail "could not drain the new primary $new"
+                exit 1
+              fi
+
+              fdb_retry "the drain to close every slot it opened" \
+                fdb_assert_no_open_slots "$NAMESPACE" "$pod"
+              fdb_retry "all 16384 slots to be covered after the drain" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+
+              # The new primary has to stay in the cluster, empty: gone, the
+              # rebalance would have no shard to fill.
+              owned="$(fdb_node_slots "$NAMESPACE" "$pod" "$new")"
+              if [ "$owned" -ne 0 ]; then
+                fdb_fail "the new primary $new still owns $owned slots"
+                exit 1
+              fi
+              # cluster_size only counts primaries that serve a slot, so it is
+              # back to three while the cluster still has four primaries.
+              size="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER INFO |
+                tr -d '\r' | awk -F: '/^cluster_size:/ {print $2; exit}')"
+              if [ "$size" != 3 ]; then
+                fdb_fail "cluster_size is '$size' after the drain, expected 3"
+                exit 1
+              fi
+              fdb_log "the new primary $new is in the cluster and owns no slot:"
+              fdb_primary_slots "$NAMESPACE" "$pod"
+
+              fdb_retry "every key to survive the drain" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-rebal 200
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebal
+            tail: 200
+
+    - name: run the rebalance custom ops
+      try:
+        - apply:
+            file: rebalance.yaml
+        - assert:
+            file: assert-rebalance-succeeded.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rebal-rebalance
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              kubectl get jobs -n "$NAMESPACE" -o wide
+              fdb_custom_ops_logs "$NAMESPACE"
+
+    - name: the new shard got its share and nothing was lost
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-rebal shard 4
+
+              for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-rebal shard); do
+                fdb_retry "$pod to report a complete slot map" \
+                  fdb_assert_slots_covered "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see no slot left in migration" \
+                  fdb_assert_no_open_slots "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see all four shards own their slots" \
+                  fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 4
+                fdb_retry "$pod to see the slots evenly balanced" \
+                  fdb_assert_slots_balanced "$NAMESPACE" "$pod" 4
+              done
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-rebal shard)"
+              new="$(cat "$(fdb_state_dir)/new-primary")"
+              owned="$(fdb_node_slots "$NAMESPACE" "$pod" "$new")"
+              fdb_log "the new primary $new, empty before the rebalance, owns $owned slots"
+
+              fdb_retry "every key to survive the rebalance" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-rebal 200
+
+              # Keys written now spread over all four shards, the refilled one
+              # included, so this also proves it serves writes for its slots.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-rebal-after 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-rebal-after 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rebal
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir
