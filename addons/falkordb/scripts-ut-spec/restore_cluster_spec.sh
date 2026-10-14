@@ -5,6 +5,13 @@
 # cases run the real script against stub datasafed and ape-dts binaries and
 # check the dts.ini it wrote and the status it exited with.
 Describe "FalkorDB sharded restore script"
+  # The script runs ape-dts under `timeout` in every case, so without it (or
+  # macOS's gtimeout, linked in below) every example would exit 127.
+  timeout_not_available() {
+    ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1
+  }
+  Skip if "neither timeout nor gtimeout is installed" timeout_not_available
+
   setup() {
     # Resolved before run_restore changes into the work directory.
     restore_script="$(cd ../dataprotection && pwd)/restore-cluster.sh"
