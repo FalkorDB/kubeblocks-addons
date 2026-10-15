@@ -57,6 +57,7 @@ dynamicParameters:
   - cluster-allow-pubsubshard-when-down
   - cluster-allow-reads-when-down
   - cluster-allow-replica-migration
+  - cluster-migration-barrier
   - cluster-node-timeout
   - cluster-replica-validity-factor
   - cluster-require-full-coverage
