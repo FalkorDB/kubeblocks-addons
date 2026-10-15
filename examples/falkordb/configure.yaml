@@ -17,7 +17,7 @@ spec:
       # Represents the name of the parameter that is to be updated.
     - key: maxclients
       # Represents the parameter values that are to be updated.
-      # If set to nil, the parameter defined by the Key field will be removed from the configuration file.
+      # KubeBlocks ignores a nil or empty value, so to empty a parameter set it to '""' instead.
       value: '10001'
   # Specifies the maximum number of seconds the OpsRequest will wait for its start conditions to be met before aborting. If set to 0 (default), the start conditions must be met immediately for the OpsRequest to proceed.
   preConditionDeadlineSeconds: 0

@@ -522,8 +522,11 @@ spec:
 
 A database reconfiguration is the process of modifying database parameters, settings, or configurations to improve performance, security, or availability. The reconfiguration can be either:
 
-- Dynamic: Applied without restart
-- Static: Requires database restart
+- Dynamic: Applied without restart, through `CONFIG SET` on every pod
+- Static: Requires database restart, the pods are restarted one by one
+- Immutable: Owned by the addon (data and ACL files, ports, TLS material, replication and cluster wiring, announced addresses) and refused by KubeBlocks
+
+Which parameters fall in each category is listed in [`config/falkordb-config-effect-scope.yaml`](https://github.com/FalkorDB/kubeblocks-addons/blob/main/addons/falkordb/config/falkordb-config-effect-scope.yaml). Any parameter that isn't listed there as dynamic or immutable is static.
 
 Reconfigure parameters with the specified components in the cluster:
 
@@ -548,7 +551,7 @@ spec:
       # Represents the name of the parameter that is to be updated.
     - key: maxclients
       # Represents the parameter values that are to be updated.
-      # If set to nil, the parameter defined by the Key field will be removed from the configuration file.
+      # KubeBlocks ignores a nil or empty value, so to empty a parameter set it to '""' instead.
       value: '10001'
   # Specifies the maximum number of seconds the OpsRequest will wait for its start conditions to be met before aborting. If set to 0 (default), the start conditions must be met immediately for the OpsRequest to proceed.
   preConditionDeadlineSeconds: 0
@@ -562,8 +565,10 @@ kubectl apply -f examples/falkordb/configure.yaml
 This example will change the `maxclients` to `10001` for the FalkorDB component.
 `maxclients` in FalkorDB specifies the maximum number of simultaneous client connections the server will accept. Once this limit is reached, FalkorDB will start rejecting new connections until existing clients disconnect.
 
-> [!CAUTION]
-> It is defined as a static parameter, which means the FalkorDB component will be restarted after the reconfiguration.
+> [!NOTE]
+> It is defined as a dynamic parameter, which means it is applied to the running servers without restarting the FalkorDB component.
+
+To empty a parameter whose default is empty, such as `notify-keyspace-events`, set its value to the quoted empty string `'""'`. KubeBlocks ignores a value that is really empty, and removing a parameter (a `nil` value) leaves the old value in place.
 
 To verify the reconfiguration, you can connect to the FalkorDB pod and check the configuration with the following command:
 
