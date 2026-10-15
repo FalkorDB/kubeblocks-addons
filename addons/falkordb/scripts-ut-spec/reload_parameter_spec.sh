@@ -76,6 +76,13 @@ Describe "FalkorDB Reload Parameter Script Tests"
       The contents of file "$redis_cli_log" should include 'CONFIG SET falkordbe.ldap_servers ""'
     End
 
+    It "empties the parameter when it is given without a value"
+      When call reload_redis_parameter "falkordbe.ldap_bind_dn_suffix"
+      The status should be success
+      The stdout should include "applied successfully"
+      The contents of file "$redis_cli_log" should include 'CONFIG SET falkordbe.ldap_bind_dn_suffix ""'
+    End
+
     It "escapes quotes and backslashes in the value"
       When call reload_redis_parameter "falkordbe.ldap_search_filter" '(cn="a\b")'
       The status should be success
@@ -153,12 +160,31 @@ Describe "FalkorDB Reload Parameter Script Tests"
       The contents of file "$redis_cli_log" should include 'CONFIG SET falkordbe.ldap_servers "ldap://ldap.example.com"'
     End
 
+    It "translates the empty string marker into an empty value"
+      export MOCK_ENV='falkordbe.ldap_bind_dn_suffix=""'
+      When call reload_parameters_from_environment
+      The status should be success
+      The stdout should include "Parameter falkordbe.ldap_bind_dn_suffix applied successfully"
+      The contents of file "$redis_cli_log" should include 'CONFIG SET falkordbe.ldap_bind_dn_suffix ""'
+      The contents of file "$redis_cli_log" should not include '\"\"'
+    End
+
     It "ignores KubeBlocks and container runtime variables"
       export MOCK_ENV="KB_POD_NAME=falkordb-0"
       When call reload_parameters_from_environment
       The status should be failure
       The stderr should include "reconfigure was invoked without any parameter to apply"
       The contents of file "$redis_cli_log" should not include "CONFIG SET"
+    End
+  End
+
+  Describe "entry point"
+    It "applies a single argument as a parameter without a value instead of reading the environment"
+      When run command bash ../scripts/reload-parameter.sh "falkordbe.ldap_servers"
+      The status should be success
+      The stdout should include "Parameter falkordbe.ldap_servers applied successfully"
+      The stderr should not include "without any parameter to apply"
+      The contents of file "$redis_cli_log" should include 'CONFIG SET falkordbe.ldap_servers ""'
     End
   End
 End
