@@ -1,8 +1,21 @@
+## Every redis.conf directive falls into one of three categories, which the
+## Admin API mirrors (FalkorDB/FalkorDB-Enterprise#323):
+##
+##   * immutableParameters: owned by the addon, its start scripts or KubeBlocks,
+##     and refused by KubeBlocks if a Reconfiguring operation tries to change
+##     them,
+##   * dynamicParameters: applied to the running server through CONFIG SET by
+##     the reconfigure action, without restarting the pods,
+##   * everything else: written to redis.conf and picked up by a rolling
+##     restart. staticParameters lists the ones the addon knows about.
+
 ## Parameters that only take effect after the server is restarted.
+##
+## Because dynamicParameters is non empty, KubeBlocks treats every parameter
+## that is not listed there as static anyway, so this list documents the known
+## restart-only directives rather than defining them.
 staticParameters:
-  - cluster-enabled
   - databases
-  - maxclients
   - io-threads
   - io-threads-do-reads
   - falkordbe.offload-path
@@ -15,14 +28,41 @@ staticParameters:
 ## regardless of the staticParameters list above, so any hot settable directive
 ## omitted from this list silently degrades into a rolling restart. That is why
 ## the enterprise module's `falkordbe.*` configs have to be enumerated here too.
+##
+## Directives whose name carries a subkey, such as `client-output-buffer-limit
+## normal`, are left out: they are restarted rather than risk a partial reload.
 dynamicParameters:
+  - acl-pubsub-default
   - acllog-max-len
+  - active-defrag-cycle-max
+  - active-defrag-cycle-min
+  - active-defrag-ignore-bytes
+  - active-defrag-max-scan-fields
+  - active-defrag-threshold-lower
+  - active-defrag-threshold-upper
+  - active-expire-effort
   - activedefrag
   - activerehashing
   - aof-disable-auto-gc
+  - aof-load-truncated
+  - aof-rewrite-incremental-fsync
   - aof-timestamp-enabled
+  - aof-use-rdb-preamble
   - appendfsync
   - appendonly
+  - auto-aof-rewrite-min-size
+  - auto-aof-rewrite-percentage
+  - busy-reply-threshold
+  - client-query-buffer-limit
+  - cluster-allow-pubsubshard-when-down
+  - cluster-allow-reads-when-down
+  - cluster-allow-replica-migration
+  - cluster-node-timeout
+  - cluster-replica-validity-factor
+  - cluster-require-full-coverage
+  - crash-log-enabled
+  - crash-memcheck-enabled
+  - dynamic-hz
   - falkordbe.evict-interval-ms
   - falkordbe.idle-threshold-ms
   - falkordbe.ldap_acl_fallback_enabled
@@ -60,28 +100,135 @@ dynamicParameters:
   - falkordbe.memory-pressure
   - hash-max-listpack-entries
   - hash-max-listpack-value
+  - hll-sparse-max-bytes
+  - hz
+  - jemalloc-bg-thread
+  - latency-monitor-threshold
   - latency-tracking
+  - latency-tracking-info-percentiles
+  - lazyfree-lazy-eviction
+  - lazyfree-lazy-expire
+  - lazyfree-lazy-server-del
+  - lazyfree-lazy-user-del
+  - lazyfree-lazy-user-flush
   - lfu-decay-time
   - lfu-log-factor
   - list-compress-depth
   - list-max-listpack-size
+  - loglevel
+  - maxclients
   - maxmemory
   - maxmemory-clients
+  - maxmemory-eviction-tenacity
   - maxmemory-policy
   - maxmemory-samples
   - min-replicas-max-lag
   - min-replicas-to-write
+  - no-appendfsync-on-rewrite
   - notify-keyspace-events
+  - oom-score-adj
+  - oom-score-adj-values
+  - proc-title-template
+  - propagation-error-behavior
   - proto-max-bulk-len
+  - rdb-del-sync-files
+  - rdb-save-incremental-fsync
+  - rdbchecksum
+  - rdbcompression
   - repl-backlog-size
   - repl-backlog-ttl
+  - repl-disable-tcp-nodelay
+  - repl-diskless-load
+  - repl-diskless-sync
+  - repl-diskless-sync-delay
+  - repl-diskless-sync-max-replicas
+  - repl-ping-replica-period
+  - repl-timeout
+  - replica-ignore-disk-write-errors
+  - replica-ignore-maxmemory
   - replica-lazy-flush
+  - replica-priority
+  - replica-read-only
+  - replica-serve-stale-data
+  - save
   - set-max-intset-entries
   - slowlog-log-slower-than
   - slowlog-max-len
+  - stop-writes-on-bgsave-error
   - stream-node-max-bytes
   - stream-node-max-entries
   - tcp-keepalive
   - timeout
+  - tracking-table-max-keys
   - zset-max-listpack-entries
   - zset-max-listpack-value
+
+## Parameters the addon owns and KubeBlocks refuses to change.
+##
+## They wire the pod into the deployment: the data and ACL files, the listening
+## ports and TLS material, replication and cluster topology, the announced
+## addresses, the default account's credentials, and the switches that open
+## MODULE and DEBUG to clients. The start scripts write most of them at boot,
+## so an override in redis.conf would either be ignored or break the pod. This
+## list matches the Admin API's ADDON_OWNED_SERVER_KEYS, which refuses the same
+## keys (and every `tls-*` and `*announce*` key) before they reach KubeBlocks.
+immutableParameters:
+  - aclfile
+  - appenddirname
+  - appendfilename
+  - bind
+  - cluster-announce-bus-port
+  - cluster-announce-hostname
+  - cluster-announce-human-nodename
+  - cluster-announce-ip
+  - cluster-announce-port
+  - cluster-announce-tls-port
+  - cluster-config-file
+  - cluster-enabled
+  - cluster-port
+  - cluster-preferred-endpoint-type
+  - daemonize
+  - dbfilename
+  - dir
+  - enable-debug-command
+  - enable-module-command
+  - enable-protected-configs
+  - include
+  - loadmodule
+  - logfile
+  - masterauth
+  - masteruser
+  - pidfile
+  - port
+  - protected-mode
+  - rename-command
+  - replica-announce-ip
+  - replica-announce-port
+  - replicaof
+  - requirepass
+  - slave-announce-ip
+  - slave-announce-port
+  - slaveof
+  - tls-auth-clients
+  - tls-ca-cert-dir
+  - tls-ca-cert-file
+  - tls-cert-file
+  - tls-ciphers
+  - tls-ciphersuites
+  - tls-client-cert-file
+  - tls-client-key-file
+  - tls-client-key-file-pass
+  - tls-cluster
+  - tls-dh-params-file
+  - tls-key-file
+  - tls-key-file-pass
+  - tls-port
+  - tls-prefer-server-ciphers
+  - tls-protocols
+  - tls-replication
+  - tls-session-cache-size
+  - tls-session-cache-timeout
+  - tls-session-caching
+  - unixsocket
+  - unixsocketperm
+  - user
