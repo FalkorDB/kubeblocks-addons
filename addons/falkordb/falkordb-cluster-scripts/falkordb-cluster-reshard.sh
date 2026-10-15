@@ -385,7 +385,13 @@ migrate_slot_keys() {
   while true; do
     # --csv prints the keys quoted and escaped the way the stdin parser reads
     # them back, so a key with a space, a quote or a newline survives the trip
-    listing=$(node_cli "$source" --csv CLUSTER GETKEYSINSLOT "$slot" "$MIGRATE_KEYS_PER_CALL" | tr -d '\r')
+    # a connection, TLS or auth failure also prints nothing, so an empty
+    # listing only counts once redis-cli has exited cleanly
+    if ! listing=$(node_cli "$source" --csv CLUSTER GETKEYSINSLOT "$slot" "$MIGRATE_KEYS_PER_CALL"); then
+      echo "Error: could not list the keys of slot $slot on $source: $listing" >&2
+      return 1
+    fi
+    listing=$(echo "$listing" | tr -d '\r')
     if [ -z "$listing" ]; then
       return 0
     fi
@@ -420,12 +426,30 @@ migrate_slot_keys() {
   done
 }
 
+# count_slot_keys <host:port> <slot...>
+# Prints the number of keys the node holds in each slot, one per line, in the
+# order given. Prints nothing and fails unless every count could be read.
+count_slot_keys() {
+  local endpoint="$1" slot replies
+  shift
+  replies=$(for slot in "$@"; do
+    echo "CLUSTER COUNTKEYSINSLOT $slot"
+  done | node_pipe "$endpoint" | tr -d '\r' | grep -v '^$')
+  local -a counts
+  mapfile -t counts <<< "$replies"
+  if [ ${#counts[@]} -ne $# ] || printf '%s\n' "${counts[@]}" | grep -qv '^[0-9][0-9]*$'; then
+    echo "Error: could not count the keys of the slots on $endpoint: $(echo "$replies" | head -5)" >&2
+    return 1
+  fi
+  printf '%s\n' "${counts[@]}"
+}
+
 # move_slot_batch <source id> <target id> <slot...>
 move_slot_batch() {
   local source_id="$1" target_id="$2"
   shift 2
   local -a batch_slots=("$@")
-  local source target slot replies other count
+  local source target other
   source=$(node_address "$source_id")
   target=$(node_address "$target_id")
 
@@ -433,24 +457,30 @@ move_slot_batch() {
   node_setslot "$source" "mark slots migrating on $source" MIGRATING "$target_id" "${batch_slots[@]}" || return 1
 
   # count first, so empty slots cost nothing more than the SETSLOT calls
-  replies=$(for slot in "${batch_slots[@]}"; do
-    echo "CLUSTER COUNTKEYSINSLOT $slot"
-  done | node_pipe "$source" | tr -d '\r' | grep -v '^$')
   local -a counts
-  mapfile -t counts <<< "$replies"
+  mapfile -t counts < <(count_slot_keys "$source" "${batch_slots[@]}")
   if [ ${#counts[@]} -ne ${#batch_slots[@]} ]; then
-    echo "Error: could not count the keys of the slots on $source: $replies" >&2
     return 1
   fi
   local i
   for i in "${!batch_slots[@]}"; do
-    count=${counts[i]}
-    if ! [[ "$count" =~ ^[0-9]+$ ]]; then
-      echo "Error: could not count the keys of slot ${batch_slots[i]} on $source: $count" >&2
-      return 1
-    fi
-    if [ "$count" -gt 0 ]; then
+    if [ "${counts[i]}" -gt 0 ]; then
       migrate_slot_keys "$source_id" "$target_id" "${batch_slots[i]}" || return 1
+    fi
+  done
+
+  # Giving the target a slot that still has keys on the source loses them:
+  # the source drops the keys of a slot it learns it no longer owns. So every
+  # slot has to be confirmed empty before any SETSLOT NODE, whatever the
+  # migration above reported.
+  mapfile -t counts < <(count_slot_keys "$source" "${batch_slots[@]}")
+  if [ ${#counts[@]} -ne ${#batch_slots[@]} ]; then
+    return 1
+  fi
+  for i in "${!batch_slots[@]}"; do
+    if [ "${counts[i]}" -ne 0 ]; then
+      echo "Error: slot ${batch_slots[i]} still holds ${counts[i]} keys on $source after the migration, not assigning it" >&2
+      return 1
     fi
   done
 

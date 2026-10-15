@@ -90,11 +90,19 @@ EOF
         echo "$myid_reply"
         ;;
       *" --csv CLUSTER GETKEYSINSLOT 0 "*)
+        if [ -n "$getkeys_fails" ]; then
+          echo "Could not connect to Redis at 10.0.0.1:6379: Connection refused" >&2
+          return 1
+        fi
         if [ -f "$migrated_flag.keys" ]; then echo ""; else echo '"{0}a b","{0}q\"x"'; fi
         ;;
       *)
         if [[ "$stdin" == *"CLUSTER COUNTKEYSINSLOT"* ]]; then
-          echo "$stdin" | awk '{print ($3 == 0) ? 2 : 0}'
+          # slot 0 holds two keys until they are migrated, or for good when
+          # keys_stay is set
+          local left=2
+          if [ -f "$migrated_flag.keys" ] && [ -z "$keys_stay" ]; then left=0; fi
+          echo "$stdin" | awk -v left="$left" '{print ($3 == 0) ? left : 0}'
         elif [[ "$stdin" == MIGRATE* ]]; then
           touch "$migrated_flag.keys"
           echo "${migrate_reply:-OK}"
@@ -122,6 +130,8 @@ EOF
     setslot_error=""
     migrate_reply=""
     myid_reply=""
+    getkeys_fails=""
+    keys_stay=""
     redis-cli() {
       fake_redis_cli "$@"
       local status=$?
@@ -369,6 +379,27 @@ EOF
       The output should include "moving slots"
       The stderr should include "could not migrate the keys of slot 0"
       The stderr should include "already holds a key of the same name"
+    End
+
+    # Assigning a slot whose keys are still on the source makes the source
+    # drop them, so neither case may get as far as SETSLOT NODE.
+    It "fails, without assigning anything, when the keys cannot be listed"
+      getkeys_fails="true"
+      When call reshard
+      The status should be failure
+      The output should include "moving slots"
+      The stderr should include "could not list the keys of slot 0"
+      The contents of file "$setslot_log" should not include "NODE"
+    End
+
+    It "fails, without assigning anything, when keys are left behind"
+      keys_stay="true"
+      SLOTS="0-99"
+      When call reshard
+      The status should be failure
+      The output should include "moving slots"
+      The stderr should include "slot 0 still holds 2 keys"
+      The contents of file "$setslot_log" should not include "NODE"
     End
 
     Context "when the cluster has no password"
