@@ -1,0 +1,29 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: falkordb-reshard-slots
+  namespace: demo
+spec:
+  # Specifies the name of the Cluster resource that this operation is targeting.
+  clusterName: falkordb-sharding
+  type: Custom
+  custom:
+    opsDefinitionName: falkordb-cluster-reshard
+    components:
+      # The sharding name. The operation runs once for the whole cluster.
+      - componentName: shard
+        parameters:
+          # The hash slots to move: single slots and inclusive ranges,
+          # separated by commas. Slots that already belong to TO are skipped.
+          - name: SLOTS
+            value: "0-999,5000"
+          # The shard to move them to: its short name as listed by
+          # `kubectl get component -n demo -l app.kubernetes.io/instance=falkordb-sharding`
+          # without the cluster name, the full component name, or the node ID
+          # of its primary.
+          - name: TO
+            value: "shard-98x"
+          # Optional. The shard the slots are expected to come from. When set,
+          # the operation is refused unless that shard owns all of them.
+          - name: FROM
+            value: "shard-7tq"

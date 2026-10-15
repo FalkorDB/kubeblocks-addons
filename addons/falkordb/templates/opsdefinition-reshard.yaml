@@ -1,0 +1,95 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsDefinition
+metadata:
+  name: falkordb-cluster-reshard
+  labels:
+    {{- include "falkordb.labels" . | nindent 4 }}
+spec:
+  podInfoExtractors:
+    - name: falkordbUrl
+      podSelector:
+        multiPodSelectionPolicy: Any
+      env:
+        - name: REDIS_DEFAULT_USER
+          valueFrom:
+            envRef:
+              envName: REDIS_DEFAULT_USER
+        - name: REDIS_DEFAULT_PASSWORD
+          valueFrom:
+            envRef:
+              envName: REDIS_DEFAULT_PASSWORD
+        - name: CLUSTER_NAME
+          valueFrom:
+            envRef:
+              envName: CLUSTER_NAME
+        - name: CLUSTER_DOMAIN
+          valueFrom:
+            envRef:
+              envName: CLUSTER_DOMAIN
+        - name: CURRENT_POD_NAME
+          valueFrom:
+            envRef:
+              envName: CURRENT_POD_NAME
+        - name: CURRENT_SHARD_COMPONENT_NAME
+          valueFrom:
+            envRef:
+              envName: CURRENT_SHARD_COMPONENT_NAME
+        - name: CLUSTER_NAMESPACE
+          valueFrom:
+            envRef:
+              envName: CLUSTER_NAMESPACE
+        - name: SERVICE_PORT
+          valueFrom:
+            envRef:
+              envName: SERVICE_PORT
+        - name: REDIS_CLI_TLS_CMD
+          optional: true
+          valueFrom:
+            envRef:
+              envName: REDIS_CLI_TLS_CMD
+  parametersSchema:
+    openAPIV3Schema:
+      required: ["SLOTS", "TO"]
+      properties:
+        SLOTS:
+          description: |
+            The hash slots to move: single slots and inclusive ranges separated by
+            commas, such as "0-999,5000,6000-6099". Slots that already belong to
+            TO are left alone.
+          type: string
+        TO:
+          description: |
+            The shard to move the slots to: its short name, such as "shard-98x",
+            its full component name, such as "mycluster-shard-98x", or the node
+            ID of its primary. A shard name is resolved to whichever node is its
+            primary when the operation runs.
+          type: string
+        FROM:
+          description: |
+            Optional. The shard the slots are expected to come from, named the
+            same way as TO. When it is set, the operation is refused unless FROM
+            owns every slot in SLOTS that TO does not already own.
+          type: string
+  actions:
+    - name: reshard
+      parameters: ["SLOTS", "TO", "FROM"]
+      workload:
+        type: Job
+        podInfoExtractorName: falkordbUrl
+        # A move that fails part way leaves slots open, and the script refuses
+        # to start on a cluster with open slots, so a retry could only fail.
+        backoffLimit: 0
+        podSpec:
+          {{- if .Values.imagePullSecrets }}
+          {{- include "falkordb.imagePullSecrets" . | nindent 10 }}
+          {{- end }}
+          containers:
+            - name: falkordb-reshard
+              image: {{ include "falkordb.defaultImage" . }}
+              imagePullPolicy: IfNotPresent
+              command:
+                - bash
+                - -c
+                - |
+                  {{- .Files.Get "falkordb-cluster-scripts/falkordb-cluster-reshard.sh" | nindent 18 }}
+          restartPolicy: Never

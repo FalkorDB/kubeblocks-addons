@@ -163,6 +163,20 @@ kubectl apply -f examples/falkordb/scale-in-sharding.yaml
 
 The slots owned by the removed shard are migrated to the remaining shards before it is torn down, so no keys are lost. A FalkorDB cluster requires at least 3 shards, so `shards` must not go below 3.
 
+##### [Move slots between shards](reshard-slots.yaml)
+
+To move specific hash slots from one shard to another, for example to relieve a shard that holds a hot range of keys:
+
+```bash
+kubectl apply -f examples/falkordb/reshard-slots.yaml
+```
+
+The operation moves exactly the slots listed in `SLOTS`, together with their keys, to the shard named in `TO`. It is refused when the cluster is not healthy, when it has slots left open by an earlier migration, or when `FROM` is set and does not own every listed slot. A move that fails part way can leave slots open; check the cluster with `redis-cli --cluster check` and repair it with `redis-cli --cluster fix` before trying again. The operation's Job log lists what was moved:
+
+```bash
+kubectl describe -n demo ops falkordb-reshard-slots
+```
+
 ### [Vertical scaling](verticalscale.yaml)
 
 Vertical scaling involves increasing or decreasing resources to an existing database cluster.

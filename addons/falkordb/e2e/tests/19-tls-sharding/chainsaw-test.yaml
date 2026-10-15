@@ -4,7 +4,8 @@ metadata:
   name: tls-sharding
 spec:
   description: >-
-    Run the sharded topology with TLS turned on, then scale it out.
+    Run the sharded topology with TLS turned on, scale it out, then move named
+    slots between shards with the falkordb-cluster-reshard custom ops.
 
     Scenario 05 covers TLS on the replication topology, where the only encrypted
     links are client connections and a single replication stream. Sharding adds
@@ -212,3 +213,88 @@ spec:
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-shtls
             tail: 200
+
+    # The falkordb-cluster-reshard custom ops moves slots with its own
+    # SETSLOT and MIGRATE calls rather than through `redis-cli --cluster`, so
+    # it has to carry the TLS flags to every node it talks to and the nodes
+    # have to MIGRATE keys to each other over TLS. The graph moves too.
+    - name: move named slots over TLS with the reshard custom ops
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c --tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shtls shard)"
+              state="$(fdb_state_dir)"
+              graph_slot="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER KEYSLOT e2e-shtls-graph | tr -d '\r')"
+              src_id="$(fdb_slot_owner "$NAMESPACE" "$pod" "$graph_slot")"
+              dst_id="$(fdb_primary_slots "$NAMESPACE" "$pod" |
+                awk -v src="$src_id" '$1 != src {print $1; exit}')"
+              dst="$(fdb_shard_of_node "$NAMESPACE" "$pod" fdb-shtls "$dst_id")"
+              set -- $(fdb_node_first_range "$NAMESPACE" "$pod" "$src_id")
+              end=$(($1 + 199))
+              if [ "$end" -gt "$2" ]; then end="$2"; fi
+              slots="$1-$end,$graph_slot"
+              echo "$dst_id" > "$state/reshard-dst-id"
+              echo "$slots" > "$state/reshard-slots"
+              fdb_log "moving slots $slots from $src_id to $dst ($dst_id)"
+
+              fdb_apply_custom_ops "$NAMESPACE" fdb-shtls fdb-shtls-reshard falkordb-cluster-reshard \
+                "SLOTS=$slots" "TO=$dst"
+              fdb_wait_ops_phase "$NAMESPACE" fdb-shtls-reshard Succeed
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-shtls-reshard
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_custom_ops_logs "$NAMESPACE"
+
+    - name: the named slots and their keys moved over TLS
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c --tls --insecure"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              dst_id="$(cat "$state/reshard-dst-id")"
+              slots="$(cat "$state/reshard-slots")"
+              for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-shtls shard); do
+                fdb_retry "$pod to report a complete slot map" \
+                  fdb_assert_slots_covered "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see no slot left in migration" \
+                  fdb_assert_no_open_slots "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see the target own the moved slots" \
+                  fdb_assert_node_owns "$NAMESPACE" "$pod" "$dst_id" "$slots"
+              done
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shtls shard)"
+              fdb_retry "every key to survive the move" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtls 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtls-post 100
+              fdb_assert_graph_node "$NAMESPACE" "$pod" e2e-shtls-graph
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shtls-resh 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shtls-resh 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shtls
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

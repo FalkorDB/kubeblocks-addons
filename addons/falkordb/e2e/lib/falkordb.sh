@@ -520,6 +520,155 @@ fdb_cluster_manager() {
         --cluster "$sub" "$POD_FQDN:$SERVICE_PORT" "$@"' _ "$subcommand" "$@"
 }
 
+# fdb_slot_owner <namespace> <pod> <slot>
+# Prints the node ID of the primary that owns the slot, as <pod> sees it.
+fdb_slot_owner() {
+  local namespace="$1" pod="$2" slot="$3"
+  fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
+    awk -v slot="$slot" '$3 ~ /master/ {
+      for (i = 9; i <= NF; i++) {
+        if ($i ~ /^\[/) continue
+        n = split($i, r, "-")
+        if (n == 1) r[2] = r[1]
+        if (slot + 0 >= r[1] + 0 && slot + 0 <= r[2] + 0) {print $1; exit}
+      }
+    }'
+}
+
+# fdb_node_first_range <namespace> <pod> <node id>
+# Prints `<start> <end>` of the lowest contiguous slot range the primary owns,
+# as <pod> sees it.
+fdb_node_first_range() {
+  local namespace="$1" pod="$2" id="$3"
+  fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
+    awk -v id="$id" '$1 == id {
+      start = -1
+      for (i = 9; i <= NF; i++) {
+        if ($i ~ /^\[/) continue
+        n = split($i, r, "-")
+        if (n == 1) r[2] = r[1]
+        if (start < 0 || r[1] + 0 < start) {start = r[1] + 0; end = r[2] + 0}
+      }
+      if (start >= 0) print start, end
+      exit
+    }'
+}
+
+# fdb_shard_of_node <namespace> <pod> <cluster> <node id>
+# Prints the short name (shard-xyz) of the shard the node belongs to, read
+# from the pod FQDN the node announces as its hostname:
+# <cluster>-shard-xyz-0.<cluster>-shard-xyz-headless.<namespace>.svc...
+fdb_shard_of_node() {
+  local namespace="$1" pod="$2" cluster="$3" id="$4" host component
+  host="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
+    awk -v id="$id" '$1 == id {split($2, a, ","); print a[2]; exit}')"
+  component="$(echo "$host" | sed -n 's/^[^.]*\.\(.*\)-headless\..*$/\1/p')"
+  if [ -z "$component" ]; then
+    fdb_fail "node $id announces no pod hostname: '$host'"
+    return 1
+  fi
+  echo "${component#"$cluster"-}"
+}
+
+# fdb_shard_primary <namespace> <pod> <cluster> <shard short name>
+# Prints the node ID of the shard's current primary.
+fdb_shard_primary() {
+  local namespace="$1" pod="$2" cluster="$3" shard="$4" id
+  id="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
+    awk -v suffix=".$cluster-$shard-headless." '$3 ~ /master/ && $3 !~ /fail/ &&
+      index($2, suffix) > 0 {print $1; exit}')"
+  if [ -z "$id" ]; then
+    fdb_fail "$pod knows no healthy primary of shard $shard"
+    return 1
+  fi
+  echo "$id"
+}
+
+# fdb_assert_node_owns <namespace> <pod> <node id> <slots>
+# Fails unless the primary owns every slot in <slots>, a list such as
+# "0-99,5000" in the format the falkordb-cluster-reshard ops takes, as <pod>
+# sees it.
+fdb_assert_node_owns() {
+  local namespace="$1" pod="$2" id="$3" slots="$4" missing
+  missing="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
+    awk -v id="$id" -v want="$slots" '
+      $1 == id {
+        for (i = 9; i <= NF; i++) {
+          if ($i ~ /^\[/) continue
+          n = split($i, r, "-")
+          if (n == 1) r[2] = r[1]
+          for (s = r[1] + 0; s <= r[2] + 0; s++) owned[s] = 1
+        }
+      }
+      END {
+        n = split(want, items, ",")
+        for (i = 1; i <= n; i++) {
+          m = split(items[i], r, "-")
+          if (m == 1) r[2] = r[1]
+          for (s = r[1] + 0; s <= r[2] + 0; s++) if (!(s in owned)) out = out " " s
+        }
+        print out
+      }')"
+  if [ -n "$missing" ]; then
+    fdb_fail "$pod does not see $id own slots:$(echo "$missing" | cut -c1-200)"
+    return 1
+  fi
+  fdb_log "$pod sees $id own slots $slots"
+}
+
+# fdb_apply_custom_ops <namespace> <cluster> <ops name> <opsdefinition> [NAME=value...]
+# Creates a Custom OpsRequest against the `shard` sharding with the given
+# parameters. A scenario uses this rather than a fixed manifest when the
+# parameters, such as a shard name, are only known at run time.
+fdb_apply_custom_ops() {
+  local namespace="$1" cluster="$2" name="$3" opsdef="$4" param params=""
+  shift 4
+  for param in "$@"; do
+    params="$params
+        - name: ${param%%=*}
+          value: \"${param#*=}\""
+  done
+  kubectl apply -n "$namespace" -f - <<EOF
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: $name
+spec:
+  clusterName: $cluster
+  type: Custom
+  custom:
+    opsDefinitionName: $opsdef
+    components:
+      - componentName: shard
+        parameters:$params
+EOF
+}
+
+# fdb_wait_ops_phase <namespace> <ops name> <Succeed|Failed>
+# Waits for the OpsRequest to end in the given phase, and fails as soon as it
+# ends in the other one rather than waiting out the timeout.
+fdb_wait_ops_phase() {
+  local namespace="$1" name="$2" want="$3" phase="" attempt=1
+  while [ "$attempt" -le "$FDB_RETRIES" ]; do
+    phase="$(kubectl get opsrequest -n "$namespace" "$name" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [ "$phase" = "$want" ]; then
+      fdb_log "OpsRequest $name is $phase"
+      return 0
+    fi
+    case "$phase" in
+      Succeed | Failed | Aborted | Cancelled)
+        fdb_fail "OpsRequest $name is $phase, expected $want"
+        return 1
+        ;;
+    esac
+    attempt=$((attempt + 1))
+    sleep "$FDB_RETRY_DELAY"
+  done
+  fdb_fail "timed out waiting for OpsRequest $name to be $want, it is '${phase:-unknown}'"
+  return 1
+}
+
 # fdb_custom_ops_logs <namespace>
 # Prints the logs of every Job in the namespace. Custom OpsRequests run their
 # actions as Jobs, and the logs are the only record of what each one did.
@@ -531,6 +680,20 @@ fdb_custom_ops_logs() {
     echo "=== $job ==="
     kubectl logs -n "$namespace" "job/$job" --all-containers --tail=200 2>&1 || true
   done
+}
+
+# fdb_assert_custom_ops_log <namespace> <text>
+# Fails unless some Job's logs include the text. A Custom OpsRequest only
+# reports Failed, so a scenario that expects a refusal reads the reason here,
+# to tell it apart from a Job that failed for some other reason.
+fdb_assert_custom_ops_log() {
+  local namespace="$1" text="$2"
+  if fdb_custom_ops_logs "$namespace" | grep -qF -- "$text"; then
+    fdb_log "a custom ops Job logged: $text"
+    return 0
+  fi
+  fdb_fail "no custom ops Job logged '$text'"
+  return 1
 }
 
 # fdb_shard_count <namespace> <cluster>
