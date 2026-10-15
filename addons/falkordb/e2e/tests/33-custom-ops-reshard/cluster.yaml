@@ -1,0 +1,32 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-resh
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  topology: cluster
+  shardings:
+    - name: shard
+      shardingDef: falkordb-cluster
+      shards: 3
+      template:
+        name: falkordb-cluster
+        # A replica per shard, so naming a shard has to resolve to its primary
+        # rather than to whichever of its nodes is listed first.
+        replicas: 2
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        volumeClaimTemplates:
+          - name: data
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 1Gi

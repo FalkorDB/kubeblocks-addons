@@ -1,0 +1,297 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: custom-ops-reshard
+spec:
+  description: >-
+    Move named hash slots from one shard to another with the
+    falkordb-cluster-reshard custom ops, and prove it refuses to when it
+    should.
+
+    The ops takes the exact slots to move, not a count, so the assertions check
+    that exactly those slots changed hands: the target owns every one of them
+    on every node, and the source and the target each changed by exactly that
+    many slots. One of the moved slots holds a graph, so a key that FalkorDB
+    itself serialises makes the trip as well as the plain string keys.
+
+    The shards are named by their short names (shard-xyz), which the job has
+    to resolve to whichever node is the shard's primary. Each shard has a
+    replica, so a lookup that settled on any node of the shard would pick the
+    wrong one about half the time.
+
+    A move that started on an unhealthy cluster, or that moved slots from a
+    shard to itself, could leave slots open, so the last steps make sure both
+    are refused before anything is touched.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-resh
+            tail: 200
+
+    - name: the cluster forms and holds data
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-resh shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-resh shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
+
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-resh 300
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-resh 300
+              fdb_graph_roundtrip "$NAMESPACE" "$pod" e2e-resh-graph
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-resh
+            tail: 200
+
+    - name: pick the slots to move
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-resh shard)"
+              state="$(fdb_state_dir)"
+
+              # The source is the shard holding the graph, so the graph moves.
+              graph_slot="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER KEYSLOT e2e-resh-graph | tr -d '\r')"
+              src_id="$(fdb_slot_owner "$NAMESPACE" "$pod" "$graph_slot")"
+              src="$(fdb_shard_of_node "$NAMESPACE" "$pod" fdb-resh "$src_id")"
+              dst_id="$(fdb_primary_slots "$NAMESPACE" "$pod" |
+                awk -v src="$src_id" '$1 != src {print $1; exit}')"
+              dst="$(fdb_shard_of_node "$NAMESPACE" "$pod" fdb-resh "$dst_id")"
+
+              # 500 slots off the bottom of the source's range, plus the graph's
+              # slot when it is not already among them.
+              set -- $(fdb_node_first_range "$NAMESPACE" "$pod" "$src_id")
+              start="$1"
+              end=$((start + 499))
+              if [ "$end" -gt "$2" ]; then end="$2"; fi
+              slots="$start-$end"
+              moved=$((end - start + 1))
+              if [ "$graph_slot" -gt "$end" ]; then
+                slots="$slots,$graph_slot"
+                moved=$((moved + 1))
+              fi
+
+              echo "$src" > "$state/src"
+              echo "$dst" > "$state/dst"
+              echo "$src_id" > "$state/src-id"
+              echo "$dst_id" > "$state/dst-id"
+              echo "$slots" > "$state/slots"
+              echo "$moved" > "$state/moved"
+              fdb_node_slots "$NAMESPACE" "$pod" "$src_id" > "$state/src-before"
+              fdb_node_slots "$NAMESPACE" "$pod" "$dst_id" > "$state/dst-before"
+              fdb_log "will move $moved slots ($slots) from $src ($src_id) to $dst ($dst_id)"
+      catch:
+        - events: {}
+
+    - name: run the reshard custom ops
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              fdb_apply_custom_ops "$NAMESPACE" fdb-resh fdb-resh-move falkordb-cluster-reshard \
+                "SLOTS=$(cat "$state/slots")" "FROM=$(cat "$state/src")" "TO=$(cat "$state/dst")"
+              fdb_wait_ops_phase "$NAMESPACE" fdb-resh-move Succeed
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-resh-move
+        # The move runs as a Job, so its container logs are the only place a
+        # failure is visible; the OpsRequest just reports Failed.
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              kubectl get jobs -n "$NAMESPACE" -o wide
+              fdb_custom_ops_logs "$NAMESPACE"
+
+    - name: exactly the named slots moved, with their keys
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              src_id="$(cat "$state/src-id")"
+              dst_id="$(cat "$state/dst-id")"
+              slots="$(cat "$state/slots")"
+              moved="$(cat "$state/moved")"
+
+              # Every node has to agree, replicas included: a node that missed
+              # the change still redirects clients to the old owner.
+              for pod in $(fdb_sharding_pods "$NAMESPACE" fdb-resh shard); do
+                fdb_retry "$pod to report a complete slot map" \
+                  fdb_assert_slots_covered "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see no slot left in migration" \
+                  fdb_assert_no_open_slots "$NAMESPACE" "$pod"
+                fdb_retry "$pod to see the target own the moved slots" \
+                  fdb_assert_node_owns "$NAMESPACE" "$pod" "$dst_id" "$slots"
+              done
+
+              # Owning the named slots is not enough: nothing else may have
+              # moved with them.
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-resh shard)"
+              src_after="$(fdb_node_slots "$NAMESPACE" "$pod" "$src_id")"
+              dst_after="$(fdb_node_slots "$NAMESPACE" "$pod" "$dst_id")"
+              src_want=$(($(cat "$state/src-before") - moved))
+              dst_want=$(($(cat "$state/dst-before") + moved))
+              # compared as strings, so a count that could not be read fails
+              if [ "$src_after" != "$src_want" ] || [ "$dst_after" != "$dst_want" ]; then
+                fdb_fail "source owns $src_after slots (want $src_want), target owns $dst_after (want $dst_want)"
+                fdb_primary_slots "$NAMESPACE" "$pod" >&2
+                exit 1
+              fi
+              fdb_log "the source went down and the target up by exactly $moved slots"
+
+              fdb_retry "every key to survive the move" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-resh 300
+              fdb_assert_graph_node "$NAMESPACE" "$pod" e2e-resh-graph
+
+              # The target has to accept writes into the slots it took over.
+              # The hash tag puts every one of these keys in the graph's slot,
+              # which is among the moved ones.
+              graph_slot="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER KEYSLOT e2e-resh-graph | tr -d '\r')"
+              owner="$(fdb_slot_owner "$NAMESPACE" "$pod" "$graph_slot")"
+              if [ "$owner" != "$dst_id" ]; then
+                fdb_fail "slot $graph_slot is owned by '$owner', expected the target $dst_id"
+                exit 1
+              fi
+              fdb_write_keys "$NAMESPACE" "$pod" "{e2e-resh-graph}-after" 100
+              fdb_verify_keys "$NAMESPACE" "$pod" "{e2e-resh-graph}-after" 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-resh
+            tail: 200
+
+    - name: moving slots from a shard to itself is refused
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              dst="$(cat "$state/dst")"
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-resh shard)"
+              before="$(fdb_primary_slots "$NAMESPACE" "$pod")"
+
+              # TO by its full component name, FROM by its short name: both
+              # name the same shard and the job must see that.
+              fdb_apply_custom_ops "$NAMESPACE" fdb-resh fdb-resh-same falkordb-cluster-reshard \
+                "SLOTS=$(cat "$state/slots")" "FROM=$dst" "TO=fdb-resh-$dst"
+              fdb_wait_ops_phase "$NAMESPACE" fdb-resh-same Failed
+
+              after="$(fdb_primary_slots "$NAMESPACE" "$pod")"
+              if [ "$before" != "$after" ]; then
+                fdb_fail "the slot map changed although the ops was refused"
+                exit 1
+              fi
+              fdb_retry "the job to say why it refused" \
+                fdb_assert_custom_ops_log "$NAMESPACE" "are the same shard"
+      catch:
+        - events: {}
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_custom_ops_logs "$NAMESPACE"
+
+    - name: a cluster with an open slot is refused
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              state="$(fdb_state_dir)"
+              src_id="$(cat "$state/src-id")"
+              dst_id="$(cat "$state/dst-id")"
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-resh shard)"
+
+              # Leave one of the source's slots half way through a migration,
+              # the state an interrupted move leaves behind. The cluster still
+              # reports ok, so only a full check can tell.
+              host="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER NODES | tr -d '\r' |
+                awk -v id="$src_id" '$1 == id {split($2, a, ","); print a[2]; exit}')"
+              src_pod="${host%%.*}"
+              set -- $(fdb_node_first_range "$NAMESPACE" "$pod" "$src_id")
+              open_slot="$1"
+              fdb_cli "$NAMESPACE" "$src_pod" CLUSTER SETSLOT "$open_slot" MIGRATING "$dst_id"
+              # Close the slot again however this step ends, so the cluster is
+              # left as healthy as it was found.
+              trap 'fdb_cli "$NAMESPACE" "$src_pod" CLUSTER SETSLOT "$open_slot" STABLE >/dev/null || true' EXIT
+              if fdb_assert_no_open_slots "$NAMESPACE" "$src_pod" >/dev/null 2>&1; then
+                fdb_fail "slot $open_slot did not open on $src_pod"
+                exit 1
+              fi
+              before="$(fdb_primary_slots "$NAMESPACE" "$pod")"
+
+              fdb_apply_custom_ops "$NAMESPACE" fdb-resh fdb-resh-unhealthy falkordb-cluster-reshard \
+                "SLOTS=$((open_slot + 1))" "TO=$(cat "$state/dst")"
+              status=0
+              fdb_wait_ops_phase "$NAMESPACE" fdb-resh-unhealthy Failed || status=$?
+
+              fdb_cli "$NAMESPACE" "$src_pod" CLUSTER SETSLOT "$open_slot" STABLE
+              fdb_retry "the slot to be closed again" \
+                fdb_assert_no_open_slots "$NAMESPACE" "$pod"
+              [ "$status" -eq 0 ] || exit 1
+              fdb_retry "the job to say why it refused" \
+                fdb_assert_custom_ops_log "$NAMESPACE" "the cluster is not stable"
+
+              after="$(fdb_primary_slots "$NAMESPACE" "$pod")"
+              if [ "$before" != "$after" ]; then
+                fdb_fail "the slot map changed although the ops was refused"
+                exit 1
+              fi
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-resh 300
+      catch:
+        - events: {}
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_custom_ops_logs "$NAMESPACE"
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir
