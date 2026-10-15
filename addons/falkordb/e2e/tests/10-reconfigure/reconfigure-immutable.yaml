@@ -1,0 +1,13 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-config-reconfigure-immutable
+spec:
+  clusterName: fdb-config
+  type: Reconfiguring
+  reconfigures:
+    - componentName: falkordb
+      parameters:
+        # Owned by the addon, so the ParametersDefinition lists it as immutable.
+        - key: dbfilename
+          value: e2e-not-allowed.rdb

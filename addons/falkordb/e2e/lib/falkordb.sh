@@ -606,6 +606,18 @@ fdb_assert_config() {
   fdb_log "$pod has $parameter '$expected'"
 }
 
+# fdb_assert_config_not <namespace> <pod> <parameter> <unexpected>
+# For values the server normalizes, where only the old value is known exactly.
+fdb_assert_config_not() {
+  local namespace="$1" pod="$2" parameter="$3" unexpected="$4" actual
+  actual="$(fdb_config_get "$namespace" "$pod" "$parameter")"
+  if [ "$actual" = "$unexpected" ]; then
+    fdb_fail "$pod still has $parameter '$actual'"
+    return 1
+  fi
+  fdb_log "$pod has $parameter '$actual'"
+}
+
 # fdb_assert_external_hostname <description> <value> <suffix>
 # Fails unless the value is a name under the given DNS suffix.
 #

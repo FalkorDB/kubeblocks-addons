@@ -1,0 +1,15 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-config-reconfigure-empty
+spec:
+  clusterName: fdb-config
+  type: Reconfiguring
+  reconfigures:
+    - componentName: falkordb
+      parameters:
+        # KubeBlocks drops a parameter whose value is really empty, so an empty
+        # value is sent as the quoted empty string, which the reload action
+        # translates and redis also reads from redis.conf as an empty string.
+        - key: notify-keyspace-events
+          value: '""'

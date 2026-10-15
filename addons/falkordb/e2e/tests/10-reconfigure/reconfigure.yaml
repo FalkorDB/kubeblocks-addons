@@ -10,3 +10,7 @@ spec:
       parameters:
         - key: maxmemory-policy
           value: allkeys-lru
+        # Defaults to empty, so the next OpsRequest can prove it can be emptied
+        # again.
+        - key: notify-keyspace-events
+          value: KEA
