@@ -75,6 +75,10 @@ EOF
           awk 'back == 2 {print} {back = (back ? back + 1 : 0)} $0 == "SETSLOT" {back = 1}'))
         echo "$args" | awk '{for (i = 1; i < NF; i++) if ($i == "-h") print $(i + 1)}' |
           sed "s/$/ $state $slots/" >> "$setslot_log"
+        # the slot map changes once the script assigns the slots to the target
+        if [ "$state" = "NODE" ]; then
+          touch "$migrated_flag"
+        fi
         if [ -n "$setslot_error" ]; then
           echo "$setslot_error"
           errors=1
@@ -138,12 +142,6 @@ EOF
     keys_stay=""
     redis-cli() {
       fake_redis_cli "$@"
-      local status=$?
-      # the slot map changes once the script assigns the slots to the target
-      if [[ " $* " == *" --pipe "* ]] && grep -q "NODE" "$redis_cli_log" 2>/dev/null; then
-        touch "$migrated_flag"
-      fi
-      return $status
     }
     CLUSTER_NODES=$(nodes_before)
   }

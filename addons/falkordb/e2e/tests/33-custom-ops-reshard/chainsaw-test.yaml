@@ -180,8 +180,16 @@ spec:
               fdb_assert_graph_node "$NAMESPACE" "$pod" e2e-resh-graph
 
               # The target has to accept writes into the slots it took over.
-              fdb_write_keys "$NAMESPACE" "$pod" e2e-resh-after 100
-              fdb_verify_keys "$NAMESPACE" "$pod" e2e-resh-after 100
+              # The hash tag puts every one of these keys in the graph's slot,
+              # which is among the moved ones.
+              graph_slot="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER KEYSLOT e2e-resh-graph | tr -d '\r')"
+              owner="$(fdb_slot_owner "$NAMESPACE" "$pod" "$graph_slot")"
+              if [ "$owner" != "$dst_id" ]; then
+                fdb_fail "slot $graph_slot is owned by '$owner', expected the target $dst_id"
+                exit 1
+              fi
+              fdb_write_keys "$NAMESPACE" "$pod" "{e2e-resh-graph}-after" 100
+              fdb_verify_keys "$NAMESPACE" "$pod" "{e2e-resh-graph}-after" 100
       catch:
         - events: {}
         - podLogs:
@@ -249,6 +257,9 @@ spec:
               set -- $(fdb_node_first_range "$NAMESPACE" "$pod" "$src_id")
               open_slot="$1"
               fdb_cli "$NAMESPACE" "$src_pod" CLUSTER SETSLOT "$open_slot" MIGRATING "$dst_id"
+              # Close the slot again however this step ends, so the cluster is
+              # left as healthy as it was found.
+              trap 'fdb_cli "$NAMESPACE" "$src_pod" CLUSTER SETSLOT "$open_slot" STABLE >/dev/null || true' EXIT
               if fdb_assert_no_open_slots "$NAMESPACE" "$src_pod" >/dev/null 2>&1; then
                 fdb_fail "slot $open_slot did not open on $src_pod"
                 exit 1
@@ -260,8 +271,6 @@ spec:
               status=0
               fdb_wait_ops_phase "$NAMESPACE" fdb-resh-unhealthy Failed || status=$?
 
-              # Close the slot again whatever happened, so the cluster is left
-              # as healthy as it was found.
               fdb_cli "$NAMESPACE" "$src_pod" CLUSTER SETSLOT "$open_slot" STABLE
               fdb_retry "the slot to be closed again" \
                 fdb_assert_no_open_slots "$NAMESPACE" "$pod"

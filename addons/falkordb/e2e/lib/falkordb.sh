@@ -687,11 +687,16 @@ fdb_custom_ops_logs() {
 # reports Failed, so a scenario that expects a refusal reads the reason here,
 # to tell it apart from a Job that failed for some other reason.
 fdb_assert_custom_ops_log() {
-  local namespace="$1" text="$2"
-  if fdb_custom_ops_logs "$namespace" | grep -qF -- "$text"; then
-    fdb_log "a custom ops Job logged: $text"
-    return 0
-  fi
+  local namespace="$1" text="$2" logs
+  # No pipe into grep -q: under pipefail, grep closing the pipe at the first
+  # match fails the pipeline although the text was found.
+  logs="$(fdb_custom_ops_logs "$namespace")"
+  case "$logs" in
+    *"$text"*)
+      fdb_log "a custom ops Job logged: $text"
+      return 0
+      ;;
+  esac
   fdb_fail "no custom ops Job logged '$text'"
   return 1
 }

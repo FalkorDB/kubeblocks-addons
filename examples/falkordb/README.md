@@ -171,7 +171,7 @@ To move specific hash slots from one shard to another, for example to relieve a 
 kubectl apply -f examples/falkordb/reshard-slots.yaml
 ```
 
-The operation moves exactly the slots listed in `SLOTS`, together with their keys, to the shard named in `TO`. It is refused when the cluster is not healthy, when it has slots left open by an earlier migration, or when `FROM` is set and does not own every listed slot. A move that fails part way can leave slots open; check the cluster with `redis-cli --cluster check` and repair it with `redis-cli --cluster fix` before trying again. Follow the operation with:
+The operation moves exactly the slots listed in `SLOTS`, together with their keys, to the shard named in `TO`. It is refused when the cluster is not healthy, when it has slots left open by an earlier migration, or when `FROM` is set and does not own every listed slot that `TO` does not already own. A move that fails part way can leave slots open; check the cluster with `redis-cli --cluster check` and repair it with `redis-cli --cluster fix` before trying again. Follow the operation with:
 
 ```bash
 kubectl describe -n demo ops falkordb-reshard-slots

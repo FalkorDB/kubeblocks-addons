@@ -29,6 +29,6 @@ spec:
             value: "<target-shard>"
           # Optional, named the same way as TO. The shard the slots are
           # expected to come from: when set, the operation is refused unless
-          # that shard owns all of them.
+          # that shard owns every listed slot that TO does not already own.
           - name: FROM
             value: "<source-shard>"
