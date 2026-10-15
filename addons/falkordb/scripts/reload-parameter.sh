@@ -36,11 +36,23 @@ last_reply_line() {
   printf '%s' "$1" | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n 1
 }
 
+# A quoted empty string is how an empty value reaches this action. KubeBlocks
+# drops a parameter whose value is really empty, so an empty value is sent as
+# the two character string '""' instead, which redis also reads as an empty
+# string from redis.conf after a restart. It is translated here, so that every
+# input channel empties the parameter instead of setting it to two literal
+# quote characters.
+EMPTY_VALUE_MARKER='""'
+
 apply_redis_parameter() {
   local paramName="$1"
   local paramValue="$2"
   local output=""
   local reply=""
+
+  if [ "$paramValue" = "$EMPTY_VALUE_MARKER" ]; then
+    paramValue=""
+  fi
 
   output=$(run_redis_command "CONFIG SET ${paramName} $(quote_redis_value "${paramValue}")") || true
   reply=$(last_reply_line "$output")
@@ -80,10 +92,6 @@ reload_redis_parameter() {
     paramValue="${*:2}"
   elif [ -n "${*:2}" ]; then
     paramValue="${paramValue} ${*:2}"
-  fi
-
-  if [ "$paramValue" = "\"\"" ]; then
-    paramValue=""
   fi
 
   apply_redis_parameter "${paramName}" "${paramValue}"
@@ -142,7 +150,10 @@ reload_parameters_from_environment() {
 # This is magic for shellspec ut framework.
 ${__SOURCED__:+false} : || return 0
 
-if [ $# -ge 2 ]; then
+# A single argument is a parameter name without a value, which empties it. It
+# must not fall through to the environment, where it would be missed and fail
+# the action with "reconfigure was invoked without any parameter to apply".
+if [ $# -ge 1 ]; then
   reload_redis_parameter "$@"
 else
   reload_parameters_from_environment

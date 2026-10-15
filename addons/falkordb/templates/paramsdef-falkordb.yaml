@@ -35,4 +35,13 @@ spec:
     - {{ . }}
     {{- end }}
   {{- end}}
+
+  ## refused by KubeBlocks, owned by the addon and its start scripts
+  {{- if hasKey $pd "immutableParameters" }}
+  immutableParameters:
+    {{- $immParams := get $pd "immutableParameters" }}
+    {{- range $immParams }}
+    - {{ . }}
+    {{- end }}
+  {{- end}}
 {{- end}}

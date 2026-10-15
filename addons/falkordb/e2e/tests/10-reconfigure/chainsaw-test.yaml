@@ -11,6 +11,13 @@ spec:
     applied to the primary and quietly skipped on the replica. This restarts the
     component afterwards to prove the new value was rendered into the config the
     servers actually boot from.
+
+    It also covers the other two ways a parameter can be handled. A parameter
+    whose default is empty has to be emptied again once it was set, which only
+    works through the quoted empty string because KubeBlocks drops a really
+    empty value, and that empty value has to survive the restart too. And a
+    parameter the addon owns is listed as immutable, so a Reconfiguring
+    OpsRequest must never reach the servers with it.
   steps:
     - name: create the cluster and record the starting value
       try:
@@ -69,9 +76,44 @@ spec:
               for pod in $(fdb_pods "$NAMESPACE" fdb-config falkordb); do
                 fdb_retry "maxmemory-policy on $pod" \
                   fdb_assert_config "$NAMESPACE" "$pod" maxmemory-policy allkeys-lru
+                # The server normalizes the flags (KEA reads back as AKE), so
+                # only check that the value is no longer the empty default.
+                fdb_retry "notify-keyspace-events to be set on $pod" \
+                  fdb_assert_config_not "$NAMESPACE" "$pod" notify-keyspace-events ""
               done
       catch:
         - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-config
+            tail: 200
+
+    - name: empty notify-keyspace-events again
+      try:
+        - assert:
+            file: assert-running.yaml
+        - apply:
+            file: reconfigure-empty.yaml
+        - assert:
+            file: assert-reconfigure-empty-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # Two literal quote characters here mean the marker reached
+              # CONFIG SET untranslated, and an unchanged value means KubeBlocks
+              # dropped the change before the reload action ever ran.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-config falkordb); do
+                fdb_retry "notify-keyspace-events to be empty on $pod" \
+                  fdb_assert_config "$NAMESPACE" "$pod" notify-keyspace-events ""
+              done
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-config-reconfigure-empty
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-config
             tail: 200
@@ -110,6 +152,10 @@ spec:
               for pod in $(fdb_pods "$NAMESPACE" fdb-config falkordb); do
                 fdb_retry "maxmemory-policy to still be set on $pod" \
                   fdb_assert_config "$NAMESPACE" "$pod" maxmemory-policy allkeys-lru
+                # The rendered redis.conf now carries the quoted empty string,
+                # which redis has to read back as empty rather than as quotes.
+                fdb_retry "notify-keyspace-events to still be empty on $pod" \
+                  fdb_assert_config "$NAMESPACE" "$pod" notify-keyspace-events ""
               done
 
               # A restart tears down both servers, so the roles have to re-converge
@@ -127,6 +173,43 @@ spec:
                 fdb_verify_keys "$NAMESPACE" "$replica" e2e-config-after 20
       catch:
         - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-config
+            tail: 200
+
+    - name: an immutable parameter never reaches the servers
+      try:
+        - assert:
+            file: assert-running.yaml
+        - apply:
+            file: reconfigure-immutable.yaml
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # KubeBlocks 1.2.0-alpha.1 silently drops an immutable parameter
+              # and later versions fail the OpsRequest, so only the outcome on
+              # the servers is asserted, once the OpsRequest is done either way.
+              ops_done() {
+                case "$(kubectl get opsrequest fdb-config-reconfigure-immutable \
+                    -n "$NAMESPACE" -o jsonpath='{.status.phase}')" in
+                  Succeed | Failed | Aborted | Cancelled) return 0 ;;
+                esac
+                return 1
+              }
+              fdb_retry "the immutable OpsRequest to finish" ops_done
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-config falkordb); do
+                fdb_assert_config "$NAMESPACE" "$pod" dbfilename dump.rdb
+              done
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-config-reconfigure-immutable
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-config
             tail: 200

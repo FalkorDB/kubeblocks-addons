@@ -774,6 +774,31 @@ fdb_assert_config() {
   fdb_log "$pod has $parameter '$expected'"
 }
 
+# fdb_assert_config_not <namespace> <pod> <parameter> <unexpected>
+# For values the server normalizes, where only the old value is known exactly.
+#
+# Anything but a value differing from the old one has to fail, so the reply is
+# checked to be a real CONFIG GET reply (the parameter name, then its value)
+# first: an error reply or a failed exec also differs from the old value.
+fdb_assert_config_not() {
+  local namespace="$1" pod="$2" parameter="$3" unexpected="$4" reply actual
+  if ! reply="$(fdb_cli "$namespace" "$pod" CONFIG GET "$parameter")"; then
+    fdb_fail "could not read $parameter on $pod"
+    return 1
+  fi
+  reply="$(printf '%s' "$reply" | tr -d '\r')"
+  if [ "$(printf '%s\n' "$reply" | head -1)" != "$parameter" ]; then
+    fdb_fail "$pod did not return $parameter: '$reply'"
+    return 1
+  fi
+  actual="$(printf '%s\n' "$reply" | sed -n 2p)"
+  if [ "$actual" = "$unexpected" ]; then
+    fdb_fail "$pod still has $parameter '$actual'"
+    return 1
+  fi
+  fdb_log "$pod has $parameter '$actual'"
+}
+
 # fdb_assert_external_hostname <description> <value> <suffix>
 # Fails unless the value is a name under the given DNS suffix.
 #
