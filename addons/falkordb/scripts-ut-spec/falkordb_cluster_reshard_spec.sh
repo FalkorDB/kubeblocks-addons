@@ -66,11 +66,15 @@ EOF
 [OK] All 16384 slots covered.}"
         ;;
       *" --pipe"*)
-        local n errors=0 state
+        local n errors=0 state slots
         n=$(echo "$stdin" | grep -c 'SETSLOT' || true)
         state=$(echo "$stdin" | tr -d '\r' | grep -E -m1 '^(IMPORTING|MIGRATING|NODE)$')
+        # in RESP the slot is the second line after SETSLOT, past its length
+        # shellcheck disable=SC2046
+        slots=$(format_ranges $(echo "$stdin" | tr -d '\r' |
+          awk 'back == 2 {print} {back = (back ? back + 1 : 0)} $0 == "SETSLOT" {back = 1}'))
         echo "$args" | awk '{for (i = 1; i < NF; i++) if ($i == "-h") print $(i + 1)}' |
-          sed "s/$/ $state x$n/" >> "$setslot_log"
+          sed "s/$/ $state $slots/" >> "$setslot_log"
         if [ -n "$setslot_error" ]; then
           echo "$setslot_error"
           errors=1
@@ -199,6 +203,11 @@ EOF
       When call quote_arg 'a"b\c'
       The output should eq '"a\"b\\c"'
     End
+
+    It "escapes line breaks, so they cannot split the command"
+      When call quote_arg $'a\nb\rc'
+      The output should eq '"a\nb\rc"'
+    End
   End
 
   Describe "resolve_primary()"
@@ -225,6 +234,13 @@ EOF
 
     It "refuses the node ID of a replica"
       When call resolve_primary TO "$ID_A_REPLICA"
+      The status should be failure
+      The stderr should include "not a healthy primary"
+    End
+
+    It "refuses a primary the cluster has lost its link to"
+      CLUSTER_NODES=$(nodes_before | sed "/^$ID_C/s/ connected / disconnected /")
+      When call resolve_primary TO "$ID_C"
       The status should be failure
       The stderr should include "not a healthy primary"
     End
@@ -280,11 +296,11 @@ EOF
       When call reshard
       The status should be success
       The output should include "moved 100 slots"
-      The contents of file "$setslot_log" should eq "10.0.0.2 IMPORTING x100
-10.0.0.1 MIGRATING x100
-10.0.0.2 NODE x100
-10.0.0.1 NODE x100
-10.0.0.3 NODE x100"
+      The contents of file "$setslot_log" should eq "10.0.0.2 IMPORTING 0-99
+10.0.0.1 MIGRATING 0-99
+10.0.0.2 NODE 0-99
+10.0.0.1 NODE 0-99
+10.0.0.3 NODE 0-99"
     End
 
     It "opens at most SLOT_BATCH_SIZE slots at a time"
@@ -292,16 +308,16 @@ EOF
       When call reshard
       The status should be success
       The output should include "moved 101 slots"
-      The contents of file "$setslot_log" should eq "10.0.0.2 IMPORTING x60
-10.0.0.1 MIGRATING x60
-10.0.0.2 NODE x60
-10.0.0.1 NODE x60
-10.0.0.3 NODE x60
-10.0.0.2 IMPORTING x41
-10.0.0.1 MIGRATING x41
-10.0.0.2 NODE x41
-10.0.0.1 NODE x41
-10.0.0.3 NODE x41"
+      The contents of file "$setslot_log" should eq "10.0.0.2 IMPORTING 0-59
+10.0.0.1 MIGRATING 0-59
+10.0.0.2 NODE 0-59
+10.0.0.1 NODE 0-59
+10.0.0.3 NODE 0-59
+10.0.0.2 IMPORTING 60-99,5000
+10.0.0.1 MIGRATING 60-99,5000
+10.0.0.2 NODE 60-99,5000
+10.0.0.1 NODE 60-99,5000
+10.0.0.3 NODE 60-99,5000"
     End
 
     It "skips slots that already belong to TO"
@@ -309,6 +325,11 @@ EOF
       When call reshard
       The status should be success
       The output should include "moving 101 slots, 100 already belong to fdb-shard-b"
+      The contents of file "$setslot_log" should include "10.0.0.2 IMPORTING 0-99
+10.0.0.1 MIGRATING 0-99"
+      The contents of file "$setslot_log" should include "10.0.0.2 IMPORTING 5000
+10.0.0.1 MIGRATING 5000"
+      The contents of file "$setslot_log" should not include "6000"
     End
 
     It "does nothing when every slot already belongs to TO"

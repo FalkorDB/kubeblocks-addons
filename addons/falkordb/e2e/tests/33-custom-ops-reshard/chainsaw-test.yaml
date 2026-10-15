@@ -167,7 +167,8 @@ spec:
               dst_after="$(fdb_node_slots "$NAMESPACE" "$pod" "$dst_id")"
               src_want=$(($(cat "$state/src-before") - moved))
               dst_want=$(($(cat "$state/dst-before") + moved))
-              if [ "$src_after" -ne "$src_want" ] || [ "$dst_after" -ne "$dst_want" ]; then
+              # compared as strings, so a count that could not be read fails
+              if [ "$src_after" != "$src_want" ] || [ "$dst_after" != "$dst_want" ]; then
                 fdb_fail "source owns $src_after slots (want $src_want), target owns $dst_after (want $dst_want)"
                 fdb_primary_slots "$NAMESPACE" "$pod" >&2
                 exit 1

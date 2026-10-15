@@ -124,11 +124,14 @@ node_setslot() {
 }
 
 # quote_arg <string>
-# Prints the string double quoted for redis-cli's command line parser.
+# Prints the string double quoted for redis-cli's command line parser, with
+# line breaks escaped so the string cannot split the command in two.
 quote_arg() {
   local s="$1"
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
   printf '"%s"' "$s"
 }
 
@@ -228,8 +231,8 @@ node_address() {
 }
 
 # primary_of <node id>
-# Prints the node itself when it is a healthy primary, its primary when it is
-# a replica, and fails otherwise.
+# Prints the node itself when it is a healthy, connected primary, its primary
+# when it is a replica, and fails otherwise.
 primary_of() {
   local id="$1" line flags
   line=$(node_line "$id")
@@ -238,6 +241,10 @@ primary_of() {
   fi
   flags=$(echo "$line" | awk '{print $3}')
   if [[ ",$flags," == *",fail,"* ]] || [[ ",$flags," == *",fail?,"* ]] || [[ ",$flags," == *",handshake,"* ]]; then
+    return 1
+  fi
+  # a primary this node has lost its link to cannot be relied on to take part
+  if [ "$(echo "$line" | awk '{print $8}')" != "connected" ]; then
     return 1
   fi
   if [[ ",$flags," == *",master,"* ]]; then
@@ -355,11 +362,11 @@ load_slot_owners() {
 }
 
 # other_primaries <node id...>
-# Prints every healthy primary except the given ones.
+# Prints every healthy, connected primary except the given ones.
 other_primaries() {
   local exclude=" $* "
   echo "$CLUSTER_NODES" | awk -v exclude="$exclude" \
-    '$3 ~ /master/ && $3 !~ /fail/ && index(exclude, " " $1 " ") == 0 {print $1}'
+    '$3 ~ /master/ && $3 !~ /fail/ && $8 == "connected" && index(exclude, " " $1 " ") == 0 {print $1}'
 }
 
 # migrate_slot_keys <source id> <target id> <slot>
@@ -374,6 +381,7 @@ migrate_slot_keys() {
   target_port=${target_address##*:}
   # MIGRATE authenticates to the target itself, so the credentials have to be
   # part of the command. They go to redis-cli on stdin, not in its arguments.
+  # AUTH2 needs Redis 6.0; the oldest supported image, v4.12.5, is Redis 7.4.
   auth=""
   if [ -n "$REDIS_DEFAULT_PASSWORD" ]; then
     if [ -n "$REDIS_DEFAULT_USER" ]; then
