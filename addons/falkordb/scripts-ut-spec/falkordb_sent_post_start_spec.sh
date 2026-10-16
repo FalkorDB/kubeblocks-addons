@@ -25,6 +25,14 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
   }
   AfterAll 'cleanup'
 
+  # Answers a command the way a healthy sentinel does.
+  sentinel_reply() {
+    case "$1" in
+      ping) echo "PONG" ;;
+      *) echo "OK" ;;
+    esac
+  }
+
   Describe "acl_set_user_for_redis_sentinel()"
     setup_env() {
       export SENTINEL_SERVICE_PORT="26379"
@@ -42,8 +50,7 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
       AfterEach 'cleanup_env'
 
       redis-cli() {
-        echo "OK"
-        return 0
+        sentinel_reply "$(cat)"
       }
 
       It "sets the sentinel user and saves the ACL"
@@ -78,25 +85,76 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
       BeforeEach 'setup_env'
       AfterEach 'cleanup_env'
 
-      ping_attempts=0
+      # redis-cli exits 0 even when it cannot connect, so the attempts that
+      # find no sentinel do too.
+      ping_log="./post-start-ping.log"
       redis-cli() {
-        if echo "$*" | grep -q "ping"; then
-          ping_attempts=$((ping_attempts + 1))
-          if [ "$ping_attempts" -lt 2 ]; then
-            return 1
+        local command
+        command=$(cat)
+        if [ "$command" = "ping" ]; then
+          echo "ping" >> "$ping_log"
+          if [ "$(wc -l < "$ping_log")" -lt 2 ]; then
+            echo "Could not connect to Redis at localhost:26379: Connection refused" >&2
+            return 0
           fi
         fi
-        echo "OK"
+        sentinel_reply "$command"
+      }
+      sleep() {
+        return 0
+      }
+      After 'rm -f "$ping_log"'
+
+      It "waits until sentinel answers PONG before setting the user"
+        When call acl_set_user_for_redis_sentinel
+        The status should be success
+        The output should include "redis sentinel user and password set successfully."
+        The contents of file "$ping_log" should eq "ping
+ping"
+      End
+    End
+
+    Context "when the sentinel never answers"
+      BeforeEach 'setup_env'
+      AfterEach 'cleanup_env'
+
+      redis-cli() {
+        cat >/dev/null
+        echo "Could not connect to Redis at localhost:26379: Connection refused" >&2
         return 0
       }
       sleep() {
         return 0
       }
 
-      It "waits until sentinel answers before setting the user"
+      It "fails instead of leaving the default user without a password"
+        SENTINEL_PING_MAX_RETRIES=2
         When call acl_set_user_for_redis_sentinel
-        The status should be success
-        The output should include "redis sentinel user and password set successfully."
+        The status should be failure
+        The stderr should include "sentinel did not answer PING after 2 attempts"
+        The output should not include "set successfully"
+      End
+    End
+
+    Context "when the sentinel rejects the password"
+      BeforeEach 'setup_env'
+      AfterEach 'cleanup_env'
+
+      redis-cli() {
+        local command
+        command=$(cat)
+        case "$command" in
+          ping) echo "PONG" ;;
+          *) echo "ERR Error in ACL SETUSER modifier" ;;
+        esac
+      }
+
+      It "fails"
+        When call acl_set_user_for_redis_sentinel
+        The status should be failure
+        The stderr should include "failed to set the password of sentineluser"
+        The stderr should not include "sentinelpass"
+        The output should not include "set successfully"
       End
     End
   End
@@ -120,8 +178,7 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
       AfterEach 'cleanup_env'
 
       redis-cli() {
-        echo "OK"
-        return 0
+        sentinel_reply "$(cat)"
       }
 
       It "creates the extra user"
@@ -140,18 +197,22 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
       }
       BeforeEach 'set_acl'
 
+      redis_cli_log="./post-start-redis-cli.log"
       redis-cli() {
         # the command is fed through stdin so that no secret ends up in argv
-        echo "args:$*"
-        cat
-        return 0
+        local command
+        command=$(cat)
+        echo "args:$* stdin:$command" >> "$redis_cli_log"
+        sentinel_reply "$command"
       }
+      After 'rm -f "$redis_cli_log"'
 
       It "applies the custom ACL rules"
         When call acl_set_extra_user_for_redis_sentinel
         The status should be success
-        The output should include "~monitor:* +@read"
-        The output should include "args:-h localhost -p 26379"
+        The output should include "extra sentinel user extrauser set successfully."
+        The contents of file "$redis_cli_log" should include "~monitor:* +@read"
+        The contents of file "$redis_cli_log" should include "args:-h localhost -p 26379"
       End
     End
 
@@ -159,17 +220,20 @@ Describe "FalkorDB Sentinel Post-Start Script Tests"
       BeforeEach 'setup_env'
       AfterEach 'cleanup_env'
 
+      redis_cli_log="./post-start-redis-cli.log"
       redis-cli() {
-        echo "args:$*"
-        cat >/dev/null
-        return 0
+        echo "args:$*" >> "$redis_cli_log"
+        sentinel_reply "$(cat)"
       }
+      After 'rm -f "$redis_cli_log"'
 
       It "does not pass any password on the command line"
         When call acl_set_extra_user_for_redis_sentinel
         The status should be success
-        The output should not include "extrapass"
-        The output should not include "sentinelpass"
+        The output should include "extra sentinel user extrauser set successfully."
+        The contents of file "$redis_cli_log" should include "args:-h localhost -p 26379"
+        The contents of file "$redis_cli_log" should not include "extrapass"
+        The contents of file "$redis_cli_log" should not include "sentinelpass"
       End
     End
 

@@ -290,8 +290,17 @@ Describe "FalkorDB Sentinel Member Join Script Tests"
       }
     }
 
+    # A sentinel whose default user has a password refuses commands without AUTH.
+    stub_sentinel_cli_without_auth() {
+      sentinel_cli_without_auth() {
+        printf '%s|%s\n' "$1" "$2" >> "$sentinel_cli_log"
+        echo "NOAUTH Authentication required."
+      }
+    }
+
     acl_setup() {
       stub_sentinel_cli_argv
+      stub_sentinel_cli_without_auth
       rm -f "$sentinel_acl_log"
       SENTINEL_POD_NAME_LIST="fdb-falkordb-sent-1,fdb-falkordb-sent-0,fdb-falkordb-sent-2"
       CURRENT_POD_NAME="fdb-falkordb-sent-0"
@@ -439,6 +448,62 @@ SAVE"
       End
     End
 
+    Context "when the joining sentinel has no password on its default user"
+      no_password() {
+        sentinel_cli_without_auth() {
+          printf '%s|%s\n' "$1" "$2" >> "$sentinel_cli_log"
+          case "$2" in
+            PING) echo "PONG" ;;
+            *) echo "OK" ;;
+          esac
+        }
+      }
+      Before 'no_password'
+
+      It "sets the password before copying the ACL"
+        When call sync_acl_to_joining_member
+        The status should be success
+        The stdout should include "fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc has no password on its default user, setting it."
+        The stdout should include "now matches this sentinel"
+        The stdout should not include "sentinel_password"
+        The contents of file "$sentinel_cli_log" should include "fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc|ACL SETUSER default on >sentinel_password allchannels +@all"
+        The contents of file "$sentinel_acl_log" should include "ACL
+SAVE"
+      End
+    End
+
+    Context "when the password cannot be set on the joining sentinel"
+      setuser_fails() {
+        sentinel_cli_without_auth() {
+          case "$2" in
+            PING) echo "PONG" ;;
+            *) echo "ERR unknown command" ;;
+          esac
+        }
+      }
+      Before 'setuser_fails'
+
+      It "fails before copying the ACL"
+        When call sync_acl_to_joining_member
+        The status should be failure
+        The stdout should include "has no password on its default user"
+        The stderr should include "failed to set the password of the default user"
+        The contents of file "$sentinel_acl_log" should not include "SETUSER"
+      End
+    End
+
+    Context "without a sentinel password"
+      no_sentinel_password() { unset SENTINEL_PASSWORD; }
+      Before 'no_sentinel_password'
+
+      It "does not touch the default user"
+        When call sync_acl_to_joining_member
+        The status should be success
+        The stdout should include "now matches this sentinel"
+        The path "$sentinel_cli_log" should not be exist
+      End
+    End
+
     Context "when ACL SAVE fails"
       save_fails() {
         sentinel_cli_argv() {
@@ -464,6 +529,7 @@ SAVE"
 
   Describe "member_join()"
     member_join_setup() {
+      sentinel_cli_without_auth() { echo "NOAUTH Authentication required."; }
       sentinel_cli_argv() {
         local host="$1"
         shift
