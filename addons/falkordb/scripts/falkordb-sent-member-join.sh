@@ -300,11 +300,18 @@ ensure_default_user_password() {
     return 0
   fi
   local reply
-  reply=$(sentinel_cli_without_auth "$target" "PING" 2>/dev/null)
-  if ! equals "$reply" "PONG"; then
-    # NOAUTH: the password is in place.
-    return 0
-  fi
+  reply=$(sentinel_cli_without_auth "$target" "PING" 2>&1)
+  case "$reply" in
+    *NOAUTH*)
+      # the password is in place.
+      return 0
+      ;;
+    PONG) ;;
+    *)
+      echo "Error: could not tell whether the default user of $target has a password: $reply" >&2
+      return 1
+      ;;
+  esac
   echo "$target has no password on its default user, setting it."
   reply=$(sentinel_cli_without_auth "$target" "ACL SETUSER default on >${SENTINEL_PASSWORD} allchannels +@all" 2>&1)
   if ! equals "$reply" "OK"; then

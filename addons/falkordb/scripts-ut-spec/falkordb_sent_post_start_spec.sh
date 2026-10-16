@@ -259,6 +259,34 @@ ping"
       End
     End
 
+    # an empty REDISCLI_AUTH makes redis-cli send AUTH "", which a password-less sentinel rejects.
+    Context "when no sentinel password is configured"
+      BeforeEach 'setup_env'
+      AfterEach 'cleanup_env'
+
+      no_sentinel_password() {
+        unset SENTINEL_PASSWORD
+        export REDISCLI_AUTH="inherited"
+      }
+      BeforeEach 'no_sentinel_password'
+      AfterEach 'unset REDISCLI_AUTH'
+
+      redis_cli_log="./post-start-redis-cli.log"
+      redis-cli() {
+        echo "REDISCLI_AUTH=${REDISCLI_AUTH-<unset>}" >> "$redis_cli_log"
+        sentinel_reply "$(cat)"
+      }
+      After 'rm -f "$redis_cli_log"'
+
+      It "does not set REDISCLI_AUTH"
+        When call acl_set_extra_user_for_redis_sentinel
+        The status should be success
+        The output should include "extra sentinel user extrauser set successfully."
+        The contents of file "$redis_cli_log" should include "REDISCLI_AUTH=<unset>"
+        The contents of file "$redis_cli_log" should not include "REDISCLI_AUTH=inherited"
+      End
+    End
+
     Context "when the extra password is missing"
       BeforeEach 'setup_env'
       AfterEach 'cleanup_env'

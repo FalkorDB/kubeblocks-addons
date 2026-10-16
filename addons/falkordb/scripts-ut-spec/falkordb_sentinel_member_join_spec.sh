@@ -449,9 +449,14 @@ SAVE"
     End
 
     Context "when the joining sentinel has no password on its default user"
+      # Writes to the same log as sentinel_cli_argv, so the order of the
+      # password repair and the ACL copy can be checked.
       no_password() {
         sentinel_cli_without_auth() {
-          printf '%s|%s\n' "$1" "$2" >> "$sentinel_cli_log"
+          {
+            echo "--- $1 (no auth)"
+            echo "$2"
+          } >> "$sentinel_acl_log"
           case "$2" in
             PING) echo "PONG" ;;
             *) echo "OK" ;;
@@ -460,15 +465,29 @@ SAVE"
       }
       Before 'no_password'
 
+      # Line number of the first line equal to $1 in the ACL log.
+      acl_log_line() {
+        grep -nxF -- "$1" "$sentinel_acl_log" | head -n 1 | cut -d: -f1
+      }
+
+      password_set_before_acl_copy() {
+        local password_line setuser_line
+        password_line=$(acl_log_line "ACL SETUSER default on >sentinel_password allchannels +@all")
+        setuser_line=$(acl_log_line "SETUSER")
+        [ -n "$password_line" ] && [ -n "$setuser_line" ] && [ "$password_line" -lt "$setuser_line" ]
+      }
+
       It "sets the password before copying the ACL"
         When call sync_acl_to_joining_member
         The status should be success
         The stdout should include "fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc has no password on its default user, setting it."
         The stdout should include "now matches this sentinel"
         The stdout should not include "sentinel_password"
-        The contents of file "$sentinel_cli_log" should include "fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc|ACL SETUSER default on >sentinel_password allchannels +@all"
+        The contents of file "$sentinel_acl_log" should include "--- fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc (no auth)
+ACL SETUSER default on >sentinel_password allchannels +@all"
         The contents of file "$sentinel_acl_log" should include "ACL
 SAVE"
+        Assert password_set_before_acl_copy
       End
     End
 
@@ -488,6 +507,22 @@ SAVE"
         The status should be failure
         The stdout should include "has no password on its default user"
         The stderr should include "failed to set the password of the default user"
+        The contents of file "$sentinel_acl_log" should not include "SETUSER"
+      End
+    End
+
+    Context "when the joining sentinel cannot be probed"
+      probe_fails() {
+        sentinel_cli_without_auth() {
+          echo "Could not connect to Redis at $1:26379: Connection refused"
+        }
+      }
+      Before 'probe_fails'
+
+      It "fails instead of assuming the password is in place"
+        When call sync_acl_to_joining_member
+        The status should be failure
+        The stderr should include "could not tell whether the default user of fdb-falkordb-sent-2.fdb-falkordb-sent-headless.test.svc has a password: Could not connect"
         The contents of file "$sentinel_acl_log" should not include "SETUSER"
       End
     End

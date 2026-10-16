@@ -31,7 +31,13 @@ sentinel_cli() {
   # that neither shows up in the process arguments.
   local command="$1"
   (
-    export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    # An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, which a
+    # password-less sentinel rejects, so it is only set when there is a password.
+    if [ -n "${SENTINEL_PASSWORD}" ]; then
+      export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    else
+      unset REDISCLI_AUTH
+    fi
     # shellcheck disable=SC2086
     printf '%s\n' "$command" | redis-cli $REDIS_CLI_TLS_CMD -h localhost -p "$sentinel_service_port"
   )
