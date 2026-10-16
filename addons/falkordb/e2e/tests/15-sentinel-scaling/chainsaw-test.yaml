@@ -77,6 +77,10 @@ spec:
                 # -failover-abort-not-elected.
                 fdb_retry "$pod to discover the other four sentinels" \
                   fdb_assert_sentinel_peers "$NAMESPACE" "$pod" 4
+                # A new sentinel whose postStart did not set the default user's
+                # password accepts every command without AUTH, and the
+                # memberJoin of the next scale-out fails on it forever.
+                fdb_assert_sentinel_requires_auth "$NAMESPACE" "$pod"
               done
       catch:
         - events: {}
