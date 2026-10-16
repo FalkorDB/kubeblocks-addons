@@ -79,6 +79,8 @@ Describe "FalkorDB Sentinel Rebuild ACL Sync Script Tests"
     stub_sentinel_cli_argv
     # the rebuilt sentinel answers PING, see wait_for_joining_sentinel.
     sentinel_cli() { echo "PONG"; }
+    # the rebuilt sentinel's default user has a password, see ensure_default_user_password.
+    sentinel_cli_without_auth() { echo "NOAUTH Authentication required."; }
     rm -f "$sentinel_acl_log"
     not_monitoring=""
     unreachable=""
