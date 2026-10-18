@@ -1565,17 +1565,28 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       End
     End
 
-    Context "when the node follows a failed primary of its own shard"
+    Context "when the node follows a primary of its own shard that is not live"
+      # each case breaks exactly one condition, so removing any one exclusion
+      # makes its case fail
       setup() {
         export CURRENT_POD_NAME="falkordb-shard-sxj-1"
       }
       Before "setup"
       get_cluster_nodes_info() {
-        echo "dead-id 10.42.0.3:6379@16379,falkordb-shard-sxj-2.falkordb-shard-sxj-headless master,fail - 0 0 4 disconnected 0-16383"
-        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless myself,slave dead-id 0 0 4 connected"
+        echo "old-id 10.42.0.3:6379@16379,falkordb-shard-sxj-2.falkordb-shard-sxj-headless $followed_flags - 0 0 4 $followed_link 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless myself,slave old-id 0 0 4 connected"
       }
 
-      It "asks for a repair"
+      Parameters
+        "master,fail"      connected
+        "master,noaddr"    connected
+        "master,handshake" connected
+        "master"           disconnected
+      End
+
+      It "asks for a repair when the primary is $1 and $2"
+        followed_flags="$1"
+        followed_link="$2"
         When call local_node_role_is_settled "primary-id"
         The status should equal 1
       End
