@@ -438,12 +438,18 @@ run_local_redis_command() {
   return 0
 }
 
-# succeeds when the local node is a master that serves no slots
+# returns 0 when the local node is a master that serves no slots, 1 when it is not, and
+# 2 when its own view can not be read
 local_node_is_slotless_master() {
   local local_nodes_info
-  local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port") || return 1
+  local myself_line
+  local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port") || return 2
+  myself_line=$(echo "$local_nodes_info" | awk '$3 ~ /myself/ {print; exit}')
+  if is_empty "$myself_line"; then
+    return 2
+  fi
   # fields 9 and later are the slots the node serves
-  echo "$local_nodes_info" | awk '$3 ~ /myself/ && $3 ~ /master/ && NF <= 8 {found = 1} END {exit !found}'
+  echo "$myself_line" | awk '$3 ~ /master/ && NF <= 8 {found = 1} END {exit !found}'
 }
 
 # usage: repair_partially_joined_secondary <primary_node_id>
@@ -607,8 +613,13 @@ scale_redis_cluster_replica() {
   if ! is_rebuild_instance && check_node_in_cluster_with_retry "$primary_node_endpoint" "$primary_node_port" "$CURRENT_POD_NAME" "$current_node_id"; then
     # a node that met the cluster but never became a replica is "in the cluster" too, as a
     # master serving no slots; it has to be repaired below rather than left a second master
-    if local_node_is_slotless_master; then
+    local_node_is_slotless_master && slotless_status=0 || slotless_status=$?
+    if [ "$slotless_status" -eq 0 ]; then
       echo "Node $CURRENT_POD_NAME is in the cluster as a master that serves no slots, make it a replica of $primary_node_endpoint_with_port"
+    elif [ "$slotless_status" -eq 2 ]; then
+      # without its own view the role can not be confirmed; the repair below re-reads it,
+      # and add-node or the replication check settle the rest
+      echo "Failed to read the local cluster view of $CURRENT_POD_NAME, verify its role through the join path" >&2
     else
       # if current pod is primary node, check the others primary info, if the others primary node info is expired, send cluster meet command again
       echo "Current pod $CURRENT_POD_NAME is a secondary node, check and meet current primary node..."

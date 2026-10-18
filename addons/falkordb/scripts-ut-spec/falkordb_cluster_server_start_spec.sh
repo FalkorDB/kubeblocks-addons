@@ -1378,6 +1378,37 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         End
       End
 
+      Context "and its own view of the cluster can not be read"
+        check_node_in_cluster_with_retry() {
+          return 0
+        }
+
+        local_node_is_slotless_master() {
+          return 2
+        }
+
+        check_and_meet_current_primary_node() {
+          echo "early exit should not be taken"
+        }
+
+        repair_partially_joined_secondary() {
+          echo "repairing towards $1"
+          return 0
+        }
+
+        scale_out_replica_send_meet() {
+          return 0
+        }
+
+        It "verifies the role through the join path instead of exiting early"
+          When run scale_redis_cluster_replica
+          The status should be success
+          The stdout should not include "early exit should not be taken"
+          The stderr should include "Failed to read the local cluster view"
+          The stdout should include "repairing towards primary-cluster-id"
+        End
+      End
+
       Context "and the repair makes it replicate the primary"
         repair_partially_joined_secondary() {
           return 0
@@ -1495,6 +1526,18 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       It "fails"
         When call local_node_is_slotless_master
         The status should be failure
+      End
+    End
+
+    Context "when the local view can not be read"
+      # get_cluster_nodes_info prints nothing when redis-cli fails
+      get_cluster_nodes_info() {
+        echo ""
+      }
+
+      It "reports it as unknown"
+        When call local_node_is_slotless_master
+        The status should equal 2
       End
     End
   End

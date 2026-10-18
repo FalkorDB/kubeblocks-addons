@@ -126,15 +126,22 @@ spec:
                 fdb_cli "$NAMESPACE" "$1" CLUSTER INFO | tr -d '\r' |
                   awk -F: -v k="$2" '$1 == k {print $2; exit}'
               }
-              # slots served by reachable masters, as <pod> sees them
+              # slots served by reachable masters, as <pod> sees them; fails
+              # when the pod does not answer with its own node map, so an
+              # unreachable pod is never read as "serves no slots"
               healthy_slots() {
-                fdb_cli "$NAMESPACE" "$1" CLUSTER NODES | tr -d '\r' |
-                  awk '$3 ~ /master/ && $3 !~ /fail|noaddr/ {
+                nodes="$(fdb_cli "$NAMESPACE" "$1" CLUSTER NODES | tr -d '\r')" || return 1
+                echo "$nodes" | awk '$3 ~ /myself/ {found = 1} END {exit !found}' || return 1
+                echo "$nodes" |
+                  awk '$3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" {
                     for (i = 9; i <= NF; i++) {
                       if ($i ~ /^\[/) continue
                       n = split($i, r, "-"); owned += (n == 2) ? r[2] - r[1] + 1 : 1
                     }
                   } END {print owned + 0}'
+              }
+              cluster_phase() {
+                kubectl get cluster fdb-split -n "$NAMESPACE" -o jsonpath='{.status.phase}'
               }
 
               # Long enough for the new shard's postProvision to run and be
@@ -154,23 +161,31 @@ spec:
                   fdb_fail "new shard $new joined a cluster that contains the split-off shard"
                   exit 1
                 fi
-                rest_slots="$(healthy_slots "$rest")"
+                rest_slots="$(healthy_slots "$rest")" || {
+                  fdb_fail "$rest did not answer CLUSTER NODES"
+                  exit 1
+                }
                 [ "$rest_slots" -lt 16384 ] || {
                   fdb_fail "the split-off shard's slots were handed to the rest of the cluster ($rest_slots slots served)"
                   fdb_cli "$NAMESPACE" "$rest" CLUSTER NODES >&2
                   exit 1
                 }
-                phase="$(kubectl get cluster fdb-split -n "$NAMESPACE" -o jsonpath='{.status.phase}')"
+                phase="$(cluster_phase)"
                 fdb_log "round $i/$rounds: island knows $island_known, $new knows $new_known, rest serves $rest_slots slots, cluster $phase"
+                if [ "$phase" = Running ]; then
+                  fdb_fail "the cluster reports Running while its shards are split"
+                  exit 1
+                fi
                 i=$((i + 1))
                 sleep 15
               done
 
+              phase="$(cluster_phase)"
               if [ "$phase" = Running ]; then
                 fdb_fail "the cluster reports Running while its shards are split"
                 exit 1
               fi
-              fdb_log "the split was left alone and the cluster is not reported Running ($phase)"
+              fdb_log "the split was left alone and the cluster was never reported Running ($phase)"
       catch:
         - events: {}
         - podLogs:

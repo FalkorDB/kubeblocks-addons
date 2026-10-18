@@ -436,8 +436,10 @@ fdb_assert_shards_own_slots() {
 }
 
 # fdb_assert_single_cluster <namespace> <cluster> <sharding> <expected shards>
-# Fails unless every pod of the sharding sees the same <expected> primaries
-# serving slots, i.e. all shards are in one cluster.
+# Fails unless every pod of the sharding sees the same <expected> reachable
+# primaries serving slots, i.e. all shards are in one cluster. An entry that is
+# failed, has no address or is still in handshake is not a member: it is what a
+# cluster keeps of a node that left it.
 #
 # Shards that formed separate clusters each report cluster_state:ok and cover
 # all 16384 slots on their own, so asserting through any single pod can pass
@@ -448,7 +450,8 @@ fdb_assert_single_cluster() {
   local pod view first_view="" first_pod="" count
   for pod in $(fdb_sharding_pods "$namespace" "$cluster" "$sharding"); do
     view="$(fdb_cli "$namespace" "$pod" CLUSTER NODES | tr -d '\r' |
-      awk '$3 ~ /master/ && $3 !~ /fail/ && NF > 8 {print $1}' | sort | paste -sd, -)"
+      awk '$3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" && NF > 8 {print $1}' |
+      sort | paste -sd, -)"
     if [ -z "$first_pod" ]; then
       first_pod="$pod"
       first_view="$view"
@@ -489,7 +492,8 @@ fdb_assert_replica_of_own_shard() {
   esac
   master_id="$(echo "$myself" | awk '{print $4}')"
   master_line="$(echo "$nodes" | awk -v id="$master_id" '$1 == id {print; exit}')"
-  if ! echo "$master_line" | awk '$3 ~ /master/ && $3 !~ /fail/ && NF > 8 {ok = 1} END {exit !ok}'; then
+  if ! echo "$master_line" |
+    awk '$3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" && NF > 8 {ok = 1} END {exit !ok}'; then
     fdb_fail "$pod replicates $master_id, which is not a healthy primary serving slots: ${master_line:-<unknown node>}"
     return 1
   fi
