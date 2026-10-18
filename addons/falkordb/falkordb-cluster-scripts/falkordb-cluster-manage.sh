@@ -318,6 +318,19 @@ fix_unstable_cluster_and_defer() {
     return 0
   fi
 
+  # `--cluster fix` hands every unassigned slot to a random master the node knows. Pointed
+  # at a node that has not joined the cluster yet (a shard still being created, or one that
+  # restarted), that is the node itself, which then holds all 16384 slots in a cluster of
+  # its own. Only let it repair open slots in a cluster whose slots are all assigned.
+  local cluster_info
+  local slots_assigned
+  cluster_info=$(get_cluster_info "$(echo "$node_with_port" | cut -d':' -f1)" "$node_port")
+  slots_assigned=$(echo "$cluster_info" | awk -F: '/cluster_slots_assigned/{print $2}' | tr -d '[:space:]')
+  if [ "${slots_assigned:-0}" != "16384" ]; then
+    echo "FalkorDB Cluster node $node_with_port has ${slots_assigned:-0} of 16384 slots assigned; not running cluster fix, defer lifecycle action for retry." >&2
+    return 1
+  fi
+
   echo "FalkorDB Cluster is not stable; run cluster fix and defer lifecycle action for retry." >&2
   if fix_cluster_slots "$node_with_port" "$node_port"; then
     echo "FalkorDB Cluster fix completed; defer current lifecycle action so the next retry observes the fixed state." >&2
@@ -1093,6 +1106,37 @@ check_current_shard_other_nodes_are_joined() {
   return 0
 }
 
+## shards that each formed a cluster of their own all report cluster_state:ok and full
+## slot coverage, so check that the node's cluster has a member of every other shard
+check_cluster_knows_other_shards() {
+  local cluster_node="$1"
+  local cluster_node_port="$2"
+  local cluster_nodes_info
+  local pod_name
+  local shard
+  local -A checked_shards=()
+  local missing_shards=()
+  if ! cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port"); then
+    echo "Failed to get cluster nodes info in check_cluster_knows_other_shards" >&2
+    return 1
+  fi
+  for pod_name in "${other_undeleted_component_pod_names[@]}"; do
+    shard="${pod_name%-*}"
+    if [ -n "${checked_shards[$shard]}" ]; then
+      continue
+    fi
+    checked_shards[$shard]=1
+    if ! contains "$cluster_nodes_info" "$shard-"; then
+      missing_shards+=("$shard")
+    fi
+  done
+  if [ ${#missing_shards[@]} -gt 0 ]; then
+    echo "The cluster of $cluster_node does not know the shards: ${missing_shards[*]}" >&2
+    return 1
+  fi
+  return 0
+}
+
 ## the share of the 16384 slots each shard should own once scaled out; fails when
 ## the current shard's pods cannot be counted
 scale_out_slots_per_shard() {
@@ -1139,6 +1183,10 @@ scale_out_redis_cluster_shard() {
 
   current_primary_joined=false
   if check_slots_covered "$primary_node_with_port" "$SERVICE_PORT"; then
+    if ! check_cluster_knows_other_shards "$primary_node_fqdn" "$primary_node_port"; then
+      echo "The current shard primary $primary_node_with_port serves a cluster without every other shard, the shards formed separate clusters" >&2
+      return 1
+    fi
     if check_current_shard_other_nodes_are_joined "$primary_node_fqdn" "$primary_node_port"; then
       ## slots covered cluster-wide and every node met is not enough: a retry after
       ## an interrupted reshard sees exactly that while this shard owns none or only
