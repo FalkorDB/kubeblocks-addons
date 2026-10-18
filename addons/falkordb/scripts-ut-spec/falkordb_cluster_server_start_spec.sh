@@ -823,6 +823,10 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       return 2
     }
 
+    local_node_is_slotless_master() {
+      return 1
+    }
+
     Context "when redis server is not ready"
       check_redis_server_ready_with_retry() {
         return 1
@@ -1340,6 +1344,40 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
       After "un_setup"
 
+      Context "and the primary lists it as a master that serves no slots"
+        # it met the cluster but never became a replica: the membership check alone
+        # would report it joined and leave the shard with two masters
+        check_node_in_cluster_with_retry() {
+          return 0
+        }
+
+        local_node_is_slotless_master() {
+          return 0
+        }
+
+        check_and_meet_current_primary_node() {
+          echo "early exit should not be taken"
+        }
+
+        repair_partially_joined_secondary() {
+          echo "repairing towards $1"
+          return 0
+        }
+
+        scale_out_replica_send_meet() {
+          return 0
+        }
+
+        It "repairs it into a replica instead of exiting early"
+          When run scale_redis_cluster_replica
+          The status should be success
+          The stdout should not include "early exit should not be taken"
+          The stdout should include "is in the cluster as a master that serves no slots"
+          The stdout should include "repairing towards primary-cluster-id"
+          The stdout should include "All primary nodes have been successfully met"
+        End
+      End
+
       Context "and the repair makes it replicate the primary"
         repair_partially_joined_secondary() {
           return 0
@@ -1425,6 +1463,42 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
     End
   End
 
+  Describe "local_node_is_slotless_master()"
+    Context "when the node is a master serving no slots"
+      get_cluster_nodes_info() {
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+      }
+
+      It "succeeds"
+        When call local_node_is_slotless_master
+        The status should be success
+      End
+    End
+
+    Context "when the node is a master serving slots"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 1 connected 0-5460"
+      }
+
+      It "fails"
+        When call local_node_is_slotless_master
+        The status should be failure
+      End
+    End
+
+    Context "when the node is a replica"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave primary-id 0 0 1 connected"
+      }
+
+      It "fails"
+        When call local_node_is_slotless_master
+        The status should be failure
+      End
+    End
+  End
+
   Describe "repair_partially_joined_secondary()"
     setup() {
       export service_port="6379"
@@ -1486,6 +1560,36 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         The status should equal 0
         The stdout should include "replicated it directly"
         The contents of file "./redis_calls.log" should equal "cluster replicate primary-id"
+      End
+    End
+
+    Context "when the node knows the primary but CLUSTER REPLICATE fails"
+      replicate_fails="1"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+      }
+
+      Context "and it holds no keys"
+        It "resets it so add-node can run"
+          When call repair_partially_joined_secondary "primary-id"
+          The status should equal 2
+          The stderr should include "CLUSTER REPLICATE primary-id failed"
+          The stdout should include "reset the stale cluster state"
+          The contents of file "./redis_calls.log" should include "cluster reset soft"
+        End
+      End
+
+      Context "and it is a master holding keys"
+        dbsize_reply="5"
+
+        It "refuses to reset it"
+          When call repair_partially_joined_secondary "primary-id"
+          The status should equal 1
+          The stdout should be present
+          The stderr should include "master holding keys (dbsize: 5)"
+          The contents of file "./redis_calls.log" should not include "reset"
+        End
       End
     End
 

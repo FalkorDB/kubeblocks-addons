@@ -418,15 +418,16 @@ rejoin_known_peers_by_fqdn() {
   done
 }
 
-# run a command against the local server; prints the reply and fails on an error reply
+# run a command against the local server; prints the reply and fails on any error reply
+# (-e makes redis-cli exit non-zero on one; the ERR match covers a redis-cli without -e)
 run_local_redis_command() {
   local output
   local status
   unset_xtrace_when_ut_mode_false
   if is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" "$@")
+    output=$(redis-cli -e $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" "$@")
   else
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" "$@")
+    output=$(redis-cli -e $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" "$@")
   fi
   status=$?
   set_xtrace_when_ut_mode_false
@@ -435,6 +436,14 @@ run_local_redis_command() {
     return 1
   fi
   return 0
+}
+
+# succeeds when the local node is a master that serves no slots
+local_node_is_slotless_master() {
+  local local_nodes_info
+  local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port") || return 1
+  # fields 9 and later are the slots the node serves
+  echo "$local_nodes_info" | awk '$3 ~ /myself/ && $3 ~ /master/ && NF <= 8 {found = 1} END {exit !found}'
 }
 
 # usage: repair_partially_joined_secondary <primary_node_id>
@@ -596,11 +605,17 @@ scale_redis_cluster_replica() {
   # if the current pod is not a rebuild-instance and is already in the cluster with its
   # current node ID, skip scale out replica
   if ! is_rebuild_instance && check_node_in_cluster_with_retry "$primary_node_endpoint" "$primary_node_port" "$CURRENT_POD_NAME" "$current_node_id"; then
-    # if current pod is primary node, check the others primary info, if the others primary node info is expired, send cluster meet command again
-    echo "Current pod $CURRENT_POD_NAME is a secondary node, check and meet current primary node..."
-    check_and_meet_current_primary_node "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port"
-    echo "Node $CURRENT_POD_NAME is already in the cluster, skipping scale out replica..."
-    exit 0
+    # a node that met the cluster but never became a replica is "in the cluster" too, as a
+    # master serving no slots; it has to be repaired below rather than left a second master
+    if local_node_is_slotless_master; then
+      echo "Node $CURRENT_POD_NAME is in the cluster as a master that serves no slots, make it a replica of $primary_node_endpoint_with_port"
+    else
+      # if current pod is primary node, check the others primary info, if the others primary node info is expired, send cluster meet command again
+      echo "Current pod $CURRENT_POD_NAME is a secondary node, check and meet current primary node..."
+      check_and_meet_current_primary_node "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port"
+      echo "Node $CURRENT_POD_NAME is already in the cluster, skipping scale out replica..."
+      exit 0
+    fi
   fi
 
   # add the current node as a replica of the primary node

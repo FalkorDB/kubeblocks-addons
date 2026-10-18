@@ -491,6 +491,38 @@ Describe "FalkorDB Cluster Common Bash Script Tests"
       End
     End
 
+    Context "when a pod does not answer"
+      # an empty reply used to count as initialized, which sent a cluster whose
+      # pods were still starting down the scale-out path (#30)
+      get_cluster_info() {
+        echo ""
+        return 0
+      }
+
+      It "does not count it as initialized"
+        When call check_cluster_initialized "172.0.0.1,172.0.0.2"
+        The status should be failure
+        The output should not include "already initialized"
+        The stderr should include "FalkorDB Cluster not initialized"
+      End
+    End
+
+    Context "when one pod does not answer and another reports ok"
+      get_cluster_info_with_retry() {
+        if [ "$1" = "172.0.0.1" ]; then
+          return 1
+        fi
+        echo "cluster_state:ok"
+      }
+
+      It "looks past the pod that does not answer"
+        When call check_cluster_initialized "172.0.0.1,172.0.0.2"
+        The status should be success
+        The output should include "FalkorDB Cluster already initialized"
+        The stderr should include "Failed to get cluster info of 172.0.0.1"
+      End
+    End
+
     Context "returns 1 when cluster_pod_fqdn_list is empty"
       setup() {
         export ALL_SHARDS_POD_FQDN_LIST_COMBINED=""
