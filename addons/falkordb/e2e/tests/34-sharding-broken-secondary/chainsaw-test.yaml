@@ -189,7 +189,7 @@ spec:
                 # later retry happened to get out of
                 restarts="$(kubectl get pod -n "$NAMESPACE" "$victim" \
                   -o jsonpath='{.status.containerStatuses[?(@.name=="falkordb-cluster")].restartCount}')"
-                if [ "${restarts:-0}" -gt 1 ]; then
+                if [ "${restarts:-0}" -gt 0 ]; then
                   fdb_fail "$victim restarted $restarts times before it rejoined"
                   exit 1
                 fi

@@ -823,8 +823,9 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       return 2
     }
 
-    local_node_is_slotless_master() {
-      return 1
+    # the local node is a replica of the intended primary: nothing to repair
+    local_node_role_is_settled() {
+      return 0
     }
 
     Context "when redis server is not ready"
@@ -1351,8 +1352,8 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
           return 0
         }
 
-        local_node_is_slotless_master() {
-          return 0
+        local_node_role_is_settled() {
+          return 1
         }
 
         check_and_meet_current_primary_node() {
@@ -1372,7 +1373,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
           When run scale_redis_cluster_replica
           The status should be success
           The stdout should not include "early exit should not be taken"
-          The stdout should include "is in the cluster as a master that serves no slots"
+          The stdout should include "is in the cluster but not a replica of"
           The stdout should include "repairing towards primary-cluster-id"
           The stdout should include "All primary nodes have been successfully met"
         End
@@ -1383,7 +1384,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
           return 0
         }
 
-        local_node_is_slotless_master() {
+        local_node_role_is_settled() {
           return 2
         }
 
@@ -1494,16 +1495,16 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
     End
   End
 
-  Describe "local_node_is_slotless_master()"
-    Context "when the node is a master serving no slots"
+  Describe "local_node_role_is_settled()"
+    Context "when the node is a replica of the intended primary"
       get_cluster_nodes_info() {
         echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
-        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave primary-id 0 0 1 connected"
       }
 
       It "succeeds"
-        When call local_node_is_slotless_master
-        The status should be success
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 0
       End
     End
 
@@ -1512,20 +1513,33 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 1 connected 0-5460"
       }
 
-      It "fails"
-        When call local_node_is_slotless_master
-        The status should be failure
+      It "succeeds, it is not a secondary to repair"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 0
       End
     End
 
-    Context "when the node is a replica"
+    Context "when the node is a master serving no slots"
       get_cluster_nodes_info() {
-        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave primary-id 0 0 1 connected"
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
       }
 
-      It "fails"
-        When call local_node_is_slotless_master
-        The status should be failure
+      It "asks for a repair"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 1
+      End
+    End
+
+    Context "when the node is a replica of another primary"
+      get_cluster_nodes_info() {
+        echo "other-id 10.42.0.9:6379@16379,falkordb-shard-old-0 master - 0 0 1 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave other-id 0 0 1 connected"
+      }
+
+      It "asks for a repair"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 1
       End
     End
 
@@ -1536,7 +1550,14 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       }
 
       It "reports it as unknown"
-        When call local_node_is_slotless_master
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 2
+      End
+    End
+
+    Context "when the primary's node ID is unknown"
+      It "reports it as unknown"
+        When call local_node_role_is_settled ""
         The status should equal 2
       End
     End

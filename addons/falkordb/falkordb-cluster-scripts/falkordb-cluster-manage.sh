@@ -1120,6 +1120,8 @@ check_cluster_knows_other_shards() {
   local shard
   local comp
   local comp_found
+  local own_shard
+  local live_other_shards=0
   local -A shard_pod_indexes=()
   local missing_shards=()
   if ! cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port") || is_empty "$cluster_nodes_info"; then
@@ -1144,12 +1146,19 @@ check_cluster_knows_other_shards() {
       missing_shards+=("$comp")
     fi
   done
+  # the shard of the node being asked, which knows itself whatever its cluster is
+  own_shard="${cluster_node%%.*}"
+  own_shard="${own_shard%-*}"
   for shard in "${!shard_pod_indexes[@]}"; do
     if contains "$live_nodes" "$shard-"; then
+      if [ "$shard" != "$own_shard" ]; then
+        live_other_shards=$((live_other_shards + 1))
+      fi
       continue
     fi
     if shard_has_not_joined_any_cluster "${shard_pod_indexes[$shard]}"; then
-      echo "shard $shard has not joined any cluster yet, not waiting for it"
+      # stderr: callers capture the output of functions that call this one
+      echo "shard $shard has not joined any cluster yet, not waiting for it" >&2
       continue
     fi
     missing_shards+=("$shard")
@@ -1158,6 +1167,15 @@ check_cluster_knows_other_shards() {
     echo "The cluster of $cluster_node does not know the shards: ${missing_shards[*]}" >&2
     return 1
   fi
+  # not waiting for shards that joined nothing must not let a lone node pass: if no other
+  # shard is live in its cluster, it is not a formed cluster, and `--cluster fix` would hand
+  # it every slot
+  for shard in "${!shard_pod_indexes[@]}"; do
+    if [ "$shard" != "$own_shard" ] && [ "$live_other_shards" -eq 0 ]; then
+      echo "The cluster of $cluster_node has no live member of any other shard" >&2
+      return 1
+    fi
+  done
   return 0
 }
 

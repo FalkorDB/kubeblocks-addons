@@ -437,9 +437,9 @@ fdb_assert_shards_own_slots() {
 
 # fdb_assert_single_cluster <namespace> <cluster> <sharding> <expected shards>
 # Fails unless every pod of the sharding sees the same <expected> reachable
-# primaries serving slots, i.e. all shards are in one cluster. An entry that is
-# failed, has no address or is still in handshake is not a member: it is what a
-# cluster keeps of a node that left it.
+# primaries serving slots, i.e. all shards are in one cluster. Only confirmed,
+# reachable members count: a failed or address-less entry is what a cluster
+# keeps of a node that left it, and a handshake entry is a node not joined yet.
 #
 # Shards that formed separate clusters each report cluster_state:ok and cover
 # all 16384 slots on their own, so asserting through any single pod can pass

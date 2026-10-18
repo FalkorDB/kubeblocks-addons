@@ -1435,10 +1435,28 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         echo "id2 10.42.0.2:6379@16379,falkordb-shard-7hy-0.falkordb-shard-7hy-headless master - 0 0 2 connected 8192-16383"
       }
 
-      It "does not wait for it"
+      It "does not wait for it, and keeps its note off stdout"
         When call check_cluster_knows_other_shards "10.42.0.1" "6379"
         The status should be success
-        The stdout should include "shard falkordb-shard-xgz has not joined any cluster yet"
+        The stdout should equal ""
+        The stderr should include "shard falkordb-shard-xgz has not joined any cluster yet"
+      End
+    End
+
+    Context "when the node is alone and every other shard has joined nothing"
+      # skipping unjoined shards must not let a lone node pass as a formed
+      # cluster: --cluster fix would hand it every slot
+      get_cluster_info() {
+        printf "cluster_state:fail\ncluster_known_nodes:1\ncluster_slots_assigned:0\n"
+      }
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 0 connected"
+      }
+
+      It "fails"
+        When call check_cluster_knows_other_shards "falkordb-shard-98x-0.falkordb-shard-98x-headless" "6379"
+        The status should be failure
+        The stderr should include "has no live member of any other shard"
       End
     End
 

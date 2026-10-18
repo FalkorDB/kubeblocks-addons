@@ -438,18 +438,28 @@ run_local_redis_command() {
   return 0
 }
 
-# returns 0 when the local node is a master that serves no slots, 1 when it is not, and
-# 2 when its own view can not be read
-local_node_is_slotless_master() {
+# usage: local_node_role_is_settled <primary_node_id>
+# returns 0 when the local node, by its own view, needs nothing from this script: it is a
+# replica of the given primary, or a master that serves slots. Returns 1 when it has to be
+# repaired: a master that serves no slots (it met the cluster but never became a replica)
+# or a replica of another primary. Returns 2 when its own view or the primary's node ID
+# can not be read.
+local_node_role_is_settled() {
+  local primary_node_id="$1"
   local local_nodes_info
   local myself_line
+  if is_empty "$primary_node_id"; then
+    return 2
+  fi
   local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port") || return 2
   myself_line=$(echo "$local_nodes_info" | awk '$3 ~ /myself/ {print; exit}')
   if is_empty "$myself_line"; then
     return 2
   fi
-  # fields 9 and later are the slots the node serves
-  echo "$myself_line" | awk '$3 ~ /master/ && NF <= 8 {found = 1} END {exit !found}'
+  # field 4 is the primary a replica follows; fields 9 and later are the slots a node serves
+  echo "$myself_line" | awk -v id="$primary_node_id" '
+    ($3 ~ /slave/ && $4 == id) || ($3 ~ /master/ && NF > 8) {settled = 1}
+    END {exit !settled}'
 }
 
 # usage: repair_partially_joined_secondary <primary_node_id>
@@ -612,14 +622,16 @@ scale_redis_cluster_replica() {
   # current node ID, skip scale out replica
   if ! is_rebuild_instance && check_node_in_cluster_with_retry "$primary_node_endpoint" "$primary_node_port" "$CURRENT_POD_NAME" "$current_node_id"; then
     # a node that met the cluster but never became a replica is "in the cluster" too, as a
-    # master serving no slots; it has to be repaired below rather than left a second master
-    local_node_is_slotless_master && slotless_status=0 || slotless_status=$?
-    if [ "$slotless_status" -eq 0 ]; then
-      echo "Node $CURRENT_POD_NAME is in the cluster as a master that serves no slots, make it a replica of $primary_node_endpoint_with_port"
-    elif [ "$slotless_status" -eq 2 ]; then
+    # master serving no slots, and so is a replica of another primary; both have to be
+    # repaired below rather than left as they are
+    local_node_role_is_settled "$(get_cluster_id_with_retry "$primary_node_endpoint" "$primary_node_port")" &&
+      role_status=0 || role_status=$?
+    if [ "$role_status" -eq 1 ]; then
+      echo "Node $CURRENT_POD_NAME is in the cluster but not a replica of $primary_node_endpoint_with_port, repair it"
+    elif [ "$role_status" -eq 2 ]; then
       # without its own view the role can not be confirmed; the repair below re-reads it,
       # and add-node or the replication check settle the rest
-      echo "Failed to read the local cluster view of $CURRENT_POD_NAME, verify its role through the join path" >&2
+      echo "Failed to read the local cluster view of $CURRENT_POD_NAME or the node ID of its primary, verify its role through the join path" >&2
     else
       # if current pod is primary node, check the others primary info, if the others primary node info is expired, send cluster meet command again
       echo "Current pod $CURRENT_POD_NAME is a secondary node, check and meet current primary node..."
