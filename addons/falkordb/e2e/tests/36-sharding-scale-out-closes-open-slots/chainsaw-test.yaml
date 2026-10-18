@@ -1,0 +1,120 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-scale-out-closes-open-slots
+spec:
+  description: >-
+    Leave a slot open (migrating on its owner, importing on another primary), as
+    a reshard that gives up half way does, then scale out, and prove the
+    scale-out still closes it with `--cluster fix` before it reshards. The addon
+    only runs `fix` on a cluster that has every shard in it, so it can never
+    hand slots to a node that has not joined (#30); that guard must not stop
+    this repair.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-open
+            tail: 200
+
+    - name: the cluster forms as one
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-open shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-open shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every pod to see one cluster of 3 primaries" \
+                fdb_assert_single_cluster "$NAMESPACE" fdb-open shard 3
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-open 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-open 200
+
+    - name: leave slot 100 open
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-open shard)"
+
+              # pod_of_node <node id>: the pod a node announces as its hostname
+              pod_of_node() {
+                fdb_cli "$NAMESPACE" "$pod" CLUSTER NODES | tr -d '\r' |
+                  awk -v id="$1" '$1 == id {split($2, a, ","); split(a[2], h, "."); print h[1]; exit}'
+              }
+              owner_id="$(fdb_slot_owner "$NAMESPACE" "$pod" 100)"
+              target_id="$(fdb_cli "$NAMESPACE" "$pod" CLUSTER NODES | tr -d '\r' |
+                awk -v owner="$owner_id" '$3 ~ /master/ && $1 != owner && NF > 8 {print $1; exit}')"
+              owner_pod="$(pod_of_node "$owner_id")"
+              target_pod="$(pod_of_node "$target_id")"
+              [ -n "$owner_pod" ] && [ -n "$target_pod" ] || {
+                fdb_fail "could not find the owner of slot 100 and another primary"; exit 1; }
+
+              fdb_log "opening slot 100: migrating on $owner_pod, importing on $target_pod"
+              fdb_cli "$NAMESPACE" "$target_pod" CLUSTER SETSLOT 100 IMPORTING "$owner_id"
+              fdb_cli "$NAMESPACE" "$owner_pod" CLUSTER SETSLOT 100 MIGRATING "$target_id"
+
+              # every slot is still assigned and the cluster still reports ok,
+              # which is what keeps it on the scale-out path
+              fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              if fdb_assert_no_open_slots "$NAMESPACE" "$owner_pod" 2>/dev/null; then
+                fdb_fail "slot 100 did not open"
+                exit 1
+              fi
+
+    - name: scale out from 3 to 4 shards
+      try:
+        - apply:
+            file: scale-out.yaml
+        - assert:
+            file: assert-scale-out-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-open-scale-out
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-open
+            tail: 300
+
+    - name: the slot is closed and one cluster of 4 shards serves every key
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-open shard 4
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-open shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              for p in $(fdb_sharding_pods "$NAMESPACE" fdb-open shard); do
+                fdb_assert_no_open_slots "$NAMESPACE" "$p"
+              done
+              fdb_retry "every pod to see one cluster of 4 primaries" \
+                fdb_assert_single_cluster "$NAMESPACE" fdb-open shard 4
+              fdb_retry "every shard to own its share of slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 4
+              fdb_retry "every key to still be readable" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-open 200

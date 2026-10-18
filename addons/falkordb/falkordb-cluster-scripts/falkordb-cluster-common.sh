@@ -632,18 +632,20 @@ check_cluster_initialized() {
     return 1
   fi
 
+  # only a node that answers cluster_state:ok proves a formed cluster. A node that does not
+  # answer says nothing either way: counting it as initialized sent a cluster whose pods were
+  # still starting down the scale-out path, whose `--cluster fix` then gave every slot to a
+  # node that had not joined anything (#30).
   local service_port
   for pod_fqdn in $(echo "$cluster_pod_fqdn_list" | tr ',' ' '); do
     pod_name=${pod_fqdn%%.*}
     service_port=$(get_pod_service_port_by_network_mode "${pod_name}")
-    cluster_info=$(get_cluster_info_with_retry "$pod_fqdn" "$service_port")
-    status=$?
-    if [ $status -ne 0 ]; then
-      echo "Failed to get cluster info in check_cluster_initialized" >&2
-      return 1
+    if ! cluster_info=$(get_cluster_info_with_retry "$pod_fqdn" "$service_port"); then
+      echo "Failed to get cluster info of $pod_fqdn in check_cluster_initialized" >&2
+      continue
     fi
     cluster_state=$(echo "$cluster_info" | awk -F: '/cluster_state/{print $2}' | tr -d '[:space:]')
-    if is_empty "$cluster_state" || equals "$cluster_state" "ok"; then
+    if equals "$cluster_state" "ok"; then
       echo "FalkorDB Cluster already initialized"
       return 0
     fi
@@ -816,10 +818,13 @@ secondary_replicated_to_primary() {
   local mapping_primary_endpoint_with_port="$2"
   local mapping_primary_cluster_id="$3"
   replicated_command=$(build_secondary_replicated_command "$secondary_endpoint_with_port" "$mapping_primary_endpoint_with_port" "$mapping_primary_cluster_id")
-  replicated_output=$($replicated_command)
+  # redis-cli --cluster may report the failure on either stream
+  replicated_output=$($replicated_command 2>&1)
   replicated_exit_code=$?
   if [ $replicated_exit_code -ne 0 ]; then
     echo "Failed to replicate the secondary node $secondary_endpoint_with_port to the primary node $mapping_primary_endpoint_with_port" >&2
+    # callers match on the add-node output (e.g. "is not empty"), so it has to reach them on failure too
+    echo "$replicated_output"
     return 1
   fi
   echo "$replicated_output"

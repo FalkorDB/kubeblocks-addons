@@ -217,6 +217,10 @@ spec:
                 fdb_assert_slots_covered "$NAMESPACE" "$pod"
               fdb_retry "every restored shard to own its slots" \
                 fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
+              # Shards that formed separate clusters each look healthy through
+              # one of their own pods (#30), so compare every pod's view.
+              fdb_retry "every restored pod to see one cluster of 3 primaries" \
+                fdb_assert_single_cluster "$NAMESPACE" fdb-shbk-r shard 3
 
               # -c follows MOVED redirects, so reading all 300 keys through a
               # single entry point exercises every shard's restored dataset.

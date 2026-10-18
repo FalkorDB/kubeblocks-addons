@@ -348,6 +348,23 @@ Describe "FalkorDB Cluster Manage Bash Script Tests"
       The status should be success
       The output should be blank
     End
+
+    It "skips a node that covers every slot alone in a cluster of its own"
+      # node1 is a shard that split off with all 16384 slots; node2 is in the
+      # real cluster, which knows every shard
+      check_slots_covered() { return 0; }
+      check_cluster_knows_other_shards() {
+        [ "$1" = "node2" ]
+      }
+      get_cluster_nodes_info() {
+        echo "$1-id 10.0.0.2:6379@16379 myself,master - 0 0 1 connected 0-5460"
+      }
+      export other_undeleted_component_nodes=("node1:6379" "node2:6379")
+      export SERVICE_PORT="6379"
+      When call find_exist_available_node
+      The status should be success
+      The output should eq "10.0.0.2:6379"
+    End
   End
 
   Describe "parse_host_ip_from_built_in_envs()"
@@ -1291,9 +1308,37 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       End
     End
 
+    Context "when the node is not in a cluster with every other shard"
+      # a node that has not joined the cluster yet: --cluster fix would hand it
+      # every slot and leave it serving a cluster of its own
+      check_slots_covered() {
+        return 1
+      }
+
+      check_cluster_knows_other_shards() {
+        return 1
+      }
+
+      fix_cluster_slots() {
+        echo "fix_cluster_slots should not be called"
+        return 0
+      }
+
+      It "defers without running cluster fix"
+        When call fix_unstable_cluster_and_defer "10.42.0.1:6379"
+        The status should be failure
+        The stdout should not include "fix_cluster_slots should not be called"
+        The stderr should include "is not in a cluster with every other shard; not running cluster fix"
+      End
+    End
+
     Context "when the cluster is unstable and the fix succeeds"
       check_slots_covered() {
         return 1
+      }
+
+      check_cluster_knows_other_shards() {
+        return 0
       }
 
       fix_cluster_slots() {
@@ -1315,6 +1360,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         return 1
       }
 
+      check_cluster_knows_other_shards() {
+        return 0
+      }
+
       fix_cluster_slots() {
         return 1
       }
@@ -1327,7 +1376,240 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
     End
   End
 
+  Describe "check_cluster_knows_other_shards()"
+    setup() {
+      other_undeleted_components=("falkordb-shard-7hy" "falkordb-shard-xgz")
+      other_undeleted_component_pod_names=("falkordb-shard-7hy-0" "falkordb-shard-7hy-1" "falkordb-shard-xgz-0" "falkordb-shard-xgz-1")
+      other_undeleted_component_nodes=("7hy-0:6379" "7hy-1:6379" "xgz-0:6379" "xgz-1:6379")
+    }
+    Before "setup"
+
+    # xgz serves every slot in a cluster of its own, as in #30
+    get_cluster_info() {
+      case "$1" in
+        xgz-*) printf "cluster_state:ok\ncluster_known_nodes:2\ncluster_slots_assigned:16384\n" ;;
+        *) printf "cluster_state:ok\ncluster_known_nodes:4\ncluster_slots_assigned:16384\n" ;;
+      esac
+    }
+
+    Context "when every other shard is in the cluster"
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 1 connected 0-5460"
+        echo "id2 10.42.0.2:6379@16379,falkordb-shard-7hy-0.falkordb-shard-7hy-headless master - 0 0 2 connected 5461-10922"
+        echo "id3 10.42.0.3:6379@16379,falkordb-shard-xgz-1.falkordb-shard-xgz-headless master - 0 0 3 connected 10923-16383"
+      }
+
+      It "succeeds"
+        When call check_cluster_knows_other_shards "10.42.0.1" "6379"
+        The status should be success
+      End
+    End
+
+    Context "when a shard formed a cluster of its own"
+      # the layout of the restored deployment in #30: two shards in one cluster,
+      # the third alone with every slot
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 1 connected 0-5460"
+        echo "id2 10.42.0.2:6379@16379,falkordb-shard-7hy-0.falkordb-shard-7hy-headless master - 0 0 3 connected 5461-16383"
+      }
+
+      It "names the missing shard"
+        When call check_cluster_knows_other_shards "10.42.0.1" "6379"
+        The status should be failure
+        The stderr should include "does not know the shards: falkordb-shard-xgz"
+        The stderr should not include "falkordb-shard-7hy"
+      End
+    End
+
+    Context "when a shard has not joined any cluster yet"
+      # a shard created alongside the current one: empty nodes that know only
+      # themselves, which join by themselves and hold nothing to lose
+      get_cluster_info() {
+        case "$1" in
+          xgz-*) printf "cluster_state:fail\ncluster_known_nodes:1\ncluster_slots_assigned:0\n" ;;
+          *) printf "cluster_state:ok\ncluster_known_nodes:4\ncluster_slots_assigned:16384\n" ;;
+        esac
+      }
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 1 connected 0-8191"
+        echo "id2 10.42.0.2:6379@16379,falkordb-shard-7hy-0.falkordb-shard-7hy-headless master - 0 0 2 connected 8192-16383"
+      }
+
+      It "does not wait for it, and keeps its note off stdout"
+        When call check_cluster_knows_other_shards "10.42.0.1" "6379"
+        The status should be success
+        The stdout should equal ""
+        The stderr should include "shard falkordb-shard-xgz has not joined any cluster yet"
+      End
+    End
+
+    Context "when the node is alone and every other shard has joined nothing"
+      # skipping unjoined shards must not let a lone node pass as a formed
+      # cluster: --cluster fix would hand it every slot
+      get_cluster_info() {
+        printf "cluster_state:fail\ncluster_known_nodes:1\ncluster_slots_assigned:0\n"
+      }
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 0 connected"
+      }
+
+      It "fails"
+        When call check_cluster_knows_other_shards "falkordb-shard-98x-0.falkordb-shard-98x-headless" "6379"
+        The status should be failure
+        The stderr should include "has no live member of any other shard"
+      End
+    End
+
+    Context "when a shard's only entry has a broken link"
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 1 connected 0-5460"
+        echo "id2 10.42.0.2:6379@16379,falkordb-shard-7hy-0.falkordb-shard-7hy-headless master - 0 0 2 connected 5461-10922"
+        echo "id3 10.42.0.3:6379@16379,falkordb-shard-xgz-0.falkordb-shard-xgz-headless master - 0 0 3 disconnected 10923-16383"
+      }
+
+      It "does not count it"
+        When call check_cluster_knows_other_shards "10.42.0.1" "6379"
+        The status should be failure
+        The stderr should include "does not know the shards: falkordb-shard-xgz"
+      End
+    End
+
+    Context "when a shard has no pod listed"
+      setup_no_pods() {
+        other_undeleted_components=("falkordb-shard-7hy" "falkordb-shard-xgz" "falkordb-shard-new")
+      }
+      Before "setup_no_pods"
+
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 1 connected 0-5460"
+        echo "id2 10.42.0.2:6379@16379,falkordb-shard-7hy-0.falkordb-shard-7hy-headless master - 0 0 2 connected 5461-10922"
+        echo "id3 10.42.0.3:6379@16379,falkordb-shard-xgz-0.falkordb-shard-xgz-headless master - 0 0 3 connected 10923-16383"
+      }
+
+      It "counts it as missing"
+        When call check_cluster_knows_other_shards "10.42.0.1" "6379"
+        The status should be failure
+        The stderr should include "does not know the shards: falkordb-shard-new"
+      End
+    End
+
+    Context "when the cluster only has a failed entry of a shard"
+      # what the rest of the cluster keeps of a shard whose node left for a
+      # cluster of its own: its old node ID, in fail state
+      get_cluster_nodes_info() {
+        echo "id1 10.42.0.1:6379@16379,falkordb-shard-98x-0.falkordb-shard-98x-headless myself,master - 0 0 1 connected 0-5460"
+        echo "id2 10.42.0.2:6379@16379,falkordb-shard-7hy-0.falkordb-shard-7hy-headless master - 0 0 2 connected 5461-10922"
+        echo "id3 :0@0,falkordb-shard-xgz-0.falkordb-shard-xgz-headless master,fail,noaddr - 0 0 3 disconnected 10923-16383"
+      }
+
+      It "does not count it"
+        When call check_cluster_knows_other_shards "10.42.0.1" "6379"
+        The status should be failure
+        The stderr should include "does not know the shards: falkordb-shard-xgz"
+      End
+    End
+  End
+
+  Describe "find_formed_cluster_node()"
+    setup() {
+      other_undeleted_component_nodes=("new-0.headless:6379" "old-0.headless:6379")
+    }
+    Before "setup"
+
+    Context "when the first node has not joined anything"
+      check_cluster_knows_other_shards() {
+        [ "$1" = "old-0.headless" ]
+      }
+
+      It "picks the node that is in a cluster with every shard"
+        When call find_formed_cluster_node
+        The status should be success
+        The output should equal "old-0.headless:6379"
+      End
+    End
+
+    Context "when no node is in a cluster with every shard"
+      check_cluster_knows_other_shards() {
+        return 1
+      }
+
+      It "fails"
+        When call find_formed_cluster_node
+        The status should be failure
+        The output should equal ""
+      End
+    End
+  End
+
   Describe "scale_out_redis_cluster_shard()"
+
+    # the target of the stability check; find_formed_cluster_node has its own cases
+    find_formed_cluster_node() {
+      echo "${other_undeleted_component_nodes[0]}"
+    }
+    Context "when the current shard primary serves a cluster without the other shards"
+      init_current_comp_default_nodes_for_scale_out() {
+        declare -gA scale_out_shard_default_primary_node
+        scale_out_shard_default_primary_node["falkordb-shard-98x-0"]="10.42.0.1:6379"
+      }
+
+      fix_unstable_cluster_and_defer() {
+        return 0
+      }
+
+      get_cluster_id() {
+        echo "cluster_id_123"
+      }
+
+      # a shard alone in its own cluster covers every slot by itself
+      check_slots_covered() {
+        return 0
+      }
+
+      check_cluster_knows_other_shards() {
+        return 1
+      }
+
+      count_node_slots() {
+        echo "16384"
+      }
+
+      setup() {
+        export CURRENT_SHARD_COMPONENT_SHORT_NAME="shard-98x"
+        export ALL_SHARDS_POD_NAME_LIST_COMBINED="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1"
+        export ALL_SHARDS_POD_FQDN_LIST_COMBINED="falkordb-shard-98x-0.h,falkordb-shard-98x-1.h,falkordb-shard-7hy-0.h,falkordb-shard-7hy-1.h"
+        export CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE="falkordb-shard-98x-0,falkordb-shard-98x-1"
+        export CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE="falkordb-shard-98x-0.h,falkordb-shard-98x-1.h"
+        export ALL_SHARDS_COMPONENT_LIST="falkordb-shard-98x,falkordb-shard-7hy"
+        export ALL_SHARDS_DELETING_COMPONENT_LIST=""
+        export ALL_SHARDS_UNDELETED_COMPONENT_LIST="falkordb-shard-98x,falkordb-shard-7hy"
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-98x"
+        export SERVICE_PORT="6379"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_COMPONENT_SHORT_NAME
+        unset ALL_SHARDS_POD_NAME_LIST_COMBINED
+        unset ALL_SHARDS_POD_FQDN_LIST_COMBINED
+        unset CURRENT_SHARD_POD_NAME_LIST_EFFECTIVE
+        unset CURRENT_SHARD_POD_FQDN_LIST_EFFECTIVE
+        unset ALL_SHARDS_COMPONENT_LIST
+        unset ALL_SHARDS_DELETING_COMPONENT_LIST
+        unset ALL_SHARDS_UNDELETED_COMPONENT_LIST
+        unset CURRENT_SHARD_COMPONENT_NAME
+        unset SERVICE_PORT
+      }
+      After "un_setup"
+
+      It "fails instead of reporting the shard scaled out"
+        When call scale_out_redis_cluster_shard
+        The status should be failure
+        The stdout should not include "already scaled out"
+        The stderr should include "the shards formed separate clusters"
+      End
+    End
+
     # the self-heal pre-check and slot accounting are covered by their own Describe
     # blocks; stub them here so each Context exercises only its own scenario.
     fix_unstable_cluster_and_defer() {
@@ -1456,6 +1738,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         return 0
       }
 
+      check_cluster_knows_other_shards() {
+        return 0
+      }
+
       check_current_shard_other_nodes_are_joined() {
         return 0
       }
@@ -1517,6 +1803,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       check_slots_covered() {
+        return 0
+      }
+
+      check_cluster_knows_other_shards() {
         return 0
       }
 
@@ -1594,6 +1884,10 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       }
 
       check_slots_covered() {
+        return 0
+      }
+
+      check_cluster_knows_other_shards() {
         return 0
       }
 
@@ -1981,6 +2275,11 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
   End
 
   Describe "scale_in_redis_cluster_shard()"
+
+    # the target of the stability check; find_formed_cluster_node has its own cases
+    find_formed_cluster_node() {
+      echo "${other_undeleted_component_nodes[0]}"
+    }
     # the self-heal pre-check is covered by its own Describe block; stub it here so
     # each Context exercises only its own scenario.
     fix_unstable_cluster_and_defer() {

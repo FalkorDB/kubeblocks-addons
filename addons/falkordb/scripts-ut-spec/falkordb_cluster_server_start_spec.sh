@@ -818,6 +818,16 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       echo "rejoin known peers by fqdn"
     }
 
+    # a clean node that only knows itself: add-node runs
+    repair_partially_joined_secondary() {
+      return 2
+    }
+
+    # the local node is a replica of the intended primary: nothing to repair
+    local_node_role_is_settled() {
+      return 0
+    }
+
     Context "when redis server is not ready"
       check_redis_server_ready_with_retry() {
         return 1
@@ -1291,6 +1301,468 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
         When run scale_redis_cluster_replica
         The status should be success
         The stdout should include "FalkorDB server is ready, continue to scale out replica"
+      End
+    End
+
+    Context "when a previous join attempt left the node half joined"
+      check_redis_server_ready_with_retry() {
+        return 0
+      }
+
+      get_target_pod_fqdn_from_pod_fqdn_vars() {
+        echo "$2.falkordb-shard-sxj-headless.default.svc"
+      }
+
+      get_current_comp_nodes_for_scale_out_replica() {
+        current_comp_primary_node+=("10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379")
+      }
+
+      check_node_in_cluster_with_retry() {
+        return 1
+      }
+
+      get_cluster_id_with_retry() {
+        echo "primary-cluster-id"
+      }
+
+      forget_stale_nodes_for_pod() {
+        return 0
+      }
+
+      setup() {
+        export CURRENT_SHARD_POD_NAME_LIST="falkordb-shard-sxj-0,falkordb-shard-sxj-1"
+        export CURRENT_SHARD_POD_FQDN_LIST="falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc"
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+        export service_port="6379"
+      }
+      Before "setup"
+
+      un_setup() {
+        unset CURRENT_SHARD_POD_NAME_LIST
+        unset CURRENT_SHARD_POD_FQDN_LIST
+        unset CURRENT_POD_NAME
+        unset service_port
+      }
+      After "un_setup"
+
+      Context "and the primary lists it as a master that serves no slots"
+        # it met the cluster but never became a replica: the membership check alone
+        # would report it joined and leave the shard with two masters
+        check_node_in_cluster_with_retry() {
+          return 0
+        }
+
+        local_node_role_is_settled() {
+          return 1
+        }
+
+        check_and_meet_current_primary_node() {
+          echo "early exit should not be taken"
+        }
+
+        repair_partially_joined_secondary() {
+          echo "repairing towards $1"
+          return 0
+        }
+
+        scale_out_replica_send_meet() {
+          return 0
+        }
+
+        It "repairs it into a replica instead of exiting early"
+          When run scale_redis_cluster_replica
+          The status should be success
+          The stdout should not include "early exit should not be taken"
+          The stdout should include "is in the cluster but not a replica of"
+          The stdout should include "repairing towards primary-cluster-id"
+          The stdout should include "All primary nodes have been successfully met"
+        End
+      End
+
+      Context "and its own view of the cluster can not be read"
+        check_node_in_cluster_with_retry() {
+          return 0
+        }
+
+        local_node_role_is_settled() {
+          return 2
+        }
+
+        check_and_meet_current_primary_node() {
+          echo "early exit should not be taken"
+        }
+
+        repair_partially_joined_secondary() {
+          echo "repairing towards $1"
+          return 0
+        }
+
+        scale_out_replica_send_meet() {
+          return 0
+        }
+
+        It "verifies the role through the join path instead of exiting early"
+          When run scale_redis_cluster_replica
+          The status should be success
+          The stdout should not include "early exit should not be taken"
+          The stderr should include "Failed to read the local cluster view"
+          The stdout should include "repairing towards primary-cluster-id"
+        End
+      End
+
+      Context "and the repair makes it replicate the primary"
+        repair_partially_joined_secondary() {
+          return 0
+        }
+
+        secondary_replicated_to_primary() {
+          echo "add-node should not be called"
+          return 1
+        }
+
+        scale_out_replica_send_meet() {
+          return 0
+        }
+
+        It "skips add-node and finishes the join"
+          When run scale_redis_cluster_replica
+          The status should be success
+          The stdout should not include "add-node should not be called"
+          The stdout should include "All primary nodes have been successfully met"
+        End
+      End
+
+      Context "and the node holds data that a reset would drop"
+        repair_partially_joined_secondary() {
+          return 1
+        }
+
+        shutdown_redis_server() {
+          echo "shutdown"
+        }
+
+        It "shuts the server down without running add-node"
+          When run scale_redis_cluster_replica
+          The status should be failure
+          The stdout should include "shutdown"
+          The stderr should include "can not join the primary"
+        End
+      End
+
+      Context "and add-node still reports the node is not empty"
+        secondary_replicated_to_primary() {
+          echo "[ERR] Node falkordb-shard-sxj-1:6379 is not empty. Either the node already knows other nodes"
+          return 1
+        }
+
+        check_secondary_replicated_to_primary_with_retry() {
+          return 1
+        }
+
+        shutdown_redis_server() {
+          echo "shutdown"
+        }
+
+        It "reports the add-node error instead of an empty message"
+          When run scale_redis_cluster_replica
+          The status should be failure
+          The stdout should include "shutdown"
+          The stderr should include "Error message: [ERR] Node falkordb-shard-sxj-1:6379 is not empty"
+        End
+      End
+
+      Context "and add-node reports not empty but the node already replicates the primary"
+        secondary_replicated_to_primary() {
+          echo "[ERR] Node falkordb-shard-sxj-1:6379 is not empty."
+          return 1
+        }
+
+        check_secondary_replicated_to_primary_with_retry() {
+          return 0
+        }
+
+        scale_out_replica_send_meet() {
+          return 0
+        }
+
+        It "continues the join"
+          When run scale_redis_cluster_replica
+          The status should be success
+          The stdout should include "already replicates the primary"
+          The stdout should include "All primary nodes have been successfully met"
+        End
+      End
+    End
+  End
+
+  Describe "local_node_role_is_settled()"
+    Context "when the node is a replica of the intended primary"
+      get_cluster_nodes_info() {
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave primary-id 0 0 1 connected"
+      }
+
+      It "succeeds"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 0
+      End
+    End
+
+    Context "when the node is a master serving slots"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 1 connected 0-5460"
+      }
+
+      It "succeeds, it is not a secondary to repair"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 0
+      End
+    End
+
+    Context "when the node is a master serving no slots"
+      get_cluster_nodes_info() {
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+      }
+
+      It "asks for a repair"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 1
+      End
+    End
+
+    Context "when the node is a replica of another shard's primary"
+      setup() {
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+      }
+      Before "setup"
+      get_cluster_nodes_info() {
+        echo "other-id 10.42.0.9:6379@16379,falkordb-shard-old-0 master - 0 0 1 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave other-id 0 0 1 connected"
+      }
+
+      It "asks for a repair"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 1
+      End
+    End
+
+    Context "when the node follows a live primary of its own shard other than the given one"
+      # the given primary came from another pod's view, which can lag behind a
+      # failover inside the shard; the replica already follows the new primary
+      setup() {
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+      }
+      Before "setup"
+      get_cluster_nodes_info() {
+        echo "new-primary-id 10.42.0.3:6379@16379,falkordb-shard-sxj-2.falkordb-shard-sxj-headless master - 0 0 4 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless myself,slave new-primary-id 0 0 4 connected"
+      }
+
+      It "leaves it alone"
+        When call local_node_role_is_settled "old-primary-id"
+        The status should equal 0
+      End
+    End
+
+    Context "when the node follows a primary of its own shard that is not live"
+      # each case breaks exactly one condition, so removing any one exclusion
+      # makes its case fail
+      setup() {
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+      }
+      Before "setup"
+      get_cluster_nodes_info() {
+        echo "old-id 10.42.0.3:6379@16379,falkordb-shard-sxj-2.falkordb-shard-sxj-headless $followed_flags - 0 0 4 $followed_link 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless myself,slave old-id 0 0 4 connected"
+      }
+
+      Parameters
+        "master,fail"      connected
+        "master,noaddr"    connected
+        "master,handshake" connected
+        "master"           disconnected
+      End
+
+      It "asks for a repair when the primary is $1 and $2"
+        followed_flags="$1"
+        followed_link="$2"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 1
+      End
+    End
+
+    Context "when the local view can not be read"
+      # get_cluster_nodes_info prints nothing when redis-cli fails
+      get_cluster_nodes_info() {
+        echo ""
+      }
+
+      It "reports it as unknown"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 2
+      End
+    End
+
+    Context "when the primary's node ID is unknown"
+      It "reports it as unknown"
+        When call local_node_role_is_settled ""
+        The status should equal 2
+      End
+    End
+  End
+
+  Describe "repair_partially_joined_secondary()"
+    setup() {
+      export service_port="6379"
+      redis_calls_file="./redis_calls.log"
+      : > "$redis_calls_file"
+    }
+    Before "setup"
+
+    un_setup() {
+      unset service_port
+      rm -f "$redis_calls_file"
+    }
+    After "un_setup"
+
+    # records every local command; DBSIZE answers $dbsize_reply
+    run_local_redis_command() {
+      echo "$*" >> "$redis_calls_file"
+      case "$*" in
+        dbsize) echo "${dbsize_reply:-0}" ;;
+        "cluster replicate"*) [ -z "$replicate_fails" ] && echo "OK" || { echo "ERR replicate failed"; return 1; } ;;
+        *) echo "OK" ;;
+      esac
+    }
+
+    Context "when the node only knows itself"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+      }
+
+      It "lets add-node run"
+        When call repair_partially_joined_secondary "primary-id"
+        The status should equal 2
+        The contents of file "./redis_calls.log" should equal ""
+      End
+    End
+
+    Context "when the node already replicates the primary"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave primary-id 0 0 1 connected"
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+      }
+
+      It "reports it joined"
+        When call repair_partially_joined_secondary "primary-id"
+        The status should equal 0
+        The stdout should include "already replicates the primary primary-id"
+        The contents of file "./redis_calls.log" should equal ""
+      End
+    End
+
+    Context "when the node knows the primary but is still an empty master"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+      }
+
+      It "replicates the primary directly"
+        When call repair_partially_joined_secondary "primary-id"
+        The status should equal 0
+        The stdout should include "replicated it directly"
+        The contents of file "./redis_calls.log" should equal "cluster replicate primary-id"
+      End
+    End
+
+    Context "when the node knows the primary but CLUSTER REPLICATE fails"
+      replicate_fails="1"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+        echo "primary-id 10.42.0.1:6379@16379,falkordb-shard-sxj-0 master - 0 0 1 connected 0-16383"
+      }
+
+      Context "and it holds no keys"
+        It "resets it so add-node can run"
+          When call repair_partially_joined_secondary "primary-id"
+          The status should equal 2
+          The stderr should include "CLUSTER REPLICATE primary-id failed"
+          The stdout should include "reset the stale cluster state"
+          The contents of file "./redis_calls.log" should include "cluster reset soft"
+        End
+      End
+
+      Context "and it is a master holding keys"
+        dbsize_reply="5"
+
+        It "refuses to reset it"
+          When call repair_partially_joined_secondary "primary-id"
+          The status should equal 1
+          The stdout should be present
+          The stderr should include "master holding keys (dbsize: 5)"
+          The contents of file "./redis_calls.log" should not include "reset"
+        End
+      End
+    End
+
+    Context "when the node knows another cluster and holds no keys"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+        echo "stale-id 10.42.0.9:6379@16379,falkordb-shard-old-0 master - 0 0 1 connected 0-16383"
+      }
+
+      It "resets it so add-node can run"
+        When call repair_partially_joined_secondary "primary-id"
+        The status should equal 2
+        The stdout should include "reset the stale cluster state"
+        The contents of file "./redis_calls.log" should include "cluster reset soft"
+      End
+    End
+
+    Context "when the node is a master holding keys"
+      dbsize_reply="12"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 0 connected"
+        echo "stale-id 10.42.0.9:6379@16379,falkordb-shard-old-0 master - 0 0 1 connected 0-16383"
+      }
+
+      It "refuses to reset it"
+        When call repair_partially_joined_secondary "primary-id"
+        The status should equal 1
+        The stdout should be present
+        The stderr should include "master holding keys (dbsize: 12)"
+        The contents of file "./redis_calls.log" should not include "reset"
+      End
+    End
+
+    Context "when the node replicates a stale primary"
+      dbsize_reply="12"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave stale-id 0 0 1 connected"
+        echo "stale-id 10.42.0.9:6379@16379,falkordb-shard-old-0 master - 0 0 1 connected 0-16383"
+      }
+
+      It "resets it, since a replica's keys are a copy"
+        When call repair_partially_joined_secondary "primary-id"
+        The status should equal 2
+        The stdout should include "reset the stale cluster state"
+        The contents of file "./redis_calls.log" should include "cluster reset soft"
+      End
+    End
+
+    Context "when the node owns slots"
+      get_cluster_nodes_info() {
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,master - 0 0 1 connected 0-5460"
+        echo "other-id 10.42.0.9:6379@16379,falkordb-shard-old-0 master - 0 0 2 connected 5461-16383"
+      }
+
+      It "refuses to reset it"
+        When call repair_partially_joined_secondary "primary-id"
+        The status should equal 1
+        The stdout should be present
+        The stderr should include "owns slots"
+        The contents of file "./redis_calls.log" should equal ""
       End
     End
   End

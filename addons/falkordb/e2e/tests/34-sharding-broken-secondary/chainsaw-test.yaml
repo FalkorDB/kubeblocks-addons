@@ -1,0 +1,217 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-broken-secondary
+spec:
+  description: >-
+    Break shard secondaries the way an interrupted join leaves them, restart
+    them, and prove each one comes back as a replica of its own shard primary.
+    A node's cluster state lives on its data volume, so a restart alone repeats
+    whatever the state was: a secondary that met the cluster but never became a
+    replica stays a second, slotless master in its shard, and one that knows
+    some other cluster fails every `--cluster add-node` with "Node is not empty"
+    and crash-loops (#33).
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-brk
+            tail: 200
+
+    - name: the cluster forms with a replica in every shard
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-brk shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-brk shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every pod to see one cluster of 3 primaries" \
+                fdb_assert_single_cluster "$NAMESPACE" fdb-brk shard 3
+              for p in $(fdb_sharding_pods "$NAMESPACE" fdb-brk shard); do
+                if [ "$(fdb_server_role "$NAMESPACE" "$p")" = slave ]; then
+                  fdb_retry "$p to replicate its shard primary" \
+                    fdb_assert_replica_of_own_shard "$NAMESPACE" "$p"
+                fi
+              done
+
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-brk 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-brk 200
+
+    - name: break a secondary in every shard
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              pods="$(fdb_sharding_pods "$NAMESPACE" fdb-brk shard)"
+              # pods are named <cluster>-shard-<suffix>-<ordinal>
+              # shellcheck disable=SC2046
+              set -- $(echo "$pods" | sed 's/-[0-9]*$//' | sort -u)
+              [ "$#" -eq 3 ] || { fdb_fail "expected 3 shards, found: $*"; exit 1; }
+
+              # pod_with_role <shard> <master|slave>
+              pod_with_role() {
+                for p in $(echo "$pods" | grep "^$1-[0-9]*$"); do
+                  if [ "$(fdb_server_role "$NAMESPACE" "$p")" = "$2" ]; then
+                    echo "$p"
+                    return 0
+                  fi
+                done
+                fdb_fail "shard $1 has no $2"
+              }
+              pod_ip() {
+                kubectl get pod -n "$NAMESPACE" "$1" -o jsonpath='{.status.podIP}'
+              }
+              # the slot count a node serves, as the node itself sees it
+              own_slot_fields() {
+                fdb_cli "$NAMESPACE" "$1" CLUSTER NODES | tr -d '\r' |
+                  awk '$3 ~ /myself/ {print NF - 8; exit}'
+              }
+              known_nodes() {
+                fdb_cli "$NAMESPACE" "$1" CLUSTER INFO | tr -d '\r' |
+                  awk -F: '/^cluster_known_nodes:/ {print $2; exit}'
+              }
+
+              slotless_primary="$(pod_with_role "$1" slave)"
+              slotless_primary_target="$(pod_with_role "$1" master)"
+              island_a="$(pod_with_role "$2" slave)"
+              island_b="$(pod_with_role "$3" slave)"
+              echo "$slotless_primary $island_a $island_b" > "$state/victims"
+
+              # 1. Met the cluster but never became a replica: this is where an
+              # add-node that stops between its CLUSTER MEET and its CLUSTER
+              # REPLICATE leaves a node. RESET SOFT turns the replica into an
+              # empty master that knows nobody, and the MEET puts it back in
+              # the cluster as a master serving no slots.
+              fdb_log "making $slotless_primary a slotless master in the cluster"
+              fdb_cli "$NAMESPACE" "$slotless_primary" CLUSTER RESET SOFT
+              fdb_cli "$NAMESPACE" "$slotless_primary" CLUSTER MEET \
+                "$(pod_ip "$slotless_primary_target")" 6379 16379
+
+              # 2. Knows a cluster that is not this one: two secondaries are
+              # wiped (new node IDs) and only meet each other. The real cluster
+              # still knows them by their old IDs, so it never learns the new
+              # ones, and to add-node both are "not empty".
+              fdb_log "moving $island_a and $island_b into a cluster of their own"
+              fdb_cli "$NAMESPACE" "$island_a" CLUSTER RESET HARD
+              fdb_cli "$NAMESPACE" "$island_b" CLUSTER RESET HARD
+              fdb_cli "$NAMESPACE" "$island_a" CLUSTER MEET "$(pod_ip "$island_b")" 6379 16379
+
+              # An interrupted add-node leaves an empty node: add-node refuses any
+              # node that holds keys. A reset replica keeps the copy it replicated,
+              # and on restart a node claims every unassigned slot it holds keys
+              # for, which would turn the island into one that serves slots. Empty
+              # the victims, on disk too, so they come back as add-node left them.
+              for victim in "$slotless_primary" "$island_a" "$island_b"; do
+                fdb_cli "$NAMESPACE" "$victim" FLUSHALL
+                fdb_cli "$NAMESPACE" "$victim" SAVE
+              done
+
+              is_slotless_primary_in_cluster() {
+                [ "$(fdb_server_role "$NAMESPACE" "$slotless_primary")" = master ] &&
+                  [ "$(own_slot_fields "$slotless_primary")" -eq 0 ] &&
+                  [ "$(known_nodes "$slotless_primary")" -gt 2 ]
+              }
+              is_island() {
+                [ "$(known_nodes "$island_a")" -eq 2 ] && [ "$(known_nodes "$island_b")" -eq 2 ]
+              }
+              fdb_retry "$slotless_primary to be a slotless master in the cluster" \
+                is_slotless_primary_in_cluster
+              fdb_retry "$island_a and $island_b to know only each other" is_island
+              fdb_log "broken: $slotless_primary is a slotless master, $island_a and $island_b form an island"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-brk
+            tail: 200
+
+    - name: restart the broken secondaries
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              # all at once, as when they fail together on a busy node
+              pids=""
+              for victim in $(cat "$state/victims"); do
+                fdb_kill_pod "$NAMESPACE" "$victim" &
+                pids="$pids $!"
+              done
+              for pid in $pids; do
+                wait "$pid"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-brk
+            tail: 200
+
+    - name: every broken secondary is a replica of its own shard again
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              for victim in $(cat "$state/victims"); do
+                fdb_retry "$victim to replicate its own shard primary" \
+                  fdb_assert_replica_of_own_shard "$NAMESPACE" "$victim"
+                # repaired on the first start, not after a crash loop that a
+                # later retry happened to get out of
+                restarts="$(kubectl get pod -n "$NAMESPACE" "$victim" \
+                  -o jsonpath='{.status.containerStatuses[?(@.name=="falkordb-cluster")].restartCount}')"
+                if [ "${restarts:-0}" -gt 0 ]; then
+                  fdb_fail "$victim restarted $restarts times before it rejoined"
+                  exit 1
+                fi
+              done
+
+              fdb_retry "every pod to see one cluster of 3 primaries" \
+                fdb_assert_single_cluster "$NAMESPACE" fdb-brk shard 3
+              pod="$(head -1 < "$state/victims" | awk '{print $1}')"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
+              fdb_retry "every key to be readable" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-brk 200
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-brk
+            tail: 300
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

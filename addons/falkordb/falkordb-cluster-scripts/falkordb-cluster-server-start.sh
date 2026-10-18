@@ -418,6 +418,134 @@ rejoin_known_peers_by_fqdn() {
   done
 }
 
+# run a command against the local server; prints the reply and fails on any error reply
+# (-e makes redis-cli exit non-zero on one; the ERR match covers a redis-cli without -e)
+run_local_redis_command() {
+  local output
+  local status
+  unset_xtrace_when_ut_mode_false
+  if is_empty "$REDIS_DEFAULT_PASSWORD"; then
+    output=$(redis-cli -e $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" "$@")
+  else
+    output=$(redis-cli -e $REDIS_CLI_TLS_CMD -h 127.0.0.1 -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" "$@")
+  fi
+  status=$?
+  set_xtrace_when_ut_mode_false
+  echo "$output"
+  if [ $status -ne 0 ] || [[ "$output" == ERR* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# usage: local_node_role_is_settled <primary_node_id>
+# returns 0 when the local node, by its own view, needs nothing from this script: it is a
+# replica of the given primary, a replica of another live primary of its own shard (the
+# given primary comes from another pod's view, which can lag behind a failover), or a
+# master that serves slots. Returns 1 when it has to be repaired: a master that serves no
+# slots (it met the cluster but never became a replica), or a replica of a primary that is
+# failed, serves nothing or belongs to another shard. Returns 2 when its own view or the
+# primary's node ID can not be read.
+local_node_role_is_settled() {
+  local primary_node_id="$1"
+  local local_nodes_info
+  local myself_line
+  if is_empty "$primary_node_id"; then
+    return 2
+  fi
+  local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port") || return 2
+  myself_line=$(echo "$local_nodes_info" | awk '$3 ~ /myself/ {print; exit}')
+  if is_empty "$myself_line"; then
+    return 2
+  fi
+  # field 4 is the primary a replica follows; fields 9 and later are the slots a node serves
+  if echo "$myself_line" | awk -v id="$primary_node_id" '
+    ($3 ~ /slave/ && $4 == id) || ($3 ~ /master/ && NF > 8) {settled = 1}
+    END {exit !settled}'; then
+    return 0
+  fi
+  local followed_id
+  followed_id=$(echo "$myself_line" | awk '$3 ~ /slave/ {print $4}')
+  if is_empty "$followed_id"; then
+    return 1
+  fi
+  # pods are named <shard>-<ordinal> and announce their pod name in the hostname
+  echo "$local_nodes_info" | awk -v id="$followed_id" -v shard=",${CURRENT_POD_NAME%-*}-" '
+    $1 == id && $3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" &&
+      NF > 8 && index($2, shard) > 0 {settled = 1}
+    END {exit !settled}'
+}
+
+# usage: repair_partially_joined_secondary <primary_node_id>
+# A secondary that met the cluster but did not finish joining (an add-node attempt that
+# stopped half way, or a cluster it knew before) is "not empty" to every later add-node.
+# Its cluster state is on the data volume, so restarting the container only repeats the
+# failure. Repair it from its own view of the cluster before add-node:
+#   - it already replicates the primary: nothing to do
+#   - it knows the primary: CLUSTER REPLICATE it directly
+#   - it knows some other cluster: CLUSTER RESET SOFT, so add-node sees an empty node
+# A node that owns slots, or a master that holds keys, is never reset.
+# returns 0 when the node replicates the primary, 2 when add-node should run, 1 when the
+# node can not be repaired without discarding its slots or keys
+repair_partially_joined_secondary() {
+  local primary_node_id="$1"
+  local local_nodes_info
+  local myself_line
+  local myself_flags
+  local myself_master_id
+  local myself_slot_fields
+  local output
+
+  if ! local_nodes_info=$(get_cluster_nodes_info "127.0.0.1" "$service_port"); then
+    echo "Failed to read the local cluster nodes, let add-node decide" >&2
+    return 2
+  fi
+  if [ "$(echo "$local_nodes_info" | grep -c .)" -le 1 ]; then
+    return 2
+  fi
+  echo "the local node already knows other nodes before joining the primary $primary_node_id:"
+  echo "$local_nodes_info"
+
+  myself_line=$(echo "$local_nodes_info" | awk '$3 ~ /myself/ {print; exit}')
+  myself_flags=$(echo "$myself_line" | awk '{print $3}')
+  myself_master_id=$(echo "$myself_line" | awk '{print $4}')
+  # fields 9 and later are the slots the node serves
+  myself_slot_fields=$(echo "$myself_line" | awk '{print NF - 8}')
+  if contains "$myself_flags" "slave" && equals "$myself_master_id" "$primary_node_id"; then
+    echo "the local node already replicates the primary $primary_node_id"
+    return 0
+  fi
+  if [ "${myself_slot_fields:-0}" -gt 0 ]; then
+    echo "the local node owns slots, refusing to reset it: $myself_line" >&2
+    return 1
+  fi
+
+  if echo "$local_nodes_info" | awk -v id="$primary_node_id" '$1 == id {found = 1} END {exit !found}'; then
+    # redis refuses this for a master that holds keys, so no data is dropped here
+    if output=$(run_local_redis_command cluster replicate "$primary_node_id"); then
+      echo "the local node knows the primary $primary_node_id, replicated it directly"
+      return 0
+    fi
+    echo "CLUSTER REPLICATE $primary_node_id failed: $output" >&2
+  fi
+
+  # a replica's keys are a copy that the full sync from the new primary replaces anyway;
+  # a master's keys may be the only copy
+  if ! contains "$myself_flags" "slave"; then
+    output=$(run_local_redis_command dbsize)
+    if [ $? -ne 0 ] || ! equals "$output" "0"; then
+      echo "the local node is a master holding keys (dbsize: $output), refusing to reset it" >&2
+      return 1
+    fi
+  fi
+  if ! output=$(run_local_redis_command cluster reset soft); then
+    echo "CLUSTER RESET SOFT failed: $output" >&2
+    return 1
+  fi
+  echo "reset the stale cluster state of the local node, add it to the primary again"
+  return 2
+}
+
 remove_rebuild_instance_flag() {
   if [ -f /data/rebuild.flag ]; then
     rm -f /data/rebuild.flag
@@ -507,11 +635,24 @@ scale_redis_cluster_replica() {
   # if the current pod is not a rebuild-instance and is already in the cluster with its
   # current node ID, skip scale out replica
   if ! is_rebuild_instance && check_node_in_cluster_with_retry "$primary_node_endpoint" "$primary_node_port" "$CURRENT_POD_NAME" "$current_node_id"; then
-    # if current pod is primary node, check the others primary info, if the others primary node info is expired, send cluster meet command again
-    echo "Current pod $CURRENT_POD_NAME is a secondary node, check and meet current primary node..."
-    check_and_meet_current_primary_node "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port"
-    echo "Node $CURRENT_POD_NAME is already in the cluster, skipping scale out replica..."
-    exit 0
+    # a node that met the cluster but never became a replica is "in the cluster" too, as a
+    # master serving no slots, and so is a replica of another primary; both have to be
+    # repaired below rather than left as they are
+    local_node_role_is_settled "$(get_cluster_id_with_retry "$primary_node_endpoint" "$primary_node_port")" &&
+      role_status=0 || role_status=$?
+    if [ "$role_status" -eq 1 ]; then
+      echo "Node $CURRENT_POD_NAME is in the cluster but not a replica of $primary_node_endpoint_with_port, repair it"
+    elif [ "$role_status" -eq 2 ]; then
+      # without its own view the role can not be confirmed; the repair below re-reads it,
+      # and add-node or the replication check settle the rest
+      echo "Failed to read the local cluster view of $CURRENT_POD_NAME or the node ID of its primary, verify its role through the join path" >&2
+    else
+      # if current pod is primary node, check the others primary info, if the others primary node info is expired, send cluster meet command again
+      echo "Current pod $CURRENT_POD_NAME is a secondary node, check and meet current primary node..."
+      check_and_meet_current_primary_node "$primary_node_endpoint" "$primary_node_port" "$primary_node_bus_port"
+      echo "Node $CURRENT_POD_NAME is already in the cluster, skipping scale out replica..."
+      exit 0
+    fi
   fi
 
   # add the current node as a replica of the primary node
@@ -532,15 +673,32 @@ scale_redis_cluster_replica() {
     echo "Failed to forget stale nodes for pod $current_pod_fqdn, continue to rejoin anyway..." >&2
   fi
   current_node_with_port="$current_pod_fqdn:$service_port"
-  replicated_output=$(secondary_replicated_to_primary "$current_node_with_port" "$primary_node_endpoint_with_port" "$primary_node_cluster_id")
-  status=$?
+  repair_partially_joined_secondary "$primary_node_cluster_id" && repair_status=0 || repair_status=$?
+  if [ "$repair_status" -eq 1 ]; then
+    echo "Node $CURRENT_POD_NAME can not join the primary $primary_node_endpoint_with_port without discarding its slots or keys, shutdown redis server" >&2
+    shutdown_redis_server "$service_port"
+    exit 1
+  fi
+  replicated_output=""
+  status=0
+  if [ "$repair_status" -eq 2 ]; then
+    replicated_output=$(secondary_replicated_to_primary "$current_node_with_port" "$primary_node_endpoint_with_port" "$primary_node_cluster_id")
+    status=$?
+  fi
   if [ $status -ne 0 ] ; then
     if is_rebuild_instance && contains "$replicated_output" "is not empty"; then
       echo "Current instance is a rebuild-instance, but the node already knows other nodes (check with CLUSTER NODES) or contains some key in database 0, shutdown redis server..." >&2
       shutdown_redis_server
       exit 1
     elif contains "$replicated_output" "is not empty"; then
-      echo "Replica is not empty, Either the node already knows other nodes (check with CLUSTER NODES) or contains some key in database 0"
+      # an earlier attempt may have finished the join after all; anything else is a node
+      # repair_partially_joined_secondary could not clean, and retrying add-node will not help
+      if ! check_secondary_replicated_to_primary_with_retry "$primary_node_endpoint" "$primary_node_port" "$CURRENT_POD_NAME" "$primary_node_cluster_id"; then
+        echo "Failed to add the node $current_pod_fqdn to the cluster in scale_redis_cluster_replica, Error message: $replicated_output, shutdown redis server" >&2
+        shutdown_redis_server "$service_port"
+        exit 1
+      fi
+      echo "Replica is not empty but already replicates the primary $primary_node_endpoint_with_port, continue"
     elif [[ $replicated_output == *"Not all 16384 slots are covered by nodes"* ]]; then
       # shutdown the redis server if the cluster is not fully covered by nodes
       echo "Not all 16384 slots are covered by nodes, shutdown redis server" >&2

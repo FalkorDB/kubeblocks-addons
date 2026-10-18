@@ -1,0 +1,198 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-split-guard
+spec:
+  description: >-
+    Split a shard off into a cluster of its own that serves all 16384 slots, the
+    layout a restored deployment was found in (#30), then scale out and prove the
+    new shard neither joins the island nor lets `--cluster fix` hand the
+    split-off shard's slots to the rest, and that the scale-out never reports
+    the cluster Running. The island covers every slot on its own, so a check made
+    through it alone sees a healthy cluster.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-split
+            tail: 200
+
+    - name: the cluster forms as one
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-split shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-split shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every pod to see one cluster of 3 primaries" \
+                fdb_assert_single_cluster "$NAMESPACE" fdb-split shard 3
+
+    - name: split one shard off with every slot
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              fdb_sharding_pods "$NAMESPACE" fdb-split shard > "$state/original-pods"
+              island="$(tail -1 < "$state/original-pods")"
+              rest="$(head -1 < "$state/original-pods")"
+              echo "$island" > "$state/island"
+              echo "$rest" > "$state/rest"
+
+              # a wiped node (new node ID) that then claims every slot: one
+              # shard alone with 0-16383, as in the issue. The rest of the cluster
+              # keeps the shard's old node ID with no address (noaddr). Nothing
+              # pings an entry without an address, so it never fails and both
+              # halves keep reporting cluster_state:ok, as both did in #30.
+              fdb_log "splitting $island off into a cluster of its own"
+              fdb_cli "$NAMESPACE" "$island" CLUSTER RESET HARD
+              fdb_cli "$NAMESPACE" "$island" CLUSTER ADDSLOTSRANGE 0 16383
+
+              info() {
+                fdb_cli "$NAMESPACE" "$1" CLUSTER INFO | tr -d '\r' |
+                  awk -F: -v k="$2" '$1 == k {print $2; exit}'
+              }
+              island_shard="$(echo "$island" | sed 's/-[0-9]*$//')"
+              # the rest only knows the island's shard by an entry it cannot reach
+              rest_lost_island() {
+                ! fdb_cli "$NAMESPACE" "$rest" CLUSTER NODES | tr -d '\r' |
+                  awk '$3 !~ /fail|noaddr|handshake/' | grep -q "$island_shard-"
+              }
+              is_split() {
+                [ "$(info "$island" cluster_known_nodes)" -eq 1 ] &&
+                  [ "$(info "$island" cluster_state)" = ok ] &&
+                  rest_lost_island
+              }
+              fdb_retry "$island to serve every slot alone and the rest to lose it" is_split
+              if fdb_assert_single_cluster "$NAMESPACE" fdb-split shard 3 2>/dev/null; then
+                fdb_fail "the split did not take: the pods still see one cluster"
+                exit 1
+              fi
+              fdb_log "split: $island serves all slots alone, $rest no longer reaches it"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-split
+            tail: 200
+
+    - name: scale out while the shards are split
+      try:
+        - script:
+            content: |
+              kubectl patch cluster fdb-split -n "$NAMESPACE" --type=json \
+                -p '[{"op":"replace","path":"/spec/shardings/0/shards","value":4}]'
+
+    - name: the scale-out refuses to build on the split
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              island="$(cat "$state/island")"
+              rest="$(cat "$state/rest")"
+
+              new_shard_pod() {
+                fdb_sharding_pods "$NAMESPACE" fdb-split shard | grep -vxF -f "$state/original-pods" | head -1
+              }
+              has_new_shard_pod() {
+                [ -n "$(new_shard_pod)" ]
+              }
+              fdb_retry "the new shard's pod to be created" has_new_shard_pod
+              new="$(new_shard_pod)"
+              kubectl wait --for=condition=Ready pod -n "$NAMESPACE" "$new" --timeout=10m >/dev/null
+              fdb_log "new shard pod $new is Ready"
+
+              info() {
+                fdb_cli "$NAMESPACE" "$1" CLUSTER INFO | tr -d '\r' |
+                  awk -F: -v k="$2" '$1 == k {print $2; exit}'
+              }
+              # slots served by reachable masters, as <pod> sees them; fails
+              # when the pod does not answer with its own node map, so an
+              # unreachable pod is never read as "serves no slots"
+              healthy_slots() {
+                nodes="$(fdb_cli "$NAMESPACE" "$1" CLUSTER NODES | tr -d '\r')" || return 1
+                echo "$nodes" | awk '$3 ~ /myself/ {found = 1} END {exit !found}' || return 1
+                echo "$nodes" |
+                  awk '$3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" {
+                    for (i = 9; i <= NF; i++) {
+                      if ($i ~ /^\[/) continue
+                      n = split($i, r, "-"); owned += (n == 2) ? r[2] - r[1] + 1 : 1
+                    }
+                  } END {print owned + 0}'
+              }
+              cluster_phase() {
+                kubectl get cluster fdb-split -n "$NAMESPACE" -o jsonpath='{.status.phase}'
+              }
+
+              # Long enough for the new shard's postProvision to run and be
+              # retried several times. Every round has to find the split exactly
+              # as it was left.
+              rounds=16
+              i=1
+              while [ "$i" -le "$rounds" ]; do
+                island_known="$(info "$island" cluster_known_nodes)"
+                [ "$island_known" -eq 1 ] || {
+                  fdb_fail "a node joined the split-off shard $island (it knows $island_known nodes)"
+                  fdb_cli "$NAMESPACE" "$island" CLUSTER NODES >&2
+                  exit 1
+                }
+                new_known="$(info "$new" cluster_known_nodes)"
+                if [ "$new_known" -gt 1 ] && fdb_cli "$NAMESPACE" "$new" CLUSTER NODES | grep -q "$(echo "$island" | sed 's/-[0-9]*$//')-"; then
+                  fdb_fail "new shard $new joined a cluster that contains the split-off shard"
+                  exit 1
+                fi
+                rest_slots="$(healthy_slots "$rest")" || {
+                  fdb_fail "$rest did not answer CLUSTER NODES"
+                  exit 1
+                }
+                [ "$rest_slots" -lt 16384 ] || {
+                  fdb_fail "the split-off shard's slots were handed to the rest of the cluster ($rest_slots slots served)"
+                  fdb_cli "$NAMESPACE" "$rest" CLUSTER NODES >&2
+                  exit 1
+                }
+                phase="$(cluster_phase)"
+                fdb_log "round $i/$rounds: island knows $island_known, $new knows $new_known, rest serves $rest_slots slots, cluster $phase"
+                if [ "$phase" = Running ]; then
+                  fdb_fail "the cluster reports Running while its shards are split"
+                  exit 1
+                fi
+                i=$((i + 1))
+                sleep 15
+              done
+
+              phase="$(cluster_phase)"
+              if [ "$phase" = Running ]; then
+                fdb_fail "the cluster reports Running while its shards are split"
+                exit 1
+              fi
+              fdb_log "the split was left alone and the cluster was never reported Running ($phase)"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-split
+            tail: 300
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

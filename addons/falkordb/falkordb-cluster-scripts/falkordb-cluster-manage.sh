@@ -288,7 +288,9 @@ find_exist_available_node() {
     # the $node is the headless address by default, we should get the real node address from cluster nodes
     node_ip=$(echo "$node" | cut -d':' -f1)
     node_port=$(echo "$node" | cut -d':' -f2)
-    if check_slots_covered "$node" "$node_port"; then
+    # a node alone in a cluster of its own covers every slot too; joining it would
+    # grow the split instead of the cluster
+    if check_slots_covered "$node" "$node_port" && check_cluster_knows_other_shards "$node_ip" "$node_port"; then
       # the $node is the headless address by default, we should get the real node address from cluster nodes
       cluster_nodes_info=$(get_cluster_nodes_info "$node_ip" "$node_port")
       status=$?
@@ -316,6 +318,16 @@ fix_unstable_cluster_and_defer() {
   node_port=$(echo "$node_with_port" | cut -d':' -f2)
   if check_slots_covered "$node_with_port" "$node_port"; then
     return 0
+  fi
+
+  # `--cluster fix` hands every unassigned slot to a random master the node knows. Pointed
+  # at a node that has not joined the cluster yet (a shard still being created, or one that
+  # restarted), or at a cluster that some shard has not joined, those masters are the wrong
+  # ones: a lone node ends up holding all 16384 slots in a cluster of its own. Only fix a
+  # cluster that has every other shard in it.
+  if ! check_cluster_knows_other_shards "$(echo "$node_with_port" | cut -d':' -f1)" "$node_port"; then
+    echo "FalkorDB Cluster node $node_with_port is not in a cluster with every other shard; not running cluster fix, defer lifecycle action for retry." >&2
+    return 1
   fi
 
   echo "FalkorDB Cluster is not stable; run cluster fix and defer lifecycle action for retry." >&2
@@ -1093,6 +1105,115 @@ check_current_shard_other_nodes_are_joined() {
   return 0
 }
 
+## shards that each formed a cluster of their own all report cluster_state:ok and full
+## slot coverage, so check that the node's cluster has a live member of every other
+## shard. A failed, unreachable or half-met entry does not count: it is what a cluster
+## keeps of a shard whose nodes left for a cluster of their own. A shard whose nodes have
+## not joined any cluster yet (a shard being created alongside the current one) holds
+## nothing that could be lost, and it joins by itself, so it is not waited for.
+check_cluster_knows_other_shards() {
+  local cluster_node="$1"
+  local cluster_node_port="$2"
+  local cluster_nodes_info
+  local live_nodes
+  local i
+  local shard
+  local comp
+  local comp_found
+  local own_shard
+  local live_other_shards=0
+  local -A shard_pod_indexes=()
+  local missing_shards=()
+  if ! cluster_nodes_info=$(get_cluster_nodes_info "$cluster_node" "$cluster_node_port") || is_empty "$cluster_nodes_info"; then
+    echo "Failed to get cluster nodes info in check_cluster_knows_other_shards" >&2
+    return 1
+  fi
+  # field 8 is the link state
+  live_nodes=$(echo "$cluster_nodes_info" | awk '$3 !~ /fail|handshake|noaddr/ && $8 == "connected"')
+  for i in "${!other_undeleted_component_pod_names[@]}"; do
+    shard="${other_undeleted_component_pod_names[$i]%-*}"
+    shard_pod_indexes[$shard]+="$i "
+  done
+  # a shard that should exist but has no pod listed has no usable member either
+  for comp in "${other_undeleted_components[@]}"; do
+    comp_found=false
+    for shard in "${!shard_pod_indexes[@]}"; do
+      if [[ "$shard" == *"$comp" ]]; then
+        comp_found=true
+      fi
+    done
+    if [ "$comp_found" = false ]; then
+      missing_shards+=("$comp")
+    fi
+  done
+  # the shard of the node being asked, which knows itself whatever its cluster is
+  own_shard="${cluster_node%%.*}"
+  own_shard="${own_shard%-*}"
+  for shard in "${!shard_pod_indexes[@]}"; do
+    if contains "$live_nodes" "$shard-"; then
+      if [ "$shard" != "$own_shard" ]; then
+        live_other_shards=$((live_other_shards + 1))
+      fi
+      continue
+    fi
+    if shard_has_not_joined_any_cluster "${shard_pod_indexes[$shard]}"; then
+      # stderr: callers capture the output of functions that call this one
+      echo "shard $shard has not joined any cluster yet, not waiting for it" >&2
+      continue
+    fi
+    missing_shards+=("$shard")
+  done
+  if [ ${#missing_shards[@]} -gt 0 ]; then
+    echo "The cluster of $cluster_node does not know the shards: ${missing_shards[*]}" >&2
+    return 1
+  fi
+  # not waiting for shards that joined nothing must not let a lone node pass: if no other
+  # shard is live in its cluster, it is not a formed cluster, and `--cluster fix` would hand
+  # it every slot
+  for shard in "${!shard_pod_indexes[@]}"; do
+    if [ "$shard" != "$own_shard" ] && [ "$live_other_shards" -eq 0 ]; then
+      echo "The cluster of $cluster_node has no live member of any other shard" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+## usage: shard_has_not_joined_any_cluster "<index> <index> ..."
+## succeeds when every pod of a shard (given by its indexes in the other_undeleted_*
+## arrays) answers as a node that knows only itself and serves no slot; a pod that does
+## not answer could be anything, so it fails the check
+shard_has_not_joined_any_cluster() {
+  local index
+  local node
+  local cluster_info
+  local known_nodes
+  local slots_assigned
+  for index in $1; do
+    node="${other_undeleted_component_nodes[$index]}"
+    cluster_info=$(get_cluster_info "${node%%:*}" "${node##*:}")
+    known_nodes=$(echo "$cluster_info" | awk -F: '/cluster_known_nodes/{print $2}' | tr -d '[:space:]')
+    slots_assigned=$(echo "$cluster_info" | awk -F: '/cluster_slots_assigned/{print $2}' | tr -d '[:space:]')
+    if [ "$known_nodes" != "1" ] || [ "$slots_assigned" != "0" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+## prints the first node of the other shards that is in a cluster with every other shard;
+## other_undeleted_component_nodes[0] may be a node that has not joined anything yet
+find_formed_cluster_node() {
+  local node
+  for node in "${other_undeleted_component_nodes[@]}"; do
+    if check_cluster_knows_other_shards "${node%%:*}" "${node##*:}" >/dev/null; then
+      echo "$node"
+      return 0
+    fi
+  done
+  return 1
+}
+
 ## the share of the 16384 slots each shard should own once scaled out; fails when
 ## the current shard's pods cannot be counted
 scale_out_slots_per_shard() {
@@ -1122,7 +1243,12 @@ scale_out_redis_cluster_shard() {
 
   # never reshard onto an unstable cluster: repair it first and let the next retry proceed
   if [ ${#other_undeleted_component_nodes[@]} -gt 0 ]; then
-    fix_unstable_cluster_and_defer "${other_undeleted_component_nodes[0]}" || return 1
+    local formed_cluster_node
+    if ! formed_cluster_node=$(find_formed_cluster_node); then
+      echo "No node of the other shards is in a cluster with every other shard yet, defer lifecycle action for retry." >&2
+      return 1
+    fi
+    fix_unstable_cluster_and_defer "$formed_cluster_node" || return 1
   fi
 
   # check the current component shard whether is already scaled out
@@ -1139,6 +1265,10 @@ scale_out_redis_cluster_shard() {
 
   current_primary_joined=false
   if check_slots_covered "$primary_node_with_port" "$SERVICE_PORT"; then
+    if ! check_cluster_knows_other_shards "$primary_node_fqdn" "$primary_node_port"; then
+      echo "The current shard primary $primary_node_with_port serves a cluster without every other shard, the shards formed separate clusters" >&2
+      return 1
+    fi
     if check_current_shard_other_nodes_are_joined "$primary_node_fqdn" "$primary_node_port"; then
       ## slots covered cluster-wide and every node met is not enough: a retry after
       ## an interrupted reshard sees exactly that while this shard owns none or only
@@ -1303,7 +1433,12 @@ scale_in_redis_cluster_shard() {
   init_other_components_and_pods_info "$CURRENT_SHARD_COMPONENT_SHORT_NAME" "$ALL_SHARDS_POD_FQDN_LIST_COMBINED" "$ALL_SHARDS_COMPONENT_LIST" "$ALL_SHARDS_DELETING_COMPONENT_LIST" "$ALL_SHARDS_UNDELETED_COMPONENT_LIST"
   # never rebalance away from an unstable cluster: repair it first and let the next retry proceed
   if [ ${#other_undeleted_component_nodes[@]} -gt 0 ]; then
-    fix_unstable_cluster_and_defer "${other_undeleted_component_nodes[0]}" || return 1
+    local formed_cluster_node
+    if ! formed_cluster_node=$(find_formed_cluster_node); then
+      echo "No node of the other shards is in a cluster with every other shard yet, defer lifecycle action for retry." >&2
+      return 1
+    fi
+    fix_unstable_cluster_and_defer "$formed_cluster_node" || return 1
   fi
   available_node=$(find_exist_available_node)
   if is_empty "$available_node"; then
