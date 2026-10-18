@@ -1531,10 +1531,48 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       End
     End
 
-    Context "when the node is a replica of another primary"
+    Context "when the node is a replica of another shard's primary"
+      setup() {
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+      }
+      Before "setup"
       get_cluster_nodes_info() {
         echo "other-id 10.42.0.9:6379@16379,falkordb-shard-old-0 master - 0 0 1 connected 0-16383"
         echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1 myself,slave other-id 0 0 1 connected"
+      }
+
+      It "asks for a repair"
+        When call local_node_role_is_settled "primary-id"
+        The status should equal 1
+      End
+    End
+
+    Context "when the node follows a live primary of its own shard other than the given one"
+      # the given primary came from another pod's view, which can lag behind a
+      # failover inside the shard; the replica already follows the new primary
+      setup() {
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+      }
+      Before "setup"
+      get_cluster_nodes_info() {
+        echo "new-primary-id 10.42.0.3:6379@16379,falkordb-shard-sxj-2.falkordb-shard-sxj-headless master - 0 0 4 connected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless myself,slave new-primary-id 0 0 4 connected"
+      }
+
+      It "leaves it alone"
+        When call local_node_role_is_settled "old-primary-id"
+        The status should equal 0
+      End
+    End
+
+    Context "when the node follows a failed primary of its own shard"
+      setup() {
+        export CURRENT_POD_NAME="falkordb-shard-sxj-1"
+      }
+      Before "setup"
+      get_cluster_nodes_info() {
+        echo "dead-id 10.42.0.3:6379@16379,falkordb-shard-sxj-2.falkordb-shard-sxj-headless master,fail - 0 0 4 disconnected 0-16383"
+        echo "self-id 10.42.0.2:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless myself,slave dead-id 0 0 4 connected"
       }
 
       It "asks for a repair"

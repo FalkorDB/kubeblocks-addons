@@ -440,10 +440,12 @@ run_local_redis_command() {
 
 # usage: local_node_role_is_settled <primary_node_id>
 # returns 0 when the local node, by its own view, needs nothing from this script: it is a
-# replica of the given primary, or a master that serves slots. Returns 1 when it has to be
-# repaired: a master that serves no slots (it met the cluster but never became a replica)
-# or a replica of another primary. Returns 2 when its own view or the primary's node ID
-# can not be read.
+# replica of the given primary, a replica of another live primary of its own shard (the
+# given primary comes from another pod's view, which can lag behind a failover), or a
+# master that serves slots. Returns 1 when it has to be repaired: a master that serves no
+# slots (it met the cluster but never became a replica), or a replica of a primary that is
+# failed, serves nothing or belongs to another shard. Returns 2 when its own view or the
+# primary's node ID can not be read.
 local_node_role_is_settled() {
   local primary_node_id="$1"
   local local_nodes_info
@@ -457,8 +459,20 @@ local_node_role_is_settled() {
     return 2
   fi
   # field 4 is the primary a replica follows; fields 9 and later are the slots a node serves
-  echo "$myself_line" | awk -v id="$primary_node_id" '
+  if echo "$myself_line" | awk -v id="$primary_node_id" '
     ($3 ~ /slave/ && $4 == id) || ($3 ~ /master/ && NF > 8) {settled = 1}
+    END {exit !settled}'; then
+    return 0
+  fi
+  local followed_id
+  followed_id=$(echo "$myself_line" | awk '$3 ~ /slave/ {print $4}')
+  if is_empty "$followed_id"; then
+    return 1
+  fi
+  # pods are named <shard>-<ordinal> and announce their pod name in the hostname
+  echo "$local_nodes_info" | awk -v id="$followed_id" -v shard=",${CURRENT_POD_NAME%-*}-" '
+    $1 == id && $3 ~ /master/ && $3 !~ /fail|noaddr|handshake/ && $8 == "connected" &&
+      NF > 8 && index($2, shard) > 0 {settled = 1}
     END {exit !settled}'
 }
 
