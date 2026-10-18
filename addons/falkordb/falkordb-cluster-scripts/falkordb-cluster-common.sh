@@ -820,6 +820,8 @@ secondary_replicated_to_primary() {
   replicated_exit_code=$?
   if [ $replicated_exit_code -ne 0 ]; then
     echo "Failed to replicate the secondary node $secondary_endpoint_with_port to the primary node $mapping_primary_endpoint_with_port" >&2
+    # callers match on the add-node output (e.g. "is not empty"), so it has to reach them on failure too
+    echo "$replicated_output"
     return 1
   fi
   echo "$replicated_output"
