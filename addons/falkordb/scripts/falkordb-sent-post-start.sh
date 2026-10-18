@@ -31,17 +31,26 @@ sentinel_cli() {
   # that neither shows up in the process arguments.
   local command="$1"
   (
-    export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    # An empty REDISCLI_AUTH still makes redis-cli send `AUTH ""`, which a
+    # password-less sentinel rejects, so it is only set when there is a password.
+    if [ -n "${SENTINEL_PASSWORD}" ]; then
+      export REDISCLI_AUTH="${SENTINEL_PASSWORD}"
+    else
+      unset REDISCLI_AUTH
+    fi
     # shellcheck disable=SC2086
     printf '%s\n' "$command" | redis-cli $REDIS_CLI_TLS_CMD -h localhost -p "$sentinel_service_port"
   )
 }
 
+# postStart runs alongside the start script, so the sentinel is usually not
+# listening yet. redis-cli exits 0 even when it cannot connect, which is why the
+# reply has to be checked rather than the exit code.
 wait_for_sentinel() {
   local max_retries=${SENTINEL_PING_MAX_RETRIES:-60}
   local retry=0
   while [ "$retry" -lt "$max_retries" ]; do
-    if sentinel_cli "ping" >/dev/null 2>&1; then
+    if sentinel_cli "ping" 2>/dev/null | grep -q "PONG"; then
       return 0
     fi
     retry=$((retry + 1))
@@ -51,13 +60,29 @@ wait_for_sentinel() {
   return 1
 }
 
+# Runs one command and fails unless the sentinel answers OK. A failed postStart
+# makes kubelet restart the container, which beats a sentinel that silently
+# keeps a password-less default user. That sentinel accepts every command
+# without AUTH, and the memberJoin of the next sentinel scale-out can never
+# succeed against it.
+sentinel_cli_expect_ok() {
+  local description="$1"
+  local command="$2"
+  local output
+  output=$(sentinel_cli "$command" 2>/dev/null)
+  if [ "$output" != "OK" ]; then
+    echo "Error: failed to $description: $output" >&2
+    return 1
+  fi
+}
+
 acl_set_user_for_redis_sentinel() {
   # set default user password and replication user password
   if [ -n "$SENTINEL_PASSWORD" ]; then
     sentinel_service_port=${SENTINEL_SERVICE_PORT:-26379}
     wait_for_sentinel || return 1
-    sentinel_cli "ACL SETUSER $SENTINEL_USER ON >$SENTINEL_PASSWORD allchannels +@all"
-    sentinel_cli "ACL SAVE"
+    sentinel_cli_expect_ok "set the password of $SENTINEL_USER" "ACL SETUSER $SENTINEL_USER ON >$SENTINEL_PASSWORD allchannels +@all" || return 1
+    sentinel_cli_expect_ok "save the ACL" "ACL SAVE" || return 1
     echo "redis sentinel user and password set successfully."
   fi
 }
@@ -73,8 +98,8 @@ acl_set_extra_user_for_redis_sentinel() {
   sentinel_service_port=${SENTINEL_SERVICE_PORT:-26379}
 
   wait_for_sentinel || return 1
-  sentinel_cli "ACL SETUSER $FALKORDB_SENT_EXTRA_USER_USERNAME ON >$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules"
-  sentinel_cli "ACL SAVE"
+  sentinel_cli_expect_ok "create the extra user $FALKORDB_SENT_EXTRA_USER_USERNAME" "ACL SETUSER $FALKORDB_SENT_EXTRA_USER_USERNAME ON >$FALKORDB_SENT_EXTRA_USER_PASSWORD $acl_rules" || return 1
+  sentinel_cli_expect_ok "save the ACL" "ACL SAVE" || return 1
   echo "extra sentinel user $FALKORDB_SENT_EXTRA_USER_USERNAME set successfully."
 }
 
@@ -87,5 +112,5 @@ ${__SOURCED__:+false} : || return 0
 
 # main
 load_common_library
-acl_set_user_for_redis_sentinel
-acl_set_extra_user_for_redis_sentinel
+acl_set_user_for_redis_sentinel || exit 1
+acl_set_extra_user_for_redis_sentinel || exit 1

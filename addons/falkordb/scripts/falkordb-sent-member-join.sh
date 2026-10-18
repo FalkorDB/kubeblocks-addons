@@ -111,6 +111,18 @@ sentinel_cli_argv() {
   fi
 }
 
+# Like sentinel_cli, but never authenticates. Only used to find and repair a
+# sentinel whose default user has no password, see ensure_default_user_password.
+sentinel_cli_without_auth() {
+  local host="$1"
+  local command="$2"
+  (
+    unset REDISCLI_AUTH
+    # shellcheck disable=SC2086
+    printf '%s\n' "$command" | redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$sentinel_service_port"
+  )
+}
+
 wait_for_joining_sentinel() {
   local host="$1"
   local max_retries=${SENTINEL_JOIN_MAX_RETRIES:-60}
@@ -274,6 +286,40 @@ sync_acl_to_joining_member() {
   copy_sentinel_acl 127.0.0.1 "this sentinel" "$target"
 }
 
+# The default user gets its password from the postStart hook of each sentinel.
+# A sentinel whose hook did not get through comes up with a password-less
+# default user, which answers every AUTH with "called without any password
+# configured for the default user". redis-cli then runs the commands
+# unauthenticated, so they appear to work, but the ACL SAVE check below fails
+# on every retry and the scale-out never finishes. Such a sentinel accepts
+# commands without AUTH, so the password is set here before the copy, and the
+# ACL SAVE of the copy persists it.
+ensure_default_user_password() {
+  local target="$1"
+  if is_empty "${SENTINEL_PASSWORD}"; then
+    return 0
+  fi
+  local reply
+  reply=$(sentinel_cli_without_auth "$target" "PING" 2>&1)
+  case "$reply" in
+    *NOAUTH*)
+      # the password is in place.
+      return 0
+      ;;
+    PONG) ;;
+    *)
+      echo "Error: could not tell whether the default user of $target has a password: $reply" >&2
+      return 1
+      ;;
+  esac
+  echo "$target has no password on its default user, setting it."
+  reply=$(sentinel_cli_without_auth "$target" "ACL SETUSER default on >${SENTINEL_PASSWORD} allchannels +@all" 2>&1)
+  if ! equals "$reply" "OK"; then
+    echo "Error: failed to set the password of the default user on $target: $reply" >&2
+    return 1
+  fi
+}
+
 # Makes the ACL of <target> an exact copy of the ACL of <source_host>, see
 # sync_acl_to_joining_member. <source_label> only names the source in the logs.
 # Also used by the falkordb-register-to-sentinel OpsDefinition to restore the
@@ -288,6 +334,8 @@ copy_sentinel_acl() {
     echo "Error: failed to read the ACL of $source_label: $acl_list" >&2
     return 1
   fi
+
+  ensure_default_user_password "$target" || return 1
 
   local source_users=""
   local line username output

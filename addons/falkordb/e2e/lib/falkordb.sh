@@ -225,6 +225,28 @@ fdb_assert_sentinel_user() {
   esac
 }
 
+# fdb_assert_sentinel_requires_auth <namespace> <pod>
+# Fails unless the sentinel refuses a client that does not authenticate.
+#
+# The password of the default user is set by the postStart hook, which runs
+# alongside the sentinel's own start-up. A sentinel that comes up without it
+# looks healthy: it answers PING, monitors the master and accepts every command,
+# authenticated or not. Clients only notice through the "called without any
+# password configured" warning redis-cli prints on stderr.
+fdb_assert_sentinel_requires_auth() {
+  local namespace="$1" pod="$2" out
+  out="$(kubectl exec -n "$namespace" "$pod" -c "$FDB_SENTINEL_CONTAINER" -- \
+    sh -c 'unset REDISCLI_AUTH; exec redis-cli -p "${SENTINEL_SERVICE_PORT:-26379}" '"$FDB_CLI_FLAGS"' PING' \
+    2>&1 | tr -d '\r')"
+  case "$out" in
+    *NOAUTH*) fdb_log "$pod refuses unauthenticated clients" ;;
+    *)
+      fdb_fail "$pod accepted PING without a password: $out"
+      return 1
+      ;;
+  esac
+}
+
 # fdb_pods <namespace> <cluster> <component>
 # Prints the pod names of a component, one per line, in ordinal order.
 fdb_pods() {
