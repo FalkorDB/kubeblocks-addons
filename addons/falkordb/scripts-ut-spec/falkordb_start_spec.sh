@@ -754,6 +754,7 @@ Describe "FalkorDB Start Bash Script Tests"
         mkdir -p "$redis_data_dir/lost+found"
         echo "user default on" > "$redis_data_dir/users.acl"
         echo "" > "$redis_data_dir/.fixed_pod_ip_enabled"
+        : > "$redis_data_dir/.kb-announce-addr"
       }
       Before "setup"
 
@@ -976,6 +977,85 @@ Describe "FalkorDB Start Bash Script Tests"
           The status should be failure
           The stdout should include "replicate from a pod that is not; waiting for it"
           The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
+
+        Context "in host network mode"
+          host_network_setup() {
+            export REDIS_HOST_NETWORK_PORT="6379"
+            redis_announce_host_value="172.18.0.4"
+            redis_announce_port_value="6379"
+            redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
+          }
+          Before "host_network_setup"
+
+          host_network_un_setup() {
+            unset REDIS_HOST_NETWORK_PORT
+          }
+          After "host_network_un_setup"
+
+          It "takes the primary role back from replicas following the node it recorded before moving"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            echo "172.18.0.3 6379" > "$redis_announce_addr_file"
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.3 6379" ;;
+              esac
+            }
+            When call init_or_get_primary_from_redis_sentinel
+            The status should be success
+            The stdout should include "no other pod is running as primary and redis-0.redis-headless.default replicate from this pod, take the primary role back."
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+            The variable primary should eq "redis-1.redis-headless.default"
+          End
+
+          It "does not claim replicas following the node it moved to, which another pod announced"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            echo "172.18.0.3 6379" > "$redis_announce_addr_file"
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.4 6379" ;;
+              esac
+            }
+            When run init_or_get_primary_from_redis_sentinel
+            The status should be failure
+            The stdout should include "replicate from a pod that is not; waiting for it"
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          End
+
+          It "matches its current address when nothing was recorded"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            CURRENT_POD_IP="10.42.0.7"
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.4 6379" ;;
+              esac
+            }
+            When call init_or_get_primary_from_redis_sentinel
+            The status should be success
+            The stdout should include "replicate from this pod, take the primary role back."
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          End
+        End
+
+        Describe "record_host_network_announce_addr()"
+          It "records the announced host network address"
+            REDIS_HOST_NETWORK_PORT="6379"
+            redis_announce_host_value="172.18.0.4"
+            redis_announce_port_value="6379"
+            redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
+            When call record_host_network_announce_addr
+            The status should be success
+            The contents of file "$redis_data_dir/.kb-announce-addr" should eq "172.18.0.4 6379"
+          End
+
+          It "records nothing outside host network mode"
+            redis_announce_host_value="172.18.0.4"
+            redis_announce_port_value="31001"
+            redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
+            When call record_host_network_announce_addr
+            The status should be success
+            The contents of file "$redis_data_dir/.kb-announce-addr" should eq ""
+          End
         End
 
         It "exits non-zero when several other pods run as master"
