@@ -263,6 +263,16 @@ EOF
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
+    It "names an incomplete archive it could not remove"
+      prepare_rewritten_aof
+      rm "$DATA_DIR/users.acl"
+      export STUB_RM_RC=42
+      When run run_backup
+      The status should be failure
+      The output should include "ERROR: archive_pair_files: failed to remove the incomplete 1000.1.tar.zst"
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+    End
+
     It "keeps the local files and exits non-zero when the archived .dir cannot be removed"
       prepare_rewritten_aof
       export STUB_RM_RC=42

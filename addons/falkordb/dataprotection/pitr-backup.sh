@@ -117,7 +117,9 @@ function archive_pair_files() {
   if [ "${pipe_status[0]}" -ne 0 ] || [ "${pipe_status[1]}" -ne 0 ]; then
     DP_error_log "archive_pair_files: failed to archive ${incr_file} and ${base_file} to ${target_file} (tar: ${pipe_status[0]}, push: ${pipe_status[1]})"
     # push may have stored the part of the stream tar wrote before failing; drop it so a restore cannot pick it.
-    datasafed rm "${target_file}" >/dev/null 2>&1
+    if ! datasafed rm "${target_file}" >/dev/null 2>&1; then
+      DP_error_log "archive_pair_files: failed to remove the incomplete ${target_file}, delete it before restoring from this seq"
+    fi
     return 1
   fi
 
