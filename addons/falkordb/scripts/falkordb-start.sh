@@ -208,6 +208,7 @@ init_or_get_primary_from_redis_sentinel() {
   declare -A master_count_map
   local first_redis_primary_host=""
   local first_redis_primary_port=""
+  local sentinels_without_primary=0
   sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
     # get primary info from sentinel
@@ -233,23 +234,35 @@ init_or_get_primary_from_redis_sentinel() {
         echo "The sentinel:$sentinel_pod_fqdn has different primary node info. First: $first_redis_primary_host:$first_redis_primary_port, Current: ${REDIS_SENTINEL_PRIMARY_INFO[0]}:${REDIS_SENTINEL_PRIMARY_INFO[1]}"
       fi
     else
+      if [ "$REDIS_SENTINEL_MONITORS_NO_PRIMARY" == "true" ]; then
+        sentinels_without_primary=$((sentinels_without_primary + 1))
+      fi
       echo "Failed to retrieve primary info from sentinel: $sentinel_pod_fqdn. Skipping this sentinel."
     fi
   done
 
   # sentinel is configured but none of them knows the primary. Falling back to
-  # the default primary is only safe on first bootstrap: a pod restarting with
-  # persisted data during a sentinel outage could otherwise come up as a second
-  # primary (split-brain) or replicate from an empty one (data loss).
+  # the default primary is only safe when nothing can be lost: a pod restarting
+  # with persisted data during a sentinel outage could otherwise come up as a
+  # second primary (split-brain) or replicate from an empty one (data loss).
   echo "get all primary info from redis sentinel master_count_map: ${master_count_map[*]}"
   if [ ${#master_count_map[@]} -eq 0 ]; then
-    if redis_data_dir_has_persisted_data; then
-      echo "Error: no primary node found from all redis sentinels and $redis_data_dir already holds persisted data ($persisted_data_entry); refusing to fall back to the default primary while sentinel is configured. Exiting."
-      exit 1
+    if ! redis_data_dir_has_persisted_data; then
+      echo "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
+      get_default_initialize_primary_node
+      return
     fi
-    echo "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
-    get_default_initialize_primary_node
-    return
+    # Every sentinel answered and none monitors this component yet: the sentinels
+    # are fresh, not down. That is the case for a cluster restored from backup,
+    # where the primary is registered (postProvision) only once a pod is running
+    # as primary, so failing here would never let it register.
+    if [ "$sentinels_without_primary" -eq "${#sentinel_pod_fqdn_list[@]}" ]; then
+      echo "no primary node found from all redis sentinels: every sentinel is reachable and none monitors $REDIS_COMPONENT_NAME yet, use default primary node although $redis_data_dir holds persisted data ($persisted_data_entry)."
+      get_default_initialize_primary_node
+      return
+    fi
+    echo "Error: no primary node found from all redis sentinels ($sentinels_without_primary of ${#sentinel_pod_fqdn_list[@]} reachable without a primary) and $redis_data_dir already holds persisted data ($persisted_data_entry); refusing to fall back to the default primary while sentinel is configured. Exiting."
+    exit 1
   fi
 
   # get the primary node with the most counts
@@ -269,7 +282,12 @@ init_or_get_primary_from_redis_sentinel() {
 # a restored backup, or a half-finished restore (.kb-data-protection, .restore_keys).
 redis_data_dir_has_persisted_data() {
   persisted_data_entry=""
-  [ -d "$redis_data_dir" ] || return 1
+  [ -e "$redis_data_dir" ] || [ -L "$redis_data_dir" ] || return 1
+  # a dir that cannot be listed would glob to nothing and look empty
+  if [ ! -d "$redis_data_dir" ] || [ ! -r "$redis_data_dir" ] || [ ! -x "$redis_data_dir" ]; then
+    persisted_data_entry="$redis_data_dir is not a listable directory"
+    return 0
+  fi
   local entry
   for entry in "$redis_data_dir"/* "$redis_data_dir"/.[!.]* "$redis_data_dir"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -304,6 +322,7 @@ build_sentinel_get_master_addr_by_name_command() {
 get_master_addr_by_name_from_sentinel() {
   local master_addr_by_name_command
   local sentinel_pod_fqdn="$1"
+  REDIS_SENTINEL_MONITORS_NO_PRIMARY="false"
   unset_xtrace_when_ut_mode_false
   master_addr_by_name_command=$(build_sentinel_get_master_addr_by_name_command "$sentinel_pod_fqdn")
   logging_mask_password_command="${master_addr_by_name_command/$SENTINEL_PASSWORD/********}"
@@ -318,6 +337,10 @@ get_master_addr_by_name_from_sentinel() {
       echo "Successfully retrieved primary info from sentinel"
       return 0
     else
+      # a master the sentinel does not monitor is a nil reply, printed as an empty line
+      if [ -z "${output//[[:space:]]/}" ] || [ "$output" == "(nil)" ]; then
+        REDIS_SENTINEL_MONITORS_NO_PRIMARY="true"
+      fi
       echo "Empty primary info retrieved from sentinel"
       return 1
     fi

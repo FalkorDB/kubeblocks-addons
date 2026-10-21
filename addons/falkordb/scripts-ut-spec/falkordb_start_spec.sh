@@ -761,12 +761,19 @@ Describe "FalkorDB Start Bash Script Tests"
         unset REDIS_POD_NAME_LIST
         unset SENTINEL_COMPONENT_NAME
         unset SENTINEL_POD_FQDN_LIST
+        chmod 755 "$redis_data_dir" 2>/dev/null
         rm -rf "$redis_data_dir"
       }
       After "un_setup"
 
+      # by default every sentinel is reachable and monitors no master (nil reply)
       build_sentinel_get_master_addr_by_name_command() {
         echo "echo ''"
+      }
+      unreachable_sentinels() {
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "false"
+        }
       }
       get_default_initialize_primary_node() {
         echo "default primary fallback called"
@@ -799,23 +806,80 @@ Describe "FalkorDB Start Bash Script Tests"
         The variable primary should eq "fake-primary1"
       End
 
-      Parameters
-        "dump.rdb" file
-        "appendonlydir" dir
-        "appendonly.aof" file
-        "temp-123.rdb" file
-        ".kb-data-protection" file
-        ".restore_keys" dir
+      Context "when sentinels are down"
+        Parameters
+          "dump.rdb" file
+          "appendonlydir" dir
+          "appendonly.aof" file
+          "temp-123.rdb" file
+          ".kb-data-protection" file
+          ".restore_keys" dir
+        End
+
+        It "exits non-zero without the default primary when sentinels are down and $1 is persisted"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          unreachable_sentinels
+          if [ "$2" = "dir" ]; then mkdir -p "$redis_data_dir/$1"; else echo "persisted" > "$redis_data_dir/$1"; fi
+          When run init_or_get_primary_from_redis_sentinel
+          The status should be failure
+          The stdout should include "Error occurred while retrieving primary info from sentinel"
+          The stdout should include "Error: no primary node found from all redis sentinels (0 of 2 reachable without a primary) and $redis_data_dir already holds persisted data ($1); refusing to fall back to the default primary while sentinel is configured. Exiting."
+          The stdout should not include "default primary fallback called"
+          The stdout should not include "use default primary node for first bootstrap"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
       End
 
-      It "exits non-zero without the default primary when $1 is persisted"
+      It "falls back to the default primary with persisted data when every sentinel is reachable and monitors no master"
         Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
-        if [ "$2" = "dir" ]; then mkdir -p "$redis_data_dir/$1"; else echo "persisted" > "$redis_data_dir/$1"; fi
+        # a cluster restored from backup: data is in place, sentinels are fresh
+        echo "persisted" > "$redis_data_dir/dump.rdb"
+        When call init_or_get_primary_from_redis_sentinel
+        The status should be success
+        The stdout should include "every sentinel is reachable and none monitors $REDIS_COMPONENT_NAME yet, use default primary node although $redis_data_dir holds persisted data (dump.rdb)."
+        The stdout should include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        The variable primary should eq "fake-primary1"
+      End
+
+      It "exits non-zero with persisted data when only some sentinels are reachable"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        build_sentinel_get_master_addr_by_name_command() {
+          if [ "$1" = "sentinel-0.redis-sentinel-headless" ]; then echo "echo ''"; else echo "false"; fi
+        }
+        echo "persisted" > "$redis_data_dir/dump.rdb"
         When run init_or_get_primary_from_redis_sentinel
         The status should be failure
-        The stdout should include "Error: no primary node found from all redis sentinels and $redis_data_dir already holds persisted data ($1); refusing to fall back to the default primary while sentinel is configured. Exiting."
+        The stdout should include "(1 of 2 reachable without a primary)"
         The stdout should not include "default primary fallback called"
-        The stdout should not include "use default primary node for first bootstrap"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      It "exits non-zero when sentinels answer with an error reply and data is persisted"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "echo 'NOAUTH Authentication required.'"
+        }
+        echo "persisted" > "$redis_data_dir/dump.rdb"
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "(0 of 2 reachable without a primary)"
+        The stdout should not include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      running_as_root() { [ "$(id -u)" = "0" ]; }
+
+      It "exits non-zero when sentinels are down and the data dir cannot be listed"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        Skip if "root can list any dir" running_as_root
+        unreachable_sentinels
+        echo "persisted" > "$redis_data_dir/dump.rdb"
+        chmod 100 "$redis_data_dir"
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "already holds persisted data ($redis_data_dir is not a listable directory)"
+        The stdout should not include "default primary fallback called"
         The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
       End
     End
