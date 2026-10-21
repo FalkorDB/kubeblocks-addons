@@ -2761,6 +2761,51 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
       End
     End
 
+    Context "when an ok pod answers ACL LIST with an error reply"
+      get_cluster_info_with_retry() {
+        printf 'cluster_state:ok\n'
+        return 0
+      }
+      # redis-cli exits 0 on an error reply unless run with -e
+      redis-cli() {
+        case "$*" in
+          *"ACL LIST"*) echo "NOPERM User default has no permissions to run the 'acl|list' command" ;;
+          *) echo "unexpected $*" >&2 ;;
+        esac
+      }
+
+      It "does not take the error reply as the ACL list"
+        When run sync_acl_for_redis_cluster_shard
+        The status should be failure
+        The stdout should include "Sync ACL rules for redis cluster shard..."
+        The stderr should include "Failed to get ACL LIST from other shard pods"
+        The stderr should not include "unexpected"
+      End
+    End
+
+    Context "when the first ok pod fails ACL LIST and the next one succeeds"
+      get_cluster_info_with_retry() {
+        printf 'cluster_state:ok\n'
+        return 0
+      }
+      redis-cli() {
+        case "$*" in
+          *"-h falkordb-shard-98x-0.ns.svc"*"ACL LIST"*) return 1 ;;
+          *"-h falkordb-shard-7hy-0.ns.svc"*"ACL LIST"*) printf 'user default on nopass ~* +@all\nuser appuser on >secret ~* +@all\n' ;;
+          *) echo "CALL $*" ;;
+        esac
+      }
+
+      It "falls through to the next pod and syncs its rules"
+        When run sync_acl_for_redis_cluster_shard
+        The status should be success
+        The stdout should include "Sync ACL rules for redis cluster shard..."
+        The stderr should include "CALL -p 6379 -h falkordb-shard-jwl-0.ns.svc ACL SETUSER appuser on >secret ~* +@all"
+        The stderr should include "CALL -p 6379 -h falkordb-shard-jwl-0.ns.svc ACL save"
+        The stderr should not include "Failed to get ACL LIST"
+      End
+    End
+
     Context "when an ok pod returns ACL rules"
       get_cluster_info_with_retry() {
         case "$1" in

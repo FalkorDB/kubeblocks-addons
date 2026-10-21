@@ -1387,8 +1387,10 @@ sync_acl_for_redis_cluster_shard() {
     # source. An empty state means it could not be read, not that it is fine.
     if equals "$cluster_state" "ok"; then
        # A failed ACL LIST must not pass for "no ACL rules to sync"; try the
-       # next pod instead.
-       if ! acl_list=$($redis_base_cmd -h "$pod_fqdn" -p "$pod_service_port" ACL LIST); then
+       # next pod instead. redis-cli exits 0 on an error reply (NOAUTH,
+       # NOPERM, ...), so also reject output that is not all "user" rules.
+       if ! acl_list=$($redis_base_cmd -h "$pod_fqdn" -p "$pod_service_port" ACL LIST) \
+          || echo "$acl_list" | grep -qv -e '^user ' -e '^$'; then
          acl_list=""
          continue
        fi
