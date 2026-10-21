@@ -31,8 +31,8 @@ redis_data_dir="/data"
 # the host network addresses replicas may know this pod by, one "host port" per
 # line, kept on its own volume
 redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
-# recorded addresses that replicas still followed on this start
-replicas_follow_recorded_addrs=""
+# how many addresses the record keeps, the current one included
+redis_announce_addr_history=5
 # replication ID saved in this pod's RDB, read once when needed
 own_rdb_repl_id=""
 own_rdb_repl_id_read=""
@@ -190,23 +190,31 @@ build_replicaof_config() {
 
 # In host network mode, records the address this pod announces, after the
 # primary is chosen, so that the next start can still recognise replicas that
-# follow it there after the pod moves to another node. Recorded addresses that
-# replicas still followed on this start are kept too: until they switch to the
-# new address, a start that fails must not forget the old one.
+# follow it there after the pod moves to another node. Previous addresses are
+# kept behind it, newest first: a replica that was unreachable on this start,
+# or a start that fails, may still leave replicas following an old one. An
+# old address only counts with a matching replication ID, so keeping it cannot
+# claim another pod that used that node since.
 record_host_network_announce_addr() {
   if ! is_host_network_announce || is_empty "$redis_announce_host_value"; then
     return 0
   fi
-  local current="$redis_announce_host_value $redis_announce_port_value" addr written
+  local current="$redis_announce_host_value $redis_announce_port_value" addr written count=1
+  local previous=""
+  if [ -s "$redis_announce_addr_file" ]; then
+    previous=$(cat "$redis_announce_addr_file")
+  fi
   written=$'\n'"$current"$'\n'
   {
     echo "$current"
     while IFS= read -r addr; do
+      [ "$count" -ge "$redis_announce_addr_history" ] && break
       if ! is_empty "$addr" && [[ "$written" != *$'\n'"$addr"$'\n'* ]]; then
         echo "$addr"
         written+="$addr"$'\n'
+        count=$((count + 1))
       fi
-    done <<< "$replicas_follow_recorded_addrs"
+    done <<< "$previous"
   } > "$redis_announce_addr_file" ||
     echo "Warning: failed to record the announced address in $redis_announce_addr_file."
 }
@@ -419,11 +427,8 @@ peer_replicates_from_current_pod() {
     local recorded_host recorded_port
     while read -r recorded_host recorded_port; do
       if equals "$primary" "$recorded_host" && equals "$primary_port" "$recorded_port"; then
-        if ! host_network_address_history_matches "$primary" "$primary_port" "$primary_replid"; then
-          return 1
-        fi
-        replicas_follow_recorded_addrs="${replicas_follow_recorded_addrs}$primary $primary_port"$'\n'
-        return 0
+        host_network_address_history_matches "$primary" "$primary_port" "$primary_replid"
+        return
       fi
     done < "$redis_announce_addr_file"
     if contains "$primary" "$CURRENT_POD_NAME.$REDIS_COMPONENT_NAME"; then
