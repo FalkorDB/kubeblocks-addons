@@ -273,6 +273,18 @@ EOF
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
+    It "keeps the archive of an earlier run whose .dir removal failed when the retry's push fails"
+      prepare_rewritten_aof
+      echo "complete archive" > "$STUB_REMOTE/1000.1.tar.zst"
+      export STUB_PUSH_RC=42
+      When run run_backup
+      The status should be failure
+      The output should include "ERROR: archive_pair_files: failed to archive"
+      The contents of file "$STUB_REMOTE/1000.1.tar.zst" should equal "complete archive"
+      The contents of file "$STUB_DATASAFED_LOG" should not include "rm "
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+    End
+
     It "keeps the local files and exits non-zero when the archived .dir cannot be removed"
       prepare_rewritten_aof
       export STUB_RM_RC=42

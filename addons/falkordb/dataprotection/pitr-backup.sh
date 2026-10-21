@@ -106,6 +106,12 @@ function archive_pair_files() {
   fi
 
   local target_file="${backup_files_prefix}.tar.zst"
+  # a retry after a failed .dir removal finds the complete archive of the earlier run here;
+  # a failed push must not delete it. If the listing fails, assume it exists.
+  local remote_files target_existed=true
+  if remote_files=$(datasafed list /) && ! grep -Fxq "${target_file}" <<<"${remote_files}"; then
+    target_existed=false
+  fi
   # backup files include manifest file, incr file, base file, users.acl
   # and we retains the original directory hierarchy, which makes the recovery process simpler
   tar -cvf - "$(generate_backup_manifest)" -C "${DATA_DIR}" \
@@ -117,7 +123,7 @@ function archive_pair_files() {
   if [ "${pipe_status[0]}" -ne 0 ] || [ "${pipe_status[1]}" -ne 0 ]; then
     DP_error_log "archive_pair_files: failed to archive ${incr_file} and ${base_file} to ${target_file} (tar: ${pipe_status[0]}, push: ${pipe_status[1]})"
     # push may have stored the part of the stream tar wrote before failing; drop it so a restore cannot pick it.
-    if ! datasafed rm "${target_file}" >/dev/null 2>&1; then
+    if [ "${target_existed}" = false ] && ! datasafed rm "${target_file}" >/dev/null 2>&1; then
       DP_error_log "archive_pair_files: failed to remove the incomplete ${target_file}, delete it before restoring from this seq"
     fi
     return 1
