@@ -364,6 +364,10 @@ find_live_primary_among_peers() {
 # addresses check_current_pod_is_primary recognises. Behind a NodePort the
 # replica may still name the node this pod ran on before a restart moved it,
 # so there the port alone decides: each pod has its own NodePort.
+# In host network mode every pod shares the port, so a node address names
+# whichever pod ran on that node, and replicas of any of them share its
+# replication ID: only the pod's own names count, and replicas following a
+# node address make the start fail closed for an operator to choose.
 peer_replicates_from_current_pod() {
   local primary="$1" primary_port="$2"
   if is_empty "$primary" || is_empty "$primary_port"; then
@@ -372,7 +376,19 @@ peer_replicates_from_current_pod() {
   if equals "$redis_announce_via_nodeport" "true" && equals "$primary_port" "$redis_announce_port_value"; then
     return 0
   fi
+  if is_host_network_announce; then
+    if contains "$primary" "$CURRENT_POD_NAME.$REDIS_COMPONENT_NAME"; then
+      return 0
+    fi
+    ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE" &&
+      equals "$primary" "$(get_announce_hostname_override_or_default "" "$CURRENT_POD_NAME")"
+    return
+  fi
   check_current_pod_is_primary >/dev/null
+}
+
+is_host_network_announce() {
+  ! is_empty "$REDIS_HOST_NETWORK_PORT" && is_empty "$REDIS_ADVERTISED_PORT"
 }
 
 # Prints master, or slave followed by its master_host and master_port, nothing

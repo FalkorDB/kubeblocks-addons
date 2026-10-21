@@ -978,6 +978,64 @@ Describe "FalkorDB Start Bash Script Tests"
           The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
         End
 
+        Context "in host network mode"
+          host_network_setup() {
+            export REDIS_HOST_NETWORK_PORT="6379"
+            redis_announce_host_value="172.18.0.4"
+            redis_announce_port_value="6379"
+            CURRENT_POD_IP="172.18.0.4"
+          }
+          Before "host_network_setup"
+
+          host_network_un_setup() {
+            unset REDIS_HOST_NETWORK_PORT
+          }
+          After "host_network_un_setup"
+
+          It "does not take the role through a node address, which any pod on that node shares"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            # another pod may have run on this node and been primary, with the same replication ID
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.4 6379" ;;
+              esac
+            }
+            When run init_or_get_primary_from_redis_sentinel
+            The status should be failure
+            The stdout should include "replicate from a pod that is not; waiting for it"
+            The stdout should not include "take the primary role back"
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          End
+
+          It "takes the role back through its fqdn"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave redis-1.redis-headless.default 6379" ;;
+              esac
+            }
+            When call init_or_get_primary_from_redis_sentinel
+            The status should be success
+            The stdout should include "replicate from this pod, take the primary role back."
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          End
+
+          It "takes the role back through its announce hostname override"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            ANNOUNCE_HOSTNAME_OVERRIDE="redis-{pod}.example.com"
+            get_announce_hostname_override_or_default() { echo "redis-1.example.com"; }
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave redis-1.example.com 6379" ;;
+              esac
+            }
+            When call init_or_get_primary_from_redis_sentinel
+            The status should be success
+            The stdout should include "replicate from this pod, take the primary role back."
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          End
+        End
+
         It "exits non-zero when several other pods run as master"
           Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
           get_peer_replication_role() { echo "master"; }
