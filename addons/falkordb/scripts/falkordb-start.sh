@@ -270,6 +270,12 @@ init_or_get_primary_from_redis_sentinel() {
         primary_port="$service_port"
         return
       fi
+      # Replicas that disagree on their primary (a failover that only partly
+      # propagated) leave no safe choice: the other pod may hold newer writes.
+      if ! is_empty "$peers_follow_current_pod" && ! is_empty "$peers_follow_other_pod"; then
+        echo "Error: no other pod is running as primary, $peers_follow_current_pod replicate from this pod but $peers_follow_other_pod from another; refusing to pick a primary. Exiting."
+        exit 1
+      fi
       # The replicas still point at the primary that went away. When that is
       # this pod (a restart during a rolling update), it takes the role back:
       # following the default instead would make it a replica of one of its own
@@ -355,16 +361,23 @@ find_live_primary_among_peers() {
 }
 
 # Whether a replica's master_host and master_port name this pod, by any of the
-# addresses check_current_pod_is_primary recognises.
+# addresses check_current_pod_is_primary recognises. Behind a NodePort the
+# replica may still name the node this pod ran on before a restart moved it,
+# so there the port alone decides: each pod has its own NodePort.
 peer_replicates_from_current_pod() {
-  local primary="$1" primary_port="${2:-$service_port}"
-  is_empty "$primary" && return 1
+  local primary="$1" primary_port="$2"
+  if is_empty "$primary" || is_empty "$primary_port"; then
+    return 1
+  fi
+  if equals "$redis_announce_via_nodeport" "true" && equals "$primary_port" "$redis_announce_port_value"; then
+    return 0
+  fi
   check_current_pod_is_primary >/dev/null
 }
 
 # Prints master, or slave followed by its master_host and master_port, nothing
 # when the pod cannot be reached, and unknown when it answers without a role (an
-# error reply such as NOAUTH).
+# error reply such as NOAUTH) or as a replica without both of them.
 # Every pod listens on $service_port: in host network mode it is the one port
 # KubeBlocks allocates for the component (REDIS_HOST_NETWORK_PORT), as
 # get_default_initialize_primary_node also assumes.
@@ -388,7 +401,11 @@ get_peer_replication_role() {
       local master_host master_port
       master_host=$(echo "$output" | sed -n 's/^master_host:\([^[:space:]]*\).*/\1/p' | head -n 1)
       master_port=$(echo "$output" | sed -n 's/^master_port:\([0-9]*\).*/\1/p' | head -n 1)
-      echo "slave $master_host $master_port"
+      if is_empty "$master_host" || is_empty "$master_port"; then
+        echo "unknown"
+      else
+        echo "slave $master_host $master_port"
+      fi
       ;;
     *) echo "unknown" ;;
   esac
@@ -602,6 +619,7 @@ parse_redis_announce_addr() {
         redis_announce_port_value="${SERVICE_PORT:-6379}"
       else
         redis_announce_host_value="$CURRENT_POD_HOST_IP"
+        redis_announce_via_nodeport="true"
       fi
       found=true
       break

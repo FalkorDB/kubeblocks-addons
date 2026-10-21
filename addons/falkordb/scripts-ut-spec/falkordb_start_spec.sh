@@ -870,7 +870,7 @@ Describe "FalkorDB Start Bash Script Tests"
           get_peer_replication_role() {
             case "$1" in
               redis-2.*) echo "master" ;;
-              *) echo "slave" ;;
+              *) echo "slave redis-2.redis-headless.default 6379" ;;
             esac
           }
           When call init_or_get_primary_from_redis_sentinel
@@ -924,6 +924,57 @@ Describe "FalkorDB Start Bash Script Tests"
           The status should be failure
           The stdout should include "Error: no other pod is running as primary and redis-0.redis-headless.default replicate from a pod that is not; waiting for it rather than picking the default primary. Exiting."
           The stdout should not include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
+
+        It "exits non-zero when some replicas follow this pod and others another one"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          get_peer_replication_role() {
+            case "$1" in
+              redis-0.*) echo "slave redis-1.redis-headless.default 6379" ;;
+              redis-2.*) echo "slave 10.0.0.9 6379" ;;
+            esac
+          }
+          When run init_or_get_primary_from_redis_sentinel
+          The status should be failure
+          The stdout should include "Error: no other pod is running as primary, redis-0.redis-headless.default replicate from this pod but redis-2.redis-headless.default from another; refusing to pick a primary. Exiting."
+          The stdout should not include "take the primary role back"
+          The stdout should not include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
+
+        It "takes the primary role back behind a NodePort after moving to another node"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          # the replica still names the node redis-1 ran on before the restart
+          redis_announce_via_nodeport="true"
+          redis_announce_host_value="172.18.0.4"
+          redis_announce_port_value="31001"
+          CURRENT_POD_IP="10.42.0.7"
+          get_peer_replication_role() {
+            case "$1" in
+              redis-0.*) echo "slave 172.18.0.3 31001" ;;
+            esac
+          }
+          When call init_or_get_primary_from_redis_sentinel
+          The status should be success
+          The stdout should include "no other pod is running as primary and redis-0.redis-headless.default replicate from this pod, take the primary role back."
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          The variable primary should eq "redis-1.redis-headless.default"
+        End
+
+        It "does not match another pod's NodePort on this pod's old node"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          redis_announce_via_nodeport="true"
+          redis_announce_host_value="172.18.0.4"
+          redis_announce_port_value="31001"
+          get_peer_replication_role() {
+            case "$1" in
+              redis-0.*) echo "slave 172.18.0.4 31002" ;;
+            esac
+          }
+          When run init_or_get_primary_from_redis_sentinel
+          The status should be failure
+          The stdout should include "replicate from a pod that is not; waiting for it"
           The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
         End
 
@@ -1004,6 +1055,12 @@ Describe "FalkorDB Start Bash Script Tests"
       redis-cli() { printf '# Replication\r\nrole:slave\r\nmaster_host:redis-0\r\nmaster_port:6379\r\n'; }
       When call get_peer_replication_role "redis-1.redis-headless.default"
       The output should eq "slave redis-0 6379"
+    End
+
+    It "reports unknown for a replica without master_port"
+      redis-cli() { printf '# Replication\r\nrole:slave\r\nmaster_host:redis-0\r\n'; }
+      When call get_peer_replication_role "redis-1.redis-headless.default"
+      The output should eq "unknown"
     End
 
     It "prints nothing when the pod cannot be reached"
