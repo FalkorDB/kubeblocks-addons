@@ -28,8 +28,6 @@ redis_extra_conf="/etc/conf/extra/redis.conf"
 redis_acl_file="/data/users.acl"
 redis_acl_file_bak="/data/users.acl.bak"
 redis_data_dir="/data"
-# the host network address this pod announced on its last start, kept on its own volume
-redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
 retry_times=3
 retry_delay_second=2
 service_port=${SERVICE_PORT:-6379}
@@ -180,21 +178,6 @@ build_replicaof_config() {
   else
     echo "replicaof $primary $primary_port" >> $redis_real_conf
   fi
-}
-
-# In host network mode, records the address this pod announces, after the
-# primary is chosen, so that the next start can still recognise replicas that
-# follow it there after the pod moves to another node.
-record_host_network_announce_addr() {
-  if ! is_host_network_announce || is_empty "$redis_announce_host_value"; then
-    return 0
-  fi
-  echo "$redis_announce_host_value $redis_announce_port_value" > "$redis_announce_addr_file" ||
-    echo "Warning: failed to record the announced address in $redis_announce_addr_file."
-}
-
-is_host_network_announce() {
-  ! is_empty "$REDIS_HOST_NETWORK_PORT" && is_empty "$REDIS_ADVERTISED_PORT"
 }
 
 rebuild_redis_acl_file() {
@@ -378,12 +361,9 @@ find_live_primary_among_peers() {
 }
 
 # Whether a replica's master_host and master_port name this pod, by any of the
-# addresses check_current_pod_is_primary recognises. A replica may still name
-# the node this pod ran on before a restart moved it:
-# - behind a NodePort the port alone decides, since each pod has its own;
-# - in host network mode every pod shares the port, so the node address counts
-#   only as the one this pod recorded on its last start, which another pod now
-#   on that node cannot claim. Without a record, the current address is used.
+# addresses check_current_pod_is_primary recognises. Behind a NodePort the
+# replica may still name the node this pod ran on before a restart moved it,
+# so there the port alone decides: each pod has its own NodePort.
 peer_replicates_from_current_pod() {
   local primary="$1" primary_port="$2"
   if is_empty "$primary" || is_empty "$primary_port"; then
@@ -391,15 +371,6 @@ peer_replicates_from_current_pod() {
   fi
   if equals "$redis_announce_via_nodeport" "true" && equals "$primary_port" "$redis_announce_port_value"; then
     return 0
-  fi
-  if is_host_network_announce && [ -s "$redis_announce_addr_file" ]; then
-    local recorded_host recorded_port
-    read -r recorded_host recorded_port < "$redis_announce_addr_file"
-    if equals "$primary" "$recorded_host" && equals "$primary_port" "$recorded_port"; then
-      return 0
-    fi
-    contains "$primary" "$CURRENT_POD_NAME.$REDIS_COMPONENT_NAME"
-    return
   fi
   check_current_pod_is_primary >/dev/null
 }
@@ -460,8 +431,6 @@ redis_data_dir_has_persisted_data() {
       users.acl|users.acl.bak) ;;
       # marker written by build_announce_ip_and_port
       .fixed_pod_ip_enabled) ;;
-      # announced address written by record_host_network_announce_addr
-      .kb-announce-addr) ;;
       # created by mkfs at the root of a fresh ext* volume
       lost+found) ;;
       *)
@@ -670,7 +639,6 @@ build_redis_conf() {
   build_redis_service_port
   build_redis_tls_config
   build_replicaof_config
-  record_host_network_announce_addr
   rebuild_redis_acl_file
   build_redis_default_accounts
   add_extra_falkordb_user_account
