@@ -985,8 +985,14 @@ Describe "FalkorDB Start Bash Script Tests"
             redis_announce_host_value="172.18.0.4"
             redis_announce_port_value="6379"
             redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
+            own_repl_id="8313a61cd93bfe17ea2e7a63282cb282bcf596cd"
           }
           Before "host_network_setup"
+
+          # this pod's RDB was saved with replication ID $own_repl_id
+          redis-check-rdb() {
+            echo "[offset 135] AUX FIELD repl-id = '$own_repl_id'"
+          }
 
           host_network_un_setup() {
             unset REDIS_HOST_NETWORK_PORT
@@ -998,7 +1004,7 @@ Describe "FalkorDB Start Bash Script Tests"
             echo "172.18.0.3 6379" > "$redis_announce_addr_file"
             get_peer_replication_role() {
               case "$1" in
-                redis-0.*) echo "slave 172.18.0.3 6379" ;;
+                redis-0.*) echo "slave 172.18.0.3 6379 $own_repl_id" ;;
               esac
             }
             When call init_or_get_primary_from_redis_sentinel
@@ -1047,6 +1053,11 @@ Describe "FalkorDB Start Bash Script Tests"
                 redis-0.*) echo "slave 172.18.0.3 6379" ;;
               esac
             }
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.3 6379 $own_repl_id" ;;
+              esac
+            }
             retry_after_failed_start() {
               init_or_get_primary_from_redis_sentinel >/dev/null 2>&1 || return 1
               record_host_network_announce_addr
@@ -1059,6 +1070,53 @@ Describe "FalkorDB Start Bash Script Tests"
             The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
             The contents of file "$redis_announce_addr_file" should eq "172.18.0.4 6379
 172.18.0.3 6379"
+          End
+
+          It "does not take the role through an old address another pod has used as primary since"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            # redis-2 later ran on 172.18.0.3 and was promoted: a new replication ID
+            echo "172.18.0.4 6379
+172.18.0.3 6379" > "$redis_announce_addr_file"
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.3 6379 0f2c9e7a1b3d5f7092a4c6e8b0d2f4a6c8e0a2b4" ;;
+              esac
+            }
+            When run init_or_get_primary_from_redis_sentinel
+            The status should be failure
+            The stdout should include "replicate from a pod that is not; waiting for it"
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          End
+
+          It "does not take the role through an old address when its RDB has no replication ID"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            own_repl_id=""
+            echo "172.18.0.4 6379
+172.18.0.3 6379" > "$redis_announce_addr_file"
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.3 6379 0f2c9e7a1b3d5f7092a4c6e8b0d2f4a6c8e0a2b4" ;;
+              esac
+            }
+            When run init_or_get_primary_from_redis_sentinel
+            The status should be failure
+            The stdout should include "replicate from a pod that is not; waiting for it"
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          End
+
+          It "takes the role through the address it announces now when its RDB has no replication ID"
+            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+            own_repl_id=""
+            echo "172.18.0.4 6379" > "$redis_announce_addr_file"
+            get_peer_replication_role() {
+              case "$1" in
+                redis-0.*) echo "slave 172.18.0.4 6379 0f2c9e7a1b3d5f7092a4c6e8b0d2f4a6c8e0a2b4" ;;
+              esac
+            }
+            When call init_or_get_primary_from_redis_sentinel
+            The status should be success
+            The stdout should include "replicate from this pod, take the primary role back."
+            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
           End
 
           It "matches its current address when nothing was recorded"
@@ -1183,9 +1241,9 @@ Describe "FalkorDB Start Bash Script Tests"
     End
 
     It "reports slave from info replication"
-      redis-cli() { printf '# Replication\r\nrole:slave\r\nmaster_host:redis-0\r\nmaster_port:6379\r\n'; }
+      redis-cli() { printf '# Replication\r\nrole:slave\r\nmaster_host:redis-0\r\nmaster_port:6379\r\nmaster_replid:8313a61cd93bfe17ea2e7a63282cb282bcf596cd\r\n'; }
       When call get_peer_replication_role "redis-1.redis-headless.default"
-      The output should eq "slave redis-0 6379"
+      The output should eq "slave redis-0 6379 8313a61cd93bfe17ea2e7a63282cb282bcf596cd"
     End
 
     It "reports unknown for a replica without master_port"

@@ -33,6 +33,9 @@ redis_data_dir="/data"
 redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
 # recorded addresses that replicas still followed on this start
 replicas_follow_recorded_addrs=""
+# replication ID saved in this pod's RDB, read once when needed
+own_rdb_repl_id=""
+own_rdb_repl_id_read=""
 retry_times=3
 retry_delay_second=2
 service_port=${SERVICE_PORT:-6379}
@@ -360,12 +363,12 @@ find_live_primary_among_peers() {
   live_primary_error=""
   peers_follow_current_pod=""
   peers_follow_other_pod=""
-  local peer_fqdn peer_role peer_master_host peer_master_port
+  local peer_fqdn peer_role peer_master_host peer_master_port peer_master_replid
   for peer_fqdn in $(split "$REDIS_POD_FQDN_LIST" ","); do
     if [[ "$peer_fqdn" == "$CURRENT_POD_NAME".* ]]; then
       continue
     fi
-    read -r peer_role peer_master_host peer_master_port <<< "$(get_peer_replication_role "$peer_fqdn")"
+    read -r peer_role peer_master_host peer_master_port peer_master_replid <<< "$(get_peer_replication_role "$peer_fqdn")"
     echo "pod $peer_fqdn replication role: ${peer_role:-unreachable}${peer_master_host:+ of $peer_master_host}"
     case "$peer_role" in
       master)
@@ -376,7 +379,7 @@ find_live_primary_among_peers() {
         live_primary_fqdn="$peer_fqdn"
         ;;
       slave)
-        if peer_replicates_from_current_pod "$peer_master_host" "$peer_master_port"; then
+        if peer_replicates_from_current_pod "$peer_master_host" "$peer_master_port" "$peer_master_replid"; then
           peers_follow_current_pod="${peers_follow_current_pod:+$peers_follow_current_pod }$peer_fqdn"
         else
           peers_follow_other_pod="${peers_follow_other_pod:+$peers_follow_other_pod }$peer_fqdn"
@@ -400,8 +403,12 @@ find_live_primary_among_peers() {
 #   only when this pod recorded it, which another pod now on that node cannot
 #   claim; the announce hostname override still counts. Without a record, the
 #   current address is used.
+# A node address is also one another pod may have used before, so the
+# replica's master_replid must match the replication ID in this pod's RDB: a
+# replica promoted since then has a new one. When this pod's RDB has none,
+# only the address it announces now is trusted, as before.
 peer_replicates_from_current_pod() {
-  local primary="$1" primary_port="$2"
+  local primary="$1" primary_port="$2" primary_replid="$3"
   if is_empty "$primary" || is_empty "$primary_port"; then
     return 1
   fi
@@ -412,6 +419,9 @@ peer_replicates_from_current_pod() {
     local recorded_host recorded_port
     while read -r recorded_host recorded_port; do
       if equals "$primary" "$recorded_host" && equals "$primary_port" "$recorded_port"; then
+        if ! host_network_address_history_matches "$primary" "$primary_port" "$primary_replid"; then
+          return 1
+        fi
         replicas_follow_recorded_addrs="${replicas_follow_recorded_addrs}$primary $primary_port"$'\n'
         return 0
       fi
@@ -426,9 +436,32 @@ peer_replicates_from_current_pod() {
   check_current_pod_is_primary >/dev/null
 }
 
-# Prints master, or slave followed by its master_host and master_port, nothing
+# Whether a replica following a recorded node address replicates this pod's
+# history: its master_replid is the replication ID in this pod's RDB. Without
+# one, only the address this pod announces now counts.
+host_network_address_history_matches() {
+  local host="$1" port="$2" replid="$3"
+  read_own_rdb_repl_id
+  if ! is_empty "$own_rdb_repl_id"; then
+    equals "$replid" "$own_rdb_repl_id"
+    return
+  fi
+  equals "$host" "$redis_announce_host_value" && equals "$port" "$redis_announce_port_value"
+}
+
+read_own_rdb_repl_id() {
+  [ -n "$own_rdb_repl_id_read" ] && return 0
+  own_rdb_repl_id_read="true"
+  own_rdb_repl_id=""
+  [ -s "$redis_data_dir/dump.rdb" ] || return 0
+  own_rdb_repl_id=$(redis-check-rdb "$redis_data_dir/dump.rdb" 2>/dev/null |
+    sed -n "s/.*AUX FIELD repl-id = '\([0-9a-f]*\)'.*/\1/p" | head -n 1)
+}
+
+# Prints master, or slave followed by its master_host, master_port and
+# master_replid, nothing
 # when the pod cannot be reached, and unknown when it answers without a role (an
-# error reply such as NOAUTH) or as a replica without both of them.
+# error reply such as NOAUTH) or as a replica without master_host or master_port.
 # Every pod listens on $service_port: in host network mode it is the one port
 # KubeBlocks allocates for the component (REDIS_HOST_NETWORK_PORT), as
 # get_default_initialize_primary_node also assumes.
@@ -449,13 +482,14 @@ get_peer_replication_role() {
   case "$output" in
     *role:master*) echo "master" ;;
     *role:slave*)
-      local master_host master_port
+      local master_host master_port master_replid
       master_host=$(echo "$output" | sed -n 's/^master_host:\([^[:space:]]*\).*/\1/p' | head -n 1)
       master_port=$(echo "$output" | sed -n 's/^master_port:\([0-9]*\).*/\1/p' | head -n 1)
+      master_replid=$(echo "$output" | sed -n 's/^master_replid:\([0-9a-f]*\).*/\1/p' | head -n 1)
       if is_empty "$master_host" || is_empty "$master_port"; then
         echo "unknown"
       else
-        echo "slave $master_host $master_port"
+        echo "slave $master_host $master_port $master_replid"
       fi
       ;;
     *) echo "unknown" ;;
