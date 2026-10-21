@@ -252,12 +252,25 @@ init_or_get_primary_from_redis_sentinel() {
       get_default_initialize_primary_node
       return
     fi
-    # Every sentinel answered and none monitors this component yet: the sentinels
-    # are fresh, not down. That is the case for a cluster restored from backup,
-    # where the primary is registered (postProvision) only once a pod is running
-    # as primary, so failing here would never let it register.
+    # Every sentinel answered and none monitors this component: the sentinels
+    # are fresh or lost their state, they are not down. A cluster restored from
+    # backup lands here, since its primary is registered (postProvision) only
+    # once a pod runs as primary, so failing would never let it register. A nil
+    # reply cannot tell fresh from lost state, so ask the other pods: follow a
+    # live primary if there is one, and take the default only when none is.
     if [ "$sentinels_without_primary" -eq "${#sentinel_pod_fqdn_list[@]}" ]; then
-      echo "no primary node found from all redis sentinels: every sentinel is reachable and none monitors $REDIS_COMPONENT_NAME yet, use default primary node although $redis_data_dir holds persisted data ($persisted_data_entry)."
+      echo "every sentinel is reachable and none monitors $REDIS_COMPONENT_NAME, while $redis_data_dir holds persisted data ($persisted_data_entry); looking for a live primary among the other pods."
+      if ! find_live_primary_among_peers; then
+        echo "Error: cannot tell which pod is the live primary ($live_primary_error); refusing to pick a primary while sentinel monitors none. Exiting."
+        exit 1
+      fi
+      if ! is_empty "$live_primary_fqdn"; then
+        echo "follow the live primary $live_primary_fqdn reported by the pod itself."
+        primary="$live_primary_fqdn"
+        primary_port="$service_port"
+        return
+      fi
+      echo "no other pod is running as primary, use default primary node."
       get_default_initialize_primary_node
       return
     fi
@@ -274,6 +287,61 @@ init_or_get_primary_from_redis_sentinel() {
       primary_port=$(echo $host_port | cut -d: -f2)
     fi
   done
+}
+
+# Asks every other pod for its replication role. Returns 0 with live_primary_fqdn
+# set to the one pod running as master, or empty when none is. A pod that cannot
+# be reached is not serving as primary. Returns 1 with live_primary_error set when
+# several pods are masters, or a reachable pod's role cannot be read.
+find_live_primary_among_peers() {
+  live_primary_fqdn=""
+  live_primary_error=""
+  local peer_fqdn peer_role
+  for peer_fqdn in $(split "$REDIS_POD_FQDN_LIST" ","); do
+    if [[ "$peer_fqdn" == "$CURRENT_POD_NAME".* ]]; then
+      continue
+    fi
+    peer_role=$(get_peer_replication_role "$peer_fqdn")
+    echo "pod $peer_fqdn replication role: ${peer_role:-unreachable}"
+    case "$peer_role" in
+      master)
+        if ! is_empty "$live_primary_fqdn"; then
+          live_primary_error="both $live_primary_fqdn and $peer_fqdn run as master"
+          return 1
+        fi
+        live_primary_fqdn="$peer_fqdn"
+        ;;
+      slave|"") ;;
+      *)
+        live_primary_error="pod $peer_fqdn is reachable but its role is unknown"
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+# Prints master or slave, nothing when the pod cannot be reached, and unknown
+# when it answers without a role (an error reply such as NOAUTH).
+get_peer_replication_role() {
+  local peer_fqdn="$1"
+  local output
+  unset_xtrace_when_ut_mode_false
+  if is_empty "$REDIS_DEFAULT_PASSWORD"; then
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$peer_fqdn" -p "$service_port" info replication 2>/dev/null)
+  else
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$peer_fqdn" -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" --no-auth-warning info replication 2>/dev/null)
+  fi
+  local exit_code=$?
+  set_xtrace_when_ut_mode_false
+  if [ $exit_code -ne 0 ] && is_empty "$output"; then
+    return 0
+  fi
+  case "$output" in
+    *role:master*) echo "master" ;;
+    *role:slave*) echo "slave" ;;
+    *) echo "unknown" ;;
+  esac
 }
 
 # Returns 0 and sets persisted_data_entry when $redis_data_dir holds anything
