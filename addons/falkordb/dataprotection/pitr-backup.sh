@@ -122,8 +122,11 @@ function archive_pair_files() {
   fi
 
   # delete remote and local uncompressed files we are tracking.
+  # a leftover .dir sorts ahead of the archive and a restore would pick its stale copy,
+  # so keep the local files and fail: the next run archives this seq again and retries the removal.
   if ! datasafed rm -r "${backup_files_prefix}.dir"; then
     DP_error_log "archive_pair_files: failed to remove ${backup_files_prefix}.dir after archiving it to ${target_file}"
+    return 1
   fi
   rm "${incr_file}" "${base_file}"
 

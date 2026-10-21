@@ -15,7 +15,7 @@ Describe "FalkorDB PITR dataprotection scripts"
     mkdir -p "$stub_dir" "$work_dir/run" "$work_dir/remote" "$work_dir/data/appendonlydir"
 
     # `datasafed list|push|pull|rm|stat` over the directory $STUB_REMOTE.
-    # STUB_PUSH_RC / STUB_PULL_RC make push / pull fail; STUB_PUSH_FAIL_ONCE
+    # STUB_PUSH_RC / STUB_PULL_RC / STUB_RM_RC make push / pull / rm fail; STUB_PUSH_FAIL_ONCE
     # fails only the first push whose remote path contains it.
     cat > "$stub_dir/datasafed" <<'EOF'
 #!/bin/bash
@@ -69,6 +69,7 @@ pull)
   exit "${STUB_PULL_RC:-0}"
   ;;
 rm)
+  [ "${STUB_RM_RC:-0}" -ne 0 ] && exit "$STUB_RM_RC"
   [ "$1" = "-r" ] && shift
   rm -rf "${STUB_REMOTE:?}/$1"
   ;;
@@ -140,7 +141,7 @@ EOF
     : > "$STUB_DATASAFED_LOG"
     : > "$STUB_SLEEP_LOG"
     unset REDIS_CLI_TLS_CMD DP_TTL_SECONDS DP_RESTORE_KEY_PATTERNS DP_RESTORE_TIME \
-      STUB_PUSH_RC STUB_PULL_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS
+      STUB_PUSH_RC STUB_PULL_RC STUB_RM_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -258,6 +259,18 @@ EOF
       The path "$STUB_REMOTE/1000.1.tar.zst" should not be exist
       The contents of file "$STUB_DATASAFED_LOG" should not include "rm -r"
       The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.base.rdb" should be exist
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+    End
+
+    It "keeps the local files and exits non-zero when the archived .dir cannot be removed"
+      prepare_rewritten_aof
+      export STUB_RM_RC=42
+      When run run_backup
+      The status should be failure
+      The output should include "ERROR: archive_pair_files: failed to remove 1000.1.dir after archiving it to 1000.1.tar.zst"
+      The output should not include "Archived files"
+      The path "$STUB_REMOTE/1000.1.tar.zst" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.base.rdb" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
