@@ -42,13 +42,22 @@ function DP_save_backup_status_info() {
   fi
 }
 
+# Returns non-zero when the listing fails or is empty, or when any pull fails.
 function DP_pull_directory() {
   local dir_path="$1"
   local local_path="$2"
+  local files filename
 
+  if ! files=$(datasafed list -r -f "$dir_path") || [ -z "$files" ]; then
+    DP_error_log "DP_pull_directory: failed to list files in $dir_path"
+    return 1
+  fi
   while IFS= read -r filename; do
-      datasafed pull "$filename" "${local_path}/${filename#*/}"
-  done < <(datasafed list -r -f "$dir_path")
+    if ! datasafed pull "$filename" "${local_path}/${filename#*/}"; then
+      DP_error_log "DP_pull_directory: failed to pull $filename"
+      return 1
+    fi
+  done <<<"$files"
 }
 
 # Clean up expired logfiles.

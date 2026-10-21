@@ -111,9 +111,18 @@ function archive_pair_files() {
   tar -cvf - "$(generate_backup_manifest)" -C "${DATA_DIR}" \
     "${AOF_DIR}/$(basename "${incr_file}")" "${AOF_DIR}/$(basename "${base_file}")" \
     "users.acl" | datasafed push -z zstd - "${target_file}"
+  local pipe_status=("${PIPESTATUS[@]}")
+  # the tracked files below are the only copy of this segment until the archive is uploaded,
+  # so a failed tar or push must leave them, and the remote .dir, in place.
+  if [ "${pipe_status[0]}" -ne 0 ] || [ "${pipe_status[1]}" -ne 0 ]; then
+    DP_error_log "archive_pair_files: failed to archive ${incr_file} and ${base_file} to ${target_file} (tar: ${pipe_status[0]}, push: ${pipe_status[1]})"
+    return 1
+  fi
 
   # delete remote and local uncompressed files we are tracking.
-  datasafed rm -r "${backup_files_prefix}.dir"
+  if ! datasafed rm -r "${backup_files_prefix}.dir"; then
+    DP_error_log "archive_pair_files: failed to remove ${backup_files_prefix}.dir after archiving it to ${target_file}"
+  fi
   rm "${incr_file}" "${base_file}"
 
   DP_log "Archived files: ${incr_file} and ${base_file} to $target_file"
@@ -131,17 +140,24 @@ function update_aof_file() {
   fi
 
   # create a directory for backup files we are tracking, and after a aof rewrite, we will archive them in to a tar.zst file
+  # the modify times below only advance after a successful push, so a failed push is retried on the next round.
   if [ $(get_base_file_ctime "$base_file") -gt ${global_aof_last_modify_time} ]; then
-    datasafed push "${base_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${base_file}")"
-    datasafed push "${backup_manifest}" "${backup_files_prefix}.dir/${backup_manifest}"
-    datasafed push "${DATA_DIR}/users.acl" "${backup_files_prefix}.dir/users.acl"
+    if ! datasafed push "${base_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${base_file}")" ||
+      ! datasafed push "${backup_manifest}" "${backup_files_prefix}.dir/${backup_manifest}" ||
+      ! datasafed push "${DATA_DIR}/users.acl" "${backup_files_prefix}.dir/users.acl"; then
+      DP_error_log "update_aof_file: failed to upload $base_file $backup_manifest users.acl, retrying next round"
+      return 1
+    fi
     DP_log "Upload file: $base_file $backup_manifest users.acl"
   fi
 
   # keep updating the latest aof file
   local aof_modify_time=$(stat -c %Y "${incr_file}")
   if [ "${aof_modify_time}" -gt "${global_aof_last_modify_time}" ]; then
-    datasafed push "${incr_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${incr_file}")"
+    if ! datasafed push "${incr_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${incr_file}")"; then
+      DP_error_log "update_aof_file: failed to upload $incr_file, retrying next round"
+      return 1
+    fi
     global_aof_last_modify_time=${aof_modify_time}
     DP_log "Update file: $incr_file"
   fi
@@ -150,7 +166,10 @@ function update_aof_file() {
   local acl_file="${DATA_DIR}/users.acl"
   local acl_modify_time=$(stat -c %Y "${acl_file}")
   if [ "${acl_modify_time}" -gt "${global_acl_last_modify_time}" ]; then
-    datasafed push "${acl_file}"  "${backup_files_prefix}.dir/users.acl"
+    if ! datasafed push "${acl_file}"  "${backup_files_prefix}.dir/users.acl"; then
+      DP_error_log "update_aof_file: failed to upload $acl_file, retrying next round"
+      return 1
+    fi
     global_acl_last_modify_time=${acl_modify_time}
     DP_log "Update file: $acl_file"
   fi
@@ -160,7 +179,7 @@ function purge_expired_files() {
   local current_unix=$(date +%s)
   info=$(DP_purge_expired_files ${current_unix} ${global_last_purge_time} / 600)
   if [ ! -z "${info}" ]; then
-    global_last_purge_time=${currentUnix}
+    global_last_purge_time=${current_unix}
     DP_log "Cleanup expired aof files: ${info}"
     local total_size=$(datasafed stat / | grep TotalSize | awk '{print $2}')
     DP_save_backup_status_info "${total_size}"
@@ -209,7 +228,12 @@ while true; do
 
   aof_seq=$(awk '/type i/ { print $4 }' "${AOF_MANIFEST_FILE}")
   while [ "${global_backup_seq}" -lt "${aof_seq}" ]; do
-    archive_pair_files
+    # stop instead of moving on: the unarchived files are kept, and the next run picks this seq up again
+    # from its remote .dir. aof-disable-auto-gc stays yes so the server keeps them until then.
+    if ! archive_pair_files; then
+      DP_error_log "failed to archive seq ${global_backup_seq}, exiting"
+      exit 1
+    fi
     global_backup_seq=$((global_backup_seq + 1))
   done
 
