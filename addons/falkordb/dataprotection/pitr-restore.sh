@@ -29,24 +29,37 @@ function truncate_aof() {
 
 function get_files_to_restore() {
   local restore_time=$(date -d "$DP_RESTORE_TIME" +%s)
+  if [ -z "$restore_time" ]; then
+    DP_error_log "Invalid restore time: $DP_RESTORE_TIME"
+    exit 1
+  fi
 
   local filename=$(datasafed list / | sort -Vr | awk -v rt="$restore_time" -F '.' '$1 <= rt {print; exit}')
   if [ -z "$filename" ]; then
-    DP_log "No backup found for the given restore time: $DP_RESTORE_TIME"
-    exit 0
+    DP_error_log "No backup found for the given restore time: $DP_RESTORE_TIME"
+    exit 1
   fi
 
   case "$filename" in
   *.dir/)
     DP_log "Pull directory: $filename"
-    DP_pull_directory "${filename}" "${DATA_DIR}"
+    if ! DP_pull_directory "${filename}" "${DATA_DIR}"; then
+      DP_error_log "Failed to pull directory: $filename"
+      exit 1
+    fi
     ;;
   *.tar.zst)
     echo "Pull aof_file: $filename"
     datasafed pull -d zstd-fastest "${filename}" - | tar -xvf - -C "${DATA_DIR}/"
+    local pipe_status=("${PIPESTATUS[@]}")
+    if [ "${pipe_status[0]}" -ne 0 ] || [ "${pipe_status[1]}" -ne 0 ]; then
+      DP_error_log "Failed to pull or extract $filename (pull: ${pipe_status[0]}, tar: ${pipe_status[1]})"
+      exit 1
+    fi
     ;;
   *)
-    DP_log "Unknown aof_file type: $filename"
+    DP_error_log "Unknown aof_file type: $filename"
+    exit 1
     ;;
   esac
 }

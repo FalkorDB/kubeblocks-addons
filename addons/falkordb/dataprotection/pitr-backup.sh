@@ -83,13 +83,16 @@ function get_backup_files_prefix() {
 }
 
 # generate backup manifest file for remote backup
+# returns non-zero when the manifest cannot be written, since an older one may still be in place
 function generate_backup_manifest() {
   local backup_manifest="$APPEND_FILE_NAME.manifest"
   local backup_incr_file=$(basename "$(aof_incr_file "$global_backup_seq")")
   local backup_base_file=$(basename "$(aof_base_file "$global_backup_seq")")
 
-  echo "file $backup_incr_file seq $global_backup_seq type i" >"$AOF_DIR/$backup_manifest"
-  echo "file $backup_base_file seq $global_backup_seq type b" >>"$AOF_DIR/$backup_manifest"
+  if ! { echo "file $backup_incr_file seq $global_backup_seq type i" >"$AOF_DIR/$backup_manifest" &&
+    echo "file $backup_base_file seq $global_backup_seq type b" >>"$AOF_DIR/$backup_manifest"; } 2>/dev/null; then
+    return 1
+  fi
   echo ""${AOF_DIR}"/${backup_manifest}"
 }
 
@@ -106,14 +109,54 @@ function archive_pair_files() {
   fi
 
   local target_file="${backup_files_prefix}.tar.zst"
+  local backup_manifest_file
+  if ! backup_manifest_file=$(generate_backup_manifest); then
+    DP_error_log "archive_pair_files: failed to write the backup manifest, not archiving ${target_file}"
+    return 1
+  fi
+  # tar keeps streaming past a file it cannot read, so check them all before anything is uploaded:
+  # a retry would otherwise overwrite the complete archive of an earlier run with one missing a file.
+  local input
+  for input in "${backup_manifest_file}" "${incr_file}" "${base_file}" "${DATA_DIR}/users.acl"; do
+    if [ ! -r "${input}" ]; then
+      DP_error_log "archive_pair_files: cannot read ${input}, not archiving ${target_file}"
+      return 1
+    fi
+  done
+  # a retry after a failed .dir removal finds the complete archive of the earlier run here;
+  # a failed push must not delete it. If the listing fails, assume it exists.
+  local remote_files target_existed=true
+  if remote_files=$(datasafed list /) && ! grep -Fxq "${target_file}" <<<"${remote_files}"; then
+    target_existed=false
+  fi
   # backup files include manifest file, incr file, base file, users.acl
   # and we retains the original directory hierarchy, which makes the recovery process simpler
-  tar -cvf - "$(generate_backup_manifest)" -C "${DATA_DIR}" \
+  tar -cvf - "${backup_manifest_file}" -C "${DATA_DIR}" \
     "${AOF_DIR}/$(basename "${incr_file}")" "${AOF_DIR}/$(basename "${base_file}")" \
     "users.acl" | datasafed push -z zstd - "${target_file}"
+  local pipe_status=("${PIPESTATUS[@]}")
+  # the tracked files below are the only copy of this segment until the archive is uploaded,
+  # so a failed tar or push must leave them, and the remote .dir, in place.
+  if [ "${pipe_status[0]}" -ne 0 ] || [ "${pipe_status[1]}" -ne 0 ]; then
+    DP_error_log "archive_pair_files: failed to archive ${incr_file} and ${base_file} to ${target_file} (tar: ${pipe_status[0]}, push: ${pipe_status[1]})"
+    # push may have stored the part of the stream tar wrote before failing; drop it so a restore cannot pick it.
+    if [ "${target_existed}" = true ]; then
+      if [ "${pipe_status[0]}" -ne 0 ]; then
+        DP_error_log "archive_pair_files: ${target_file} from an earlier run may have been overwritten by this incomplete one; the next run uploads it again"
+      fi
+    elif ! datasafed rm "${target_file}" >/dev/null 2>&1; then
+      DP_error_log "archive_pair_files: failed to remove the incomplete ${target_file}, delete it before restoring from this seq"
+    fi
+    return 1
+  fi
 
   # delete remote and local uncompressed files we are tracking.
-  datasafed rm -r "${backup_files_prefix}.dir"
+  # a leftover .dir sorts ahead of the archive and a restore would pick its stale copy,
+  # so keep the local files and fail: the next run archives this seq again and retries the removal.
+  if ! datasafed rm -r "${backup_files_prefix}.dir"; then
+    DP_error_log "archive_pair_files: failed to remove ${backup_files_prefix}.dir after archiving it to ${target_file}"
+    return 1
+  fi
   rm "${incr_file}" "${base_file}"
 
   DP_log "Archived files: ${incr_file} and ${base_file} to $target_file"
@@ -123,25 +166,36 @@ function update_aof_file() {
   local incr_file=$(aof_incr_file "$global_backup_seq")
   local base_file=$(aof_base_file "$global_backup_seq")
   local backup_files_prefix=$(get_backup_files_prefix $base_file)
-  local backup_manifest="$(generate_backup_manifest)"
+  local backup_manifest
 
   if [ ! -f "$incr_file" ] || [ ! -f "$base_file" ]; then
     DP_log "update_aof_file: $incr_file or $base_file do not exist"
     return
   fi
+  if ! backup_manifest=$(generate_backup_manifest); then
+    DP_error_log "update_aof_file: failed to write the backup manifest, retrying next round"
+    return 1
+  fi
 
   # create a directory for backup files we are tracking, and after a aof rewrite, we will archive them in to a tar.zst file
+  # the modify times below only advance after a successful push, so a failed push is retried on the next round.
   if [ $(get_base_file_ctime "$base_file") -gt ${global_aof_last_modify_time} ]; then
-    datasafed push "${base_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${base_file}")"
-    datasafed push "${backup_manifest}" "${backup_files_prefix}.dir/${backup_manifest}"
-    datasafed push "${DATA_DIR}/users.acl" "${backup_files_prefix}.dir/users.acl"
+    if ! datasafed push "${base_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${base_file}")" ||
+      ! datasafed push "${backup_manifest}" "${backup_files_prefix}.dir/${backup_manifest}" ||
+      ! datasafed push "${DATA_DIR}/users.acl" "${backup_files_prefix}.dir/users.acl"; then
+      DP_error_log "update_aof_file: failed to upload $base_file $backup_manifest users.acl, retrying next round"
+      return 1
+    fi
     DP_log "Upload file: $base_file $backup_manifest users.acl"
   fi
 
   # keep updating the latest aof file
   local aof_modify_time=$(stat -c %Y "${incr_file}")
   if [ "${aof_modify_time}" -gt "${global_aof_last_modify_time}" ]; then
-    datasafed push "${incr_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${incr_file}")"
+    if ! datasafed push "${incr_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${incr_file}")"; then
+      DP_error_log "update_aof_file: failed to upload $incr_file, retrying next round"
+      return 1
+    fi
     global_aof_last_modify_time=${aof_modify_time}
     DP_log "Update file: $incr_file"
   fi
@@ -150,7 +204,10 @@ function update_aof_file() {
   local acl_file="${DATA_DIR}/users.acl"
   local acl_modify_time=$(stat -c %Y "${acl_file}")
   if [ "${acl_modify_time}" -gt "${global_acl_last_modify_time}" ]; then
-    datasafed push "${acl_file}"  "${backup_files_prefix}.dir/users.acl"
+    if ! datasafed push "${acl_file}"  "${backup_files_prefix}.dir/users.acl"; then
+      DP_error_log "update_aof_file: failed to upload $acl_file, retrying next round"
+      return 1
+    fi
     global_acl_last_modify_time=${acl_modify_time}
     DP_log "Update file: $acl_file"
   fi
@@ -160,7 +217,7 @@ function purge_expired_files() {
   local current_unix=$(date +%s)
   info=$(DP_purge_expired_files ${current_unix} ${global_last_purge_time} / 600)
   if [ ! -z "${info}" ]; then
-    global_last_purge_time=${currentUnix}
+    global_last_purge_time=${current_unix}
     DP_log "Cleanup expired aof files: ${info}"
     local total_size=$(datasafed stat / | grep TotalSize | awk '{print $2}')
     DP_save_backup_status_info "${total_size}"
@@ -209,7 +266,12 @@ while true; do
 
   aof_seq=$(awk '/type i/ { print $4 }' "${AOF_MANIFEST_FILE}")
   while [ "${global_backup_seq}" -lt "${aof_seq}" ]; do
-    archive_pair_files
+    # stop instead of moving on: the unarchived files are kept, and the next run picks this seq up again
+    # from its remote .dir. aof-disable-auto-gc stays yes so the server keeps them until then.
+    if ! archive_pair_files; then
+      DP_error_log "failed to archive seq ${global_backup_seq}, exiting"
+      exit 1
+    fi
     global_backup_seq=$((global_backup_seq + 1))
   done
 
