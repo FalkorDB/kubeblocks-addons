@@ -187,6 +187,18 @@ EOF
     echo "incr-1" > "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof"
   }
 
+  # A tar that writes part of a stream and then fails, like a read error
+  # half way through a file.
+  fail_tar_after_writing() {
+    cat > "$stub_dir/tar" <<'EOF'
+#!/bin/sh
+echo "partial"
+echo "tar: read error" >&2
+exit 2
+EOF
+    chmod +x "$stub_dir/tar"
+  }
+
   # The files a seq 1 archive holds, rooted the way the restore extracts them.
   write_backup_tree() {
     local root=$1
@@ -249,13 +261,13 @@ EOF
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
-    It "keeps the local files when tar cannot read the tracked files"
+    It "keeps the local files and uploads nothing when a tracked file cannot be read"
       prepare_rewritten_aof
       rm "$DATA_DIR/users.acl"
       When run run_backup
       The status should be failure
-      The output should include "ERROR: archive_pair_files: failed to archive"
-      The output should include "users.acl"
+      The output should include "ERROR: archive_pair_files: cannot read $DATA_DIR/users.acl, not archiving 1000.1.tar.zst"
+      The contents of file "$STUB_DATASAFED_LOG" should not include "push -z"
       The path "$STUB_REMOTE/1000.1.tar.zst" should not be exist
       The contents of file "$STUB_DATASAFED_LOG" should not include "rm -r"
       The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
@@ -265,11 +277,33 @@ EOF
 
     It "names an incomplete archive it could not remove"
       prepare_rewritten_aof
-      rm "$DATA_DIR/users.acl"
+      fail_tar_after_writing
       export STUB_RM_RC=42
       When run run_backup
       The status should be failure
       The output should include "ERROR: archive_pair_files: failed to remove the incomplete 1000.1.tar.zst"
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+    End
+
+    It "drops the incomplete archive when tar fails after streaming part of it"
+      prepare_rewritten_aof
+      fail_tar_after_writing
+      When run run_backup
+      The status should be failure
+      The output should include "(tar: 2, push: 0)"
+      The path "$STUB_REMOTE/1000.1.tar.zst" should not be exist
+      The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+    End
+
+    It "keeps, and flags, the archive of an earlier run when the retry's tar fails mid-stream"
+      prepare_rewritten_aof
+      echo "complete archive" > "$STUB_REMOTE/1000.1.tar.zst"
+      fail_tar_after_writing
+      When run run_backup
+      The status should be failure
+      The output should include "ERROR: archive_pair_files: 1000.1.tar.zst from an earlier run may have been overwritten"
+      The contents of file "$STUB_DATASAFED_LOG" should not include "rm "
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 

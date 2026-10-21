@@ -106,6 +106,17 @@ function archive_pair_files() {
   fi
 
   local target_file="${backup_files_prefix}.tar.zst"
+  local backup_manifest_file
+  backup_manifest_file=$(generate_backup_manifest)
+  # tar keeps streaming past a file it cannot read, so check them all before anything is uploaded:
+  # a retry would otherwise overwrite the complete archive of an earlier run with one missing a file.
+  local input
+  for input in "${backup_manifest_file}" "${incr_file}" "${base_file}" "${DATA_DIR}/users.acl"; do
+    if [ ! -r "${input}" ]; then
+      DP_error_log "archive_pair_files: cannot read ${input}, not archiving ${target_file}"
+      return 1
+    fi
+  done
   # a retry after a failed .dir removal finds the complete archive of the earlier run here;
   # a failed push must not delete it. If the listing fails, assume it exists.
   local remote_files target_existed=true
@@ -114,7 +125,7 @@ function archive_pair_files() {
   fi
   # backup files include manifest file, incr file, base file, users.acl
   # and we retains the original directory hierarchy, which makes the recovery process simpler
-  tar -cvf - "$(generate_backup_manifest)" -C "${DATA_DIR}" \
+  tar -cvf - "${backup_manifest_file}" -C "${DATA_DIR}" \
     "${AOF_DIR}/$(basename "${incr_file}")" "${AOF_DIR}/$(basename "${base_file}")" \
     "users.acl" | datasafed push -z zstd - "${target_file}"
   local pipe_status=("${PIPESTATUS[@]}")
@@ -123,7 +134,11 @@ function archive_pair_files() {
   if [ "${pipe_status[0]}" -ne 0 ] || [ "${pipe_status[1]}" -ne 0 ]; then
     DP_error_log "archive_pair_files: failed to archive ${incr_file} and ${base_file} to ${target_file} (tar: ${pipe_status[0]}, push: ${pipe_status[1]})"
     # push may have stored the part of the stream tar wrote before failing; drop it so a restore cannot pick it.
-    if [ "${target_existed}" = false ] && ! datasafed rm "${target_file}" >/dev/null 2>&1; then
+    if [ "${target_existed}" = true ]; then
+      if [ "${pipe_status[0]}" -ne 0 ]; then
+        DP_error_log "archive_pair_files: ${target_file} from an earlier run may have been overwritten by this incomplete one; the next run uploads it again"
+      fi
+    elif ! datasafed rm "${target_file}" >/dev/null 2>&1; then
       DP_error_log "archive_pair_files: failed to remove the incomplete ${target_file}, delete it before restoring from this seq"
     fi
     return 1
