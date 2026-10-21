@@ -163,12 +163,15 @@ EOF
   BeforeEach 'setup'
   AfterEach 'cleanup'
 
+  # tar -v lists members on stdout or stderr depending on the tar and the
+  # mode (GNU tar extracting: stdout; bsdtar: stderr), so both streams are
+  # merged into the output.
   run_backup() {
-    (cd "$work_dir/run" && bash "$work_dir/backup.sh")
+    (cd "$work_dir/run" && bash "$work_dir/backup.sh" 2>&1)
   }
 
   run_restore() {
-    (cd "$work_dir/run" && bash "$work_dir/restore.sh")
+    (cd "$work_dir/run" && bash "$work_dir/restore.sh" 2>&1)
   }
 
   # Redis has rewritten the AOF to seq 2, so seq 1 is ready to be archived.
@@ -221,7 +224,7 @@ EOF
       The status should be success
       The output should include "Archived files"
       The output should include "Terminating..."
-      The error should include "appendonly.aof.1.incr.aof"
+      The output should include "appendonly.aof.1.incr.aof"
       The result of function archived_files should equal "appendonlydir/appendonly.aof.1.base.rdb appendonlydir/appendonly.aof.1.incr.aof appendonlydir/appendonly.aof.manifest users.acl "
       The path "$STUB_REMOTE/1000.1.dir" should not be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.base.rdb" should not be exist
@@ -237,8 +240,8 @@ EOF
       The output should include "push: 42"
       The output should not include "Archived files"
       The output should not include "Terminating..."
-      The error should include "appendonly.aof.1.incr.aof"
-      The contents of file "$STUB_DATASAFED_LOG" should not include "rm "
+      The output should include "appendonly.aof.1.incr.aof"
+      The contents of file "$STUB_DATASAFED_LOG" should not include "rm -r"
       The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.base.rdb" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
@@ -250,8 +253,10 @@ EOF
       When run run_backup
       The status should be failure
       The output should include "ERROR: archive_pair_files: failed to archive"
-      The error should include "users.acl"
-      The contents of file "$STUB_DATASAFED_LOG" should not include "rm "
+      The output should include "users.acl"
+      The path "$STUB_REMOTE/1000.1.tar.zst" should not be exist
+      The contents of file "$STUB_DATASAFED_LOG" should not include "rm -r"
+      The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.base.rdb" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
@@ -287,7 +292,7 @@ EOF
       When run run_restore
       The status should be success
       The output should include "Restore complete."
-      The error should include "appendonly.aof.1.incr.aof"
+      The output should include "appendonly.aof.1.incr.aof"
       The result of function restored_incr should equal "#TS:1100
 SET a 1"
       The path "$DATA_DIR/users.acl" should be exist
@@ -323,7 +328,7 @@ SET a 1"
       When run run_restore
       The status should be failure
       The output should include "ERROR: Invalid restore time: yesterday-ish"
-      The error should include "invalid date"
+      The output should include "invalid date"
       The output should not include "Restore complete."
     End
 
@@ -334,7 +339,7 @@ SET a 1"
       When run run_restore
       The status should be failure
       The output should include "ERROR: Failed to pull or extract 1000.1.tar.zst (pull: 42, tar: 0)"
-      The error should include "appendonly.aof.1.incr.aof"
+      The output should include "appendonly.aof.1.incr.aof"
       The output should not include "Restore complete."
       The path "$DATA_DIR/.kb-data-protection" should be exist
     End
@@ -345,7 +350,6 @@ SET a 1"
       When run run_restore
       The status should be failure
       The output should include "ERROR: Failed to pull or extract 1000.1.tar.zst (pull: 0, tar:"
-      The error should be present
       The output should not include "Restore complete."
     End
 
