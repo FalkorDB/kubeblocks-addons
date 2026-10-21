@@ -271,6 +271,7 @@ EOF
       The output should include "ERROR: archive_pair_files: failed to remove 1000.1.dir after archiving it to 1000.1.tar.zst"
       The output should not include "Archived files"
       The path "$STUB_REMOTE/1000.1.tar.zst" should be exist
+      The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.base.rdb" should be exist
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
