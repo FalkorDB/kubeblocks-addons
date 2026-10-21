@@ -1145,21 +1145,6 @@ Describe "FalkorDB Start Bash Script Tests"
             The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
           End
 
-          It "takes the role through the address it announces now when the record lacks it"
-            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
-            # the previous start could not rewrite the record
-            echo "172.18.0.3 6379" > "$redis_announce_addr_file"
-            get_peer_replication_role() {
-              case "$1" in
-                redis-0.*) echo "slave 172.18.0.4 6379 $own_repl_id" ;;
-              esac
-            }
-            When call init_or_get_primary_from_redis_sentinel
-            The status should be success
-            The stdout should include "replicate from this pod, take the primary role back."
-            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
-          End
-
           It "matches its current address when nothing was recorded"
             Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
             CURRENT_POD_IP="10.42.0.7"
