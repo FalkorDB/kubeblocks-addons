@@ -165,13 +165,14 @@ EOF
 
   # tar -v lists members on stdout or stderr depending on the tar and the
   # mode (GNU tar extracting: stdout; bsdtar: stderr), so both streams are
-  # merged into the output.
+  # merged into the output. SHELLSPEC_SHELL is the --shell interpreter, so a
+  # bash 3.2 run really runs the scripts under bash 3.2.
   run_backup() {
-    (cd "$work_dir/run" && bash "$work_dir/backup.sh" 2>&1)
+    (cd "$work_dir/run" && "$SHELLSPEC_SHELL" "$work_dir/backup.sh" 2>&1)
   }
 
   run_restore() {
-    (cd "$work_dir/run" && bash "$work_dir/restore.sh" 2>&1)
+    (cd "$work_dir/run" && "$SHELLSPEC_SHELL" "$work_dir/restore.sh" 2>&1)
   }
 
   # Redis has rewritten the AOF to seq 2, so seq 1 is ready to be archived.
