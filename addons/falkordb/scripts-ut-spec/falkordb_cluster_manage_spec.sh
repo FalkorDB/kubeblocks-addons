@@ -2669,6 +2669,12 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         return 1
       }
 
+      # ACL sync now fails closed when no pod is a trusted source, so stub it
+      # to reach the scale-out failure under test.
+      sync_acl_for_redis_cluster_shard() {
+        return 0
+      }
+
       setup() {
         export ALL_SHARDS_POD_FQDN_LIST_COMBINED="172.42.0.1,172.42.0.2,172.42.0.3,172.42.0.4,172.42.0.5,172.42.0.6"
         export ALL_SHARDS_POD_NAME_LIST_COMBINED="falkordb-shard-98x-0,falkordb-shard-98x-1,falkordb-shard-7hy-0,falkordb-shard-7hy-1,falkordb-shard-jwl-0,falkordb-shard-jwl-1"
@@ -2686,6 +2692,99 @@ d-98x-redis-advertised-1:31318.shard-7hy@falkordb-shard-7hy-redis-advertised-0:3
         The status should be failure
         The stderr should include "Failed to scale out FalkorDB Cluster shard"
         The stdout should include "FalkorDB Cluster already initialized, scaling out the shard..."
+      End
+    End
+  End
+
+  Describe "sync_acl_for_redis_cluster_shard()"
+    # Only a pod that reports cluster_state "ok" and answers ACL LIST is a
+    # trusted ACL source; anything else must fail closed rather than let a
+    # scaled-out shard start without the cluster's ACL users.
+    get_pod_service_port_by_network_mode() {
+      echo "6379"
+    }
+
+    setup() {
+      export ALL_SHARDS_POD_FQDN_LIST_COMBINED="falkordb-shard-98x-0.ns.svc,falkordb-shard-7hy-0.ns.svc"
+      export CURRENT_SHARD_POD_FQDN_LIST="falkordb-shard-jwl-0.ns.svc"
+      export SERVICE_PORT="6379"
+      export REDIS_DEFAULT_PASSWORD=""
+    }
+    Before "setup"
+
+    un_setup() {
+      unset ALL_SHARDS_POD_FQDN_LIST_COMBINED CURRENT_SHARD_POD_FQDN_LIST SERVICE_PORT REDIS_DEFAULT_PASSWORD
+    }
+    After "un_setup"
+
+    Context "when reachable pods never report cluster_state ok"
+      get_cluster_info_with_retry() {
+        case "$1" in
+          *98x-0*) printf 'cluster_state:fail\n' ;;
+          *) echo "" ;;
+        esac
+        return 0
+      }
+      redis-cli() {
+        echo "ACL CALL $*" >&2
+        printf 'user default on nopass ~* +@all\n'
+      }
+
+      It "fails closed without reading ACLs from an untrusted pod"
+        When run sync_acl_for_redis_cluster_shard
+        The status should be failure
+        The stdout should include "Sync ACL rules for redis cluster shard..."
+        The stderr should include "Failed to get ACL LIST from other shard pods"
+        The stderr should not include "ACL CALL"
+      End
+    End
+
+    Context "when the source pod is ok but ACL LIST fails"
+      get_cluster_info_with_retry() {
+        printf 'cluster_state:ok\n'
+        return 0
+      }
+      redis-cli() {
+        case "$*" in
+          *"ACL LIST"*) return 1 ;;
+          *) echo "unexpected $*" >&2 ;;
+        esac
+      }
+
+      It "does not treat a failed ACL LIST as no rules"
+        When run sync_acl_for_redis_cluster_shard
+        The status should be failure
+        The stdout should include "Sync ACL rules for redis cluster shard..."
+        The stderr should include "Failed to get ACL LIST from other shard pods"
+        The stderr should not include "No ACL rules found"
+        The stderr should not include "unexpected"
+      End
+    End
+
+    Context "when an ok pod returns ACL rules"
+      get_cluster_info_with_retry() {
+        case "$1" in
+          *98x-0*) echo "" ;;
+          *) printf 'cluster_state:ok\n' ;;
+        esac
+        return 0
+      }
+      redis-cli() {
+        case "$*" in
+          *"-h falkordb-shard-7hy-0.ns.svc"*"ACL LIST"*) printf 'user default on nopass ~* +@all\nuser appuser on >secret ~* +@all\n' ;;
+          *"ACL LIST"*) echo "ACL LIST from wrong pod $*" >&2; return 1 ;;
+          *) echo "CALL $*" ;;
+        esac
+      }
+
+      It "skips the unknown-state pod and syncs non-default users to the shard"
+        When run sync_acl_for_redis_cluster_shard
+        The status should be success
+        The stdout should include "Sync ACL rules for redis cluster shard..."
+        The stderr should include "CALL -p 6379 -h falkordb-shard-jwl-0.ns.svc ACL SETUSER appuser on >secret ~* +@all"
+        The stderr should include "CALL -p 6379 -h falkordb-shard-jwl-0.ns.svc ACL save"
+        The stderr should not include "SETUSER default"
+        The stderr should not include "wrong pod"
       End
     End
   End
