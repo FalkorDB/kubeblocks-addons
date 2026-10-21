@@ -1044,32 +1044,6 @@ Describe "FalkorDB Start Bash Script Tests"
             The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
           End
 
-          It "still recognises replicas of its old node after a start that saw none of them failed"
-            Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
-            echo "172.18.0.3 6379" > "$redis_announce_addr_file"
-            peer_reachable=""
-            get_peer_replication_role() {
-              is_empty "$peer_reachable" && return 0
-              case "$1" in
-                redis-0.*) echo "slave 172.18.0.3 6379 $own_repl_id" ;;
-              esac
-            }
-            retry_after_failed_start() {
-              # the replica is unreachable: the default primary, then the start fails
-              init_or_get_primary_from_redis_sentinel >/dev/null 2>&1 || return 1
-              record_host_network_announce_addr
-              peer_reachable="true"
-              own_rdb_repl_id_read=""
-              init_or_get_primary_from_redis_sentinel
-            }
-            When call retry_after_failed_start
-            The status should be success
-            The stdout should include "replicate from this pod, take the primary role back."
-            The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
-            The contents of file "$redis_announce_addr_file" should eq "172.18.0.4 6379
-172.18.0.3 6379"
-          End
-
           It "still recognises replicas of its old node when retrying a start that failed after moving"
             Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
             # the first start on 172.18.0.4 reclaimed the role through 172.18.0.3, then failed
@@ -1087,7 +1061,7 @@ Describe "FalkorDB Start Bash Script Tests"
             retry_after_failed_start() {
               init_or_get_primary_from_redis_sentinel >/dev/null 2>&1 || return 1
               record_host_network_announce_addr
-              own_rdb_repl_id_read=""
+              replicas_follow_recorded_addrs=""
               init_or_get_primary_from_redis_sentinel
             }
             When call retry_after_failed_start
@@ -1171,19 +1145,16 @@ Describe "FalkorDB Start Bash Script Tests"
             The contents of file "$redis_data_dir/.kb-announce-addr" should eq "172.18.0.4 6379"
           End
 
-          It "keeps previous addresses behind the current one, newest first and bounded"
+          It "keeps recorded addresses that replicas still followed, and drops the rest"
             REDIS_HOST_NETWORK_PORT="6379"
             redis_announce_host_value="172.18.0.4"
             redis_announce_port_value="6379"
             redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
-            printf '%s\n' "172.18.0.3 6379" "172.18.0.4 6379" "172.18.0.2 6379" "172.18.0.3 6379" "172.18.0.9 6379" "172.18.0.8 6379" "172.18.0.7 6379" > "$redis_announce_addr_file"
+            replicas_follow_recorded_addrs=$'172.18.0.3 6379\n172.18.0.3 6379\n172.18.0.4 6379\n'
             When call record_host_network_announce_addr
             The status should be success
             The contents of file "$redis_data_dir/.kb-announce-addr" should eq "172.18.0.4 6379
-172.18.0.3 6379
-172.18.0.2 6379
-172.18.0.9 6379
-172.18.0.8 6379"
+172.18.0.3 6379"
           End
 
           It "records nothing outside host network mode"
