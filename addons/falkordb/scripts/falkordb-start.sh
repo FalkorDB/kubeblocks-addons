@@ -323,6 +323,9 @@ find_live_primary_among_peers() {
 
 # Prints master or slave, nothing when the pod cannot be reached, and unknown
 # when it answers without a role (an error reply such as NOAUTH).
+# Every pod listens on $service_port: in host network mode it is the one port
+# KubeBlocks allocates for the component (REDIS_HOST_NETWORK_PORT), as
+# get_default_initialize_primary_node also assumes.
 get_peer_replication_role() {
   local peer_fqdn="$1"
   local output
