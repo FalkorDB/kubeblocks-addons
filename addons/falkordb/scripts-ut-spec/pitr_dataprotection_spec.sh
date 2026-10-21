@@ -275,6 +275,17 @@ EOF
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
+    It "uploads nothing when the backup manifest cannot be written"
+      prepare_rewritten_aof
+      # a directory in the manifest's place makes the write fail, even for root
+      mkdir -p "$work_dir/run/appendonlydir/appendonly.aof.manifest"
+      When run run_backup
+      The status should be failure
+      The output should include "ERROR: archive_pair_files: failed to write the backup manifest, not archiving 1000.1.tar.zst"
+      The contents of file "$STUB_DATASAFED_LOG" should not include "push"
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+    End
+
     It "names an incomplete archive it could not remove"
       prepare_rewritten_aof
       fail_tar_after_writing

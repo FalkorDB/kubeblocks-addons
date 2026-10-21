@@ -83,13 +83,16 @@ function get_backup_files_prefix() {
 }
 
 # generate backup manifest file for remote backup
+# returns non-zero when the manifest cannot be written, since an older one may still be in place
 function generate_backup_manifest() {
   local backup_manifest="$APPEND_FILE_NAME.manifest"
   local backup_incr_file=$(basename "$(aof_incr_file "$global_backup_seq")")
   local backup_base_file=$(basename "$(aof_base_file "$global_backup_seq")")
 
-  echo "file $backup_incr_file seq $global_backup_seq type i" >"$AOF_DIR/$backup_manifest"
-  echo "file $backup_base_file seq $global_backup_seq type b" >>"$AOF_DIR/$backup_manifest"
+  if ! { echo "file $backup_incr_file seq $global_backup_seq type i" >"$AOF_DIR/$backup_manifest" &&
+    echo "file $backup_base_file seq $global_backup_seq type b" >>"$AOF_DIR/$backup_manifest"; } 2>/dev/null; then
+    return 1
+  fi
   echo ""${AOF_DIR}"/${backup_manifest}"
 }
 
@@ -107,7 +110,10 @@ function archive_pair_files() {
 
   local target_file="${backup_files_prefix}.tar.zst"
   local backup_manifest_file
-  backup_manifest_file=$(generate_backup_manifest)
+  if ! backup_manifest_file=$(generate_backup_manifest); then
+    DP_error_log "archive_pair_files: failed to write the backup manifest, not archiving ${target_file}"
+    return 1
+  fi
   # tar keeps streaming past a file it cannot read, so check them all before anything is uploaded:
   # a retry would otherwise overwrite the complete archive of an earlier run with one missing a file.
   local input
@@ -160,11 +166,15 @@ function update_aof_file() {
   local incr_file=$(aof_incr_file "$global_backup_seq")
   local base_file=$(aof_base_file "$global_backup_seq")
   local backup_files_prefix=$(get_backup_files_prefix $base_file)
-  local backup_manifest="$(generate_backup_manifest)"
+  local backup_manifest
 
   if [ ! -f "$incr_file" ] || [ ! -f "$base_file" ]; then
     DP_log "update_aof_file: $incr_file or $base_file do not exist"
     return
+  fi
+  if ! backup_manifest=$(generate_backup_manifest); then
+    DP_error_log "update_aof_file: failed to write the backup manifest, retrying next round"
+    return 1
   fi
 
   # create a directory for backup files we are tracking, and after a aof rewrite, we will archive them in to a tar.zst file
