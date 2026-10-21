@@ -27,6 +27,7 @@ redis_real_conf="/etc/redis/redis.conf"
 redis_extra_conf="/etc/conf/extra/redis.conf"
 redis_acl_file="/data/users.acl"
 redis_acl_file_bak="/data/users.acl.bak"
+redis_data_dir="/data"
 retry_times=3
 retry_delay_second=2
 service_port=${SERVICE_PORT:-6379}
@@ -236,10 +237,17 @@ init_or_get_primary_from_redis_sentinel() {
     fi
   done
 
-  # if there is no primary node found, use the default primary node
+  # sentinel is configured but none of them knows the primary. Falling back to
+  # the default primary is only safe on first bootstrap: a pod restarting with
+  # persisted data during a sentinel outage could otherwise come up as a second
+  # primary (split-brain) or replicate from an empty one (data loss).
   echo "get all primary info from redis sentinel master_count_map: ${master_count_map[*]}"
   if [ ${#master_count_map[@]} -eq 0 ]; then
-    echo "no primary node found from all redis sentinels, use default primary node."
+    if redis_data_dir_has_persisted_data; then
+      echo "Error: no primary node found from all redis sentinels and $redis_data_dir already holds persisted data ($persisted_data_entry); refusing to fall back to the default primary while sentinel is configured. Exiting."
+      exit 1
+    fi
+    echo "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
     get_default_initialize_primary_node
     return
   fi
@@ -253,6 +261,32 @@ init_or_get_primary_from_redis_sentinel() {
       primary_port=$(echo $host_port | cut -d: -f2)
     fi
   done
+}
+
+# Returns 0 and sets persisted_data_entry when $redis_data_dir holds anything
+# other than the files this addon writes before the server ever runs. Anything
+# unknown counts as data so that the check fails closed: dump.rdb, the AOF dir,
+# a restored backup, or a half-finished restore (.kb-data-protection, .restore_keys).
+redis_data_dir_has_persisted_data() {
+  persisted_data_entry=""
+  [ -d "$redis_data_dir" ] || return 1
+  local entry
+  for entry in "$redis_data_dir"/* "$redis_data_dir"/.[!.]* "$redis_data_dir"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case "${entry##*/}" in
+      # ACL file rebuilt on every start, and its sed temp file
+      users.acl|users.acl.bak) ;;
+      # marker written by build_announce_ip_and_port
+      .fixed_pod_ip_enabled) ;;
+      # created by mkfs at the root of a fresh ext* volume
+      lost+found) ;;
+      *)
+        persisted_data_entry="${entry##*/}"
+        return 0
+        ;;
+    esac
+  done
+  return 1
 }
 
 build_sentinel_get_master_addr_by_name_command() {

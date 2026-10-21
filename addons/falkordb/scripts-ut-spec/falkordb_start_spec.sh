@@ -30,6 +30,7 @@ Describe "FalkorDB Start Bash Script Tests"
     redis_extra_conf="./redis-extra.conf"
     redis_acl_file="./users.acl"
     redis_acl_file_bak="./users.acl.bak"
+    redis_data_dir="./falkordb-data"
     # set ut_mode to true to hack control flow in the script
     ut_mode="true"
   }
@@ -738,7 +739,7 @@ Describe "FalkorDB Start Bash Script Tests"
       End
     End
 
-    Context "when empty primary info is retrieved from sentinels"
+    Context "when no sentinel returns primary info"
       setup() {
         # shellcheck disable=SC2034
         retry_times=1
@@ -747,34 +748,75 @@ Describe "FalkorDB Start Bash Script Tests"
         export REDIS_POD_NAME_LIST="redis-1,redis-0"
         export SENTINEL_COMPONENT_NAME="redis-sentinel"
         export SENTINEL_POD_FQDN_LIST="sentinel-0.redis-sentinel-headless,sentinel-1.redis-sentinel-headless"
+        primary=""
+        primary_port=""
+        # the files the scripts write before the server ever runs, plus mkfs's lost+found
+        mkdir -p "$redis_data_dir/lost+found"
+        echo "user default on" > "$redis_data_dir/users.acl"
+        echo "" > "$redis_data_dir/.fixed_pod_ip_enabled"
       }
       Before "setup"
 
       un_setup() {
+        unset REDIS_POD_NAME_LIST
         unset SENTINEL_COMPONENT_NAME
         unset SENTINEL_POD_FQDN_LIST
+        rm -rf "$redis_data_dir"
       }
       After "un_setup"
 
-      It "handles empty primary info retrieved from sentinel"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo ''"
+      }
+      get_default_initialize_primary_node() {
+        echo "default primary fallback called"
+        # shellcheck disable=SC2034
+        primary="fake-primary1"
+        # shellcheck disable=SC2034
+        primary_port="fake-primary-port1"
+      }
+
+      It "falls back to the default primary when the data dir holds no persisted data"
         Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
-        build_sentinel_get_master_addr_by_name_command() {
-          echo "echo ''"
-        }
-        get_default_initialize_primary_node() {
-          # shellcheck disable=SC2034
-          primary="fake-primary1"
-          # shellcheck disable=SC2034
-          primary_port="fake-primary-port1"
-        }
         When call init_or_get_primary_from_redis_sentinel
         The status should be success
         The stdout should include "Empty primary info retrieved from sentinel"
         The stdout should include "Failed to retrieve primary info from sentinel: sentinel-1.redis-sentinel-headless"
-        The stdout should include "no primary node found from all redis sentinels, use default primary node."
+        The stdout should include "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
+        The stdout should include "default primary fallback called"
         The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
         The variable primary should eq "fake-primary1"
         The variable primary_port should eq "fake-primary-port1"
+      End
+
+      It "falls back to the default primary when the data dir does not exist"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        rm -rf "$redis_data_dir"
+        When call init_or_get_primary_from_redis_sentinel
+        The status should be success
+        The stdout should include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        The variable primary should eq "fake-primary1"
+      End
+
+      Parameters
+        "dump.rdb" file
+        "appendonlydir" dir
+        "appendonly.aof" file
+        "temp-123.rdb" file
+        ".kb-data-protection" file
+        ".restore_keys" dir
+      End
+
+      It "exits non-zero without the default primary when $1 is persisted"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        if [ "$2" = "dir" ]; then mkdir -p "$redis_data_dir/$1"; else echo "persisted" > "$redis_data_dir/$1"; fi
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "Error: no primary node found from all redis sentinels and $redis_data_dir already holds persisted data ($1); refusing to fall back to the default primary while sentinel is configured. Exiting."
+        The stdout should not include "default primary fallback called"
+        The stdout should not include "use default primary node for first bootstrap"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
       End
     End
   End
