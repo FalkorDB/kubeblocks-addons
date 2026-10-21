@@ -270,6 +270,28 @@ init_or_get_primary_from_redis_sentinel() {
         primary_port="$service_port"
         return
       fi
+      # The replicas still point at the primary that went away. When that is
+      # this pod (a restart during a rolling update), it takes the role back:
+      # following the default instead would make it a replica of one of its own
+      # replicas, and neither would ever serve as primary.
+      if ! is_empty "$peers_follow_current_pod"; then
+        current_pod_fqdn=$(get_target_pod_fqdn_from_pod_fqdn_vars "$REDIS_POD_FQDN_LIST" "$CURRENT_POD_NAME")
+        if is_empty "$current_pod_fqdn"; then
+          echo "Error: Failed to get current pod: $CURRENT_POD_NAME fqdn from redis pod fqdn list: $REDIS_POD_FQDN_LIST. Exiting."
+          exit 1
+        fi
+        echo "no other pod is running as primary and $peers_follow_current_pod replicate from this pod, take the primary role back."
+        primary="$current_pod_fqdn"
+        primary_port="$service_port"
+        return
+      fi
+      # They point at another pod that is not up as primary yet. Taking the
+      # default now could promote a replica that missed the latest writes; that
+      # pod takes the role back when it restarts.
+      if ! is_empty "$peers_follow_other_pod"; then
+        echo "Error: no other pod is running as primary and $peers_follow_other_pod replicate from a pod that is not; waiting for it rather than picking the default primary. Exiting."
+        exit 1
+      fi
       echo "no other pod is running as primary, use default primary node."
       get_default_initialize_primary_node
       return
@@ -291,18 +313,22 @@ init_or_get_primary_from_redis_sentinel() {
 
 # Asks every other pod for its replication role. Returns 0 with live_primary_fqdn
 # set to the one pod running as master, or empty when none is. A pod that cannot
-# be reached is not serving as primary. Returns 1 with live_primary_error set when
+# be reached is not serving as primary. Replicas are listed in
+# peers_follow_current_pod when they replicate from this pod, and in
+# peers_follow_other_pod otherwise. Returns 1 with live_primary_error set when
 # several pods are masters, or a reachable pod's role cannot be read.
 find_live_primary_among_peers() {
   live_primary_fqdn=""
   live_primary_error=""
-  local peer_fqdn peer_role
+  peers_follow_current_pod=""
+  peers_follow_other_pod=""
+  local peer_fqdn peer_role peer_master_host peer_master_port
   for peer_fqdn in $(split "$REDIS_POD_FQDN_LIST" ","); do
     if [[ "$peer_fqdn" == "$CURRENT_POD_NAME".* ]]; then
       continue
     fi
-    peer_role=$(get_peer_replication_role "$peer_fqdn")
-    echo "pod $peer_fqdn replication role: ${peer_role:-unreachable}"
+    read -r peer_role peer_master_host peer_master_port <<< "$(get_peer_replication_role "$peer_fqdn")"
+    echo "pod $peer_fqdn replication role: ${peer_role:-unreachable}${peer_master_host:+ of $peer_master_host}"
     case "$peer_role" in
       master)
         if ! is_empty "$live_primary_fqdn"; then
@@ -311,7 +337,14 @@ find_live_primary_among_peers() {
         fi
         live_primary_fqdn="$peer_fqdn"
         ;;
-      slave|"") ;;
+      slave)
+        if peer_replicates_from_current_pod "$peer_master_host" "$peer_master_port"; then
+          peers_follow_current_pod="${peers_follow_current_pod:+$peers_follow_current_pod }$peer_fqdn"
+        else
+          peers_follow_other_pod="${peers_follow_other_pod:+$peers_follow_other_pod }$peer_fqdn"
+        fi
+        ;;
+      "") ;;
       *)
         live_primary_error="pod $peer_fqdn is reachable but its role is unknown"
         return 1
@@ -321,8 +354,17 @@ find_live_primary_among_peers() {
   return 0
 }
 
-# Prints master or slave, nothing when the pod cannot be reached, and unknown
-# when it answers without a role (an error reply such as NOAUTH).
+# Whether a replica's master_host and master_port name this pod, by any of the
+# addresses check_current_pod_is_primary recognises.
+peer_replicates_from_current_pod() {
+  local primary="$1" primary_port="${2:-$service_port}"
+  is_empty "$primary" && return 1
+  check_current_pod_is_primary >/dev/null
+}
+
+# Prints master, or slave followed by its master_host and master_port, nothing
+# when the pod cannot be reached, and unknown when it answers without a role (an
+# error reply such as NOAUTH).
 # Every pod listens on $service_port: in host network mode it is the one port
 # KubeBlocks allocates for the component (REDIS_HOST_NETWORK_PORT), as
 # get_default_initialize_primary_node also assumes.
@@ -342,7 +384,12 @@ get_peer_replication_role() {
   fi
   case "$output" in
     *role:master*) echo "master" ;;
-    *role:slave*) echo "slave" ;;
+    *role:slave*)
+      local master_host master_port
+      master_host=$(echo "$output" | sed -n 's/^master_host:\([^[:space:]]*\).*/\1/p' | head -n 1)
+      master_port=$(echo "$output" | sed -n 's/^master_port:\([0-9]*\).*/\1/p' | head -n 1)
+      echo "slave $master_host $master_port"
+      ;;
     *) echo "unknown" ;;
   esac
 }

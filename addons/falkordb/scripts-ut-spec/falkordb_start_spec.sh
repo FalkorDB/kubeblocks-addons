@@ -882,6 +882,51 @@ Describe "FalkorDB Start Bash Script Tests"
           The variable primary_port should eq "6379"
         End
 
+        It "takes the primary role back when the other pods replicate from it"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          # the primary restarts in a rolling update after the sentinels lost their state
+          get_peer_replication_role() { echo "slave redis-1.redis-headless.default 6379"; }
+          When call init_or_get_primary_from_redis_sentinel
+          The status should be success
+          The stdout should include "pod redis-0.redis-headless.default replication role: slave of redis-1.redis-headless.default"
+          The stdout should include "no other pod is running as primary and redis-0.redis-headless.default redis-2.redis-headless.default replicate from this pod, take the primary role back."
+          The stdout should not include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          The variable primary should eq "redis-1.redis-headless.default"
+          The variable primary_port should eq "6379"
+        End
+
+        It "takes the primary role back when a replica names it by its announce hostname"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          get_announce_hostname_override_or_default() { echo "redis-1.example.com"; }
+          ANNOUNCE_HOSTNAME_OVERRIDE="redis-{pod}.example.com"
+          get_peer_replication_role() {
+            case "$1" in
+              redis-0.*) echo "slave redis-1.example.com 6379" ;;
+            esac
+          }
+          When call init_or_get_primary_from_redis_sentinel
+          The status should be success
+          The stdout should include "no other pod is running as primary and redis-0.redis-headless.default replicate from this pod, take the primary role back."
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          The variable primary should eq "redis-1.redis-headless.default"
+        End
+
+        It "exits non-zero instead of the default when the other pods replicate from a pod that is not up"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          # redis-0, the default, is a replica of redis-2, which is restarting
+          get_peer_replication_role() {
+            case "$1" in
+              redis-0.*) echo "slave redis-2.redis-headless.default 6379" ;;
+            esac
+          }
+          When run init_or_get_primary_from_redis_sentinel
+          The status should be failure
+          The stdout should include "Error: no other pod is running as primary and redis-0.redis-headless.default replicate from a pod that is not; waiting for it rather than picking the default primary. Exiting."
+          The stdout should not include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
+
         It "exits non-zero when several other pods run as master"
           Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
           get_peer_replication_role() { echo "master"; }
@@ -956,9 +1001,9 @@ Describe "FalkorDB Start Bash Script Tests"
     End
 
     It "reports slave from info replication"
-      redis-cli() { printf '# Replication\r\nrole:slave\r\nmaster_host:redis-0\r\n'; }
-      When call get_peer_replication_role "redis-0.redis-headless.default"
-      The output should eq "slave"
+      redis-cli() { printf '# Replication\r\nrole:slave\r\nmaster_host:redis-0\r\nmaster_port:6379\r\n'; }
+      When call get_peer_replication_role "redis-1.redis-headless.default"
+      The output should eq "slave redis-0 6379"
     End
 
     It "prints nothing when the pod cannot be reached"
