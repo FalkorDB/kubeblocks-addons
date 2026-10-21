@@ -28,11 +28,8 @@ redis_extra_conf="/etc/conf/extra/redis.conf"
 redis_acl_file="/data/users.acl"
 redis_acl_file_bak="/data/users.acl.bak"
 redis_data_dir="/data"
-# the host network addresses replicas may know this pod by, one "host port" per
-# line, kept on its own volume
+# the host network address this pod announced on its last start, kept on its own volume
 redis_announce_addr_file="$redis_data_dir/.kb-announce-addr"
-# recorded addresses that replicas still followed on this start
-replicas_follow_recorded_addrs=""
 retry_times=3
 retry_delay_second=2
 service_port=${SERVICE_PORT:-6379}
@@ -187,24 +184,12 @@ build_replicaof_config() {
 
 # In host network mode, records the address this pod announces, after the
 # primary is chosen, so that the next start can still recognise replicas that
-# follow it there after the pod moves to another node. Recorded addresses that
-# replicas still followed on this start are kept too: until they switch to the
-# new address, a start that fails must not forget the old one.
+# follow it there after the pod moves to another node.
 record_host_network_announce_addr() {
   if ! is_host_network_announce || is_empty "$redis_announce_host_value"; then
     return 0
   fi
-  local current="$redis_announce_host_value $redis_announce_port_value" addr written
-  written=$'\n'"$current"$'\n'
-  {
-    echo "$current"
-    while IFS= read -r addr; do
-      if ! is_empty "$addr" && [[ "$written" != *$'\n'"$addr"$'\n'* ]]; then
-        echo "$addr"
-        written+="$addr"$'\n'
-      fi
-    done <<< "$replicas_follow_recorded_addrs"
-  } > "$redis_announce_addr_file" ||
+  echo "$redis_announce_host_value $redis_announce_port_value" > "$redis_announce_addr_file" ||
     echo "Warning: failed to record the announced address in $redis_announce_addr_file."
 }
 
@@ -396,10 +381,9 @@ find_live_primary_among_peers() {
 # addresses check_current_pod_is_primary recognises. A replica may still name
 # the node this pod ran on before a restart moved it:
 # - behind a NodePort the port alone decides, since each pod has its own;
-# - in host network mode every pod shares the port, so a node address counts
-#   only when this pod recorded it, which another pod now on that node cannot
-#   claim; the announce hostname override still counts. Without a record, the
-#   current address is used.
+# - in host network mode every pod shares the port, so the node address counts
+#   only as the one this pod recorded on its last start, which another pod now
+#   on that node cannot claim. Without a record, the current address is used.
 peer_replicates_from_current_pod() {
   local primary="$1" primary_port="$2"
   if is_empty "$primary" || is_empty "$primary_port"; then
@@ -410,17 +394,11 @@ peer_replicates_from_current_pod() {
   fi
   if is_host_network_announce && [ -s "$redis_announce_addr_file" ]; then
     local recorded_host recorded_port
-    while read -r recorded_host recorded_port; do
-      if equals "$primary" "$recorded_host" && equals "$primary_port" "$recorded_port"; then
-        replicas_follow_recorded_addrs="${replicas_follow_recorded_addrs}$primary $primary_port"$'\n'
-        return 0
-      fi
-    done < "$redis_announce_addr_file"
-    if contains "$primary" "$CURRENT_POD_NAME.$REDIS_COMPONENT_NAME"; then
+    read -r recorded_host recorded_port < "$redis_announce_addr_file"
+    if equals "$primary" "$recorded_host" && equals "$primary_port" "$recorded_port"; then
       return 0
     fi
-    ! is_empty "$ANNOUNCE_HOSTNAME_OVERRIDE" &&
-      equals "$primary" "$(get_announce_hostname_override_or_default "" "$CURRENT_POD_NAME")"
+    contains "$primary" "$CURRENT_POD_NAME.$REDIS_COMPONENT_NAME"
     return
   fi
   check_current_pod_is_primary >/dev/null
