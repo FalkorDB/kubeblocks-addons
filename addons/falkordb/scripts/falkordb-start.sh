@@ -431,6 +431,11 @@ peer_replicates_from_current_pod() {
         return
       fi
     done < "$redis_announce_addr_file"
+    # the address announced now, in case the record could not be updated with it
+    if equals "$primary" "$redis_announce_host_value" && equals "$primary_port" "$redis_announce_port_value"; then
+      host_network_address_history_matches "$primary" "$primary_port" "$primary_replid"
+      return
+    fi
     if contains "$primary" "$CURRENT_POD_NAME.$REDIS_COMPONENT_NAME"; then
       return 0
     fi
