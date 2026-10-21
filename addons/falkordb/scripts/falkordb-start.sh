@@ -27,6 +27,7 @@ redis_real_conf="/etc/redis/redis.conf"
 redis_extra_conf="/etc/conf/extra/redis.conf"
 redis_acl_file="/data/users.acl"
 redis_acl_file_bak="/data/users.acl.bak"
+redis_data_dir="/data"
 retry_times=3
 retry_delay_second=2
 service_port=${SERVICE_PORT:-6379}
@@ -207,6 +208,7 @@ init_or_get_primary_from_redis_sentinel() {
   declare -A master_count_map
   local first_redis_primary_host=""
   local first_redis_primary_port=""
+  local sentinels_without_primary=0
   sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
     # get primary info from sentinel
@@ -232,16 +234,48 @@ init_or_get_primary_from_redis_sentinel() {
         echo "The sentinel:$sentinel_pod_fqdn has different primary node info. First: $first_redis_primary_host:$first_redis_primary_port, Current: ${REDIS_SENTINEL_PRIMARY_INFO[0]}:${REDIS_SENTINEL_PRIMARY_INFO[1]}"
       fi
     else
+      if [ "$REDIS_SENTINEL_MONITORS_NO_PRIMARY" == "true" ]; then
+        sentinels_without_primary=$((sentinels_without_primary + 1))
+      fi
       echo "Failed to retrieve primary info from sentinel: $sentinel_pod_fqdn. Skipping this sentinel."
     fi
   done
 
-  # if there is no primary node found, use the default primary node
+  # sentinel is configured but none of them knows the primary. Falling back to
+  # the default primary is only safe when nothing can be lost: a pod restarting
+  # with persisted data during a sentinel outage could otherwise come up as a
+  # second primary (split-brain) or replicate from an empty one (data loss).
   echo "get all primary info from redis sentinel master_count_map: ${master_count_map[*]}"
   if [ ${#master_count_map[@]} -eq 0 ]; then
-    echo "no primary node found from all redis sentinels, use default primary node."
-    get_default_initialize_primary_node
-    return
+    if ! redis_data_dir_has_persisted_data; then
+      echo "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
+      get_default_initialize_primary_node
+      return
+    fi
+    # Every sentinel answered and none monitors this component: the sentinels
+    # are fresh or lost their state, they are not down. A cluster restored from
+    # backup lands here, since its primary is registered (postProvision) only
+    # once a pod runs as primary, so failing would never let it register. A nil
+    # reply cannot tell fresh from lost state, so ask the other pods: follow a
+    # live primary if there is one, and take the default only when none is.
+    if [ "$sentinels_without_primary" -eq "${#sentinel_pod_fqdn_list[@]}" ]; then
+      echo "every sentinel is reachable and none monitors $REDIS_COMPONENT_NAME, while $redis_data_dir holds persisted data ($persisted_data_entry); looking for a live primary among the other pods."
+      if ! find_live_primary_among_peers; then
+        echo "Error: cannot tell which pod is the live primary ($live_primary_error); refusing to pick a primary while sentinel monitors none. Exiting."
+        exit 1
+      fi
+      if ! is_empty "$live_primary_fqdn"; then
+        echo "follow the live primary $live_primary_fqdn reported by the pod itself."
+        primary="$live_primary_fqdn"
+        primary_port="$service_port"
+        return
+      fi
+      echo "no other pod is running as primary, use default primary node."
+      get_default_initialize_primary_node
+      return
+    fi
+    echo "Error: no primary node found from all redis sentinels ($sentinels_without_primary of ${#sentinel_pod_fqdn_list[@]} reachable without a primary) and $redis_data_dir already holds persisted data ($persisted_data_entry); refusing to fall back to the default primary while sentinel is configured. Exiting."
+    exit 1
   fi
 
   # get the primary node with the most counts
@@ -253,6 +287,95 @@ init_or_get_primary_from_redis_sentinel() {
       primary_port=$(echo $host_port | cut -d: -f2)
     fi
   done
+}
+
+# Asks every other pod for its replication role. Returns 0 with live_primary_fqdn
+# set to the one pod running as master, or empty when none is. A pod that cannot
+# be reached is not serving as primary. Returns 1 with live_primary_error set when
+# several pods are masters, or a reachable pod's role cannot be read.
+find_live_primary_among_peers() {
+  live_primary_fqdn=""
+  live_primary_error=""
+  local peer_fqdn peer_role
+  for peer_fqdn in $(split "$REDIS_POD_FQDN_LIST" ","); do
+    if [[ "$peer_fqdn" == "$CURRENT_POD_NAME".* ]]; then
+      continue
+    fi
+    peer_role=$(get_peer_replication_role "$peer_fqdn")
+    echo "pod $peer_fqdn replication role: ${peer_role:-unreachable}"
+    case "$peer_role" in
+      master)
+        if ! is_empty "$live_primary_fqdn"; then
+          live_primary_error="both $live_primary_fqdn and $peer_fqdn run as master"
+          return 1
+        fi
+        live_primary_fqdn="$peer_fqdn"
+        ;;
+      slave|"") ;;
+      *)
+        live_primary_error="pod $peer_fqdn is reachable but its role is unknown"
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+# Prints master or slave, nothing when the pod cannot be reached, and unknown
+# when it answers without a role (an error reply such as NOAUTH).
+# Every pod listens on $service_port: in host network mode it is the one port
+# KubeBlocks allocates for the component (REDIS_HOST_NETWORK_PORT), as
+# get_default_initialize_primary_node also assumes.
+get_peer_replication_role() {
+  local peer_fqdn="$1"
+  local output
+  unset_xtrace_when_ut_mode_false
+  if is_empty "$REDIS_DEFAULT_PASSWORD"; then
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$peer_fqdn" -p "$service_port" info replication 2>/dev/null)
+  else
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$peer_fqdn" -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" --no-auth-warning info replication 2>/dev/null)
+  fi
+  local exit_code=$?
+  set_xtrace_when_ut_mode_false
+  if [ $exit_code -ne 0 ] && is_empty "$output"; then
+    return 0
+  fi
+  case "$output" in
+    *role:master*) echo "master" ;;
+    *role:slave*) echo "slave" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+# Returns 0 and sets persisted_data_entry when $redis_data_dir holds anything
+# other than the files this addon writes before the server ever runs. Anything
+# unknown counts as data so that the check fails closed: dump.rdb, the AOF dir,
+# a restored backup, or a half-finished restore (.kb-data-protection, .restore_keys).
+redis_data_dir_has_persisted_data() {
+  persisted_data_entry=""
+  [ -e "$redis_data_dir" ] || [ -L "$redis_data_dir" ] || return 1
+  # a dir that cannot be listed would glob to nothing and look empty
+  if [ ! -d "$redis_data_dir" ] || [ ! -r "$redis_data_dir" ] || [ ! -x "$redis_data_dir" ]; then
+    persisted_data_entry="$redis_data_dir is not a listable directory"
+    return 0
+  fi
+  local entry
+  for entry in "$redis_data_dir"/* "$redis_data_dir"/.[!.]* "$redis_data_dir"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case "${entry##*/}" in
+      # ACL file rebuilt on every start, and its sed temp file
+      users.acl|users.acl.bak) ;;
+      # marker written by build_announce_ip_and_port
+      .fixed_pod_ip_enabled) ;;
+      # created by mkfs at the root of a fresh ext* volume
+      lost+found) ;;
+      *)
+        persisted_data_entry="${entry##*/}"
+        return 0
+        ;;
+    esac
+  done
+  return 1
 }
 
 build_sentinel_get_master_addr_by_name_command() {
@@ -270,6 +393,7 @@ build_sentinel_get_master_addr_by_name_command() {
 get_master_addr_by_name_from_sentinel() {
   local master_addr_by_name_command
   local sentinel_pod_fqdn="$1"
+  REDIS_SENTINEL_MONITORS_NO_PRIMARY="false"
   unset_xtrace_when_ut_mode_false
   master_addr_by_name_command=$(build_sentinel_get_master_addr_by_name_command "$sentinel_pod_fqdn")
   logging_mask_password_command="${master_addr_by_name_command/$SENTINEL_PASSWORD/********}"
@@ -284,6 +408,10 @@ get_master_addr_by_name_from_sentinel() {
       echo "Successfully retrieved primary info from sentinel"
       return 0
     else
+      # a master the sentinel does not monitor is a nil reply, printed as an empty line
+      if [ -z "${output//[[:space:]]/}" ] || [ "$output" == "(nil)" ]; then
+        REDIS_SENTINEL_MONITORS_NO_PRIMARY="true"
+      fi
       echo "Empty primary info retrieved from sentinel"
       return 1
     fi

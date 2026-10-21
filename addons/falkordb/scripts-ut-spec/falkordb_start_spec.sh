@@ -30,6 +30,7 @@ Describe "FalkorDB Start Bash Script Tests"
     redis_extra_conf="./redis-extra.conf"
     redis_acl_file="./users.acl"
     redis_acl_file_bak="./users.acl.bak"
+    redis_data_dir="./falkordb-data"
     # set ut_mode to true to hack control flow in the script
     ut_mode="true"
   }
@@ -738,7 +739,7 @@ Describe "FalkorDB Start Bash Script Tests"
       End
     End
 
-    Context "when empty primary info is retrieved from sentinels"
+    Context "when no sentinel returns primary info"
       setup() {
         # shellcheck disable=SC2034
         retry_times=1
@@ -747,35 +748,230 @@ Describe "FalkorDB Start Bash Script Tests"
         export REDIS_POD_NAME_LIST="redis-1,redis-0"
         export SENTINEL_COMPONENT_NAME="redis-sentinel"
         export SENTINEL_POD_FQDN_LIST="sentinel-0.redis-sentinel-headless,sentinel-1.redis-sentinel-headless"
+        primary=""
+        primary_port=""
+        # the files the scripts write before the server ever runs, plus mkfs's lost+found
+        mkdir -p "$redis_data_dir/lost+found"
+        echo "user default on" > "$redis_data_dir/users.acl"
+        echo "" > "$redis_data_dir/.fixed_pod_ip_enabled"
       }
       Before "setup"
 
       un_setup() {
+        unset REDIS_POD_NAME_LIST
         unset SENTINEL_COMPONENT_NAME
         unset SENTINEL_POD_FQDN_LIST
+        chmod 755 "$redis_data_dir" 2>/dev/null
+        rm -rf "$redis_data_dir"
       }
       After "un_setup"
 
-      It "handles empty primary info retrieved from sentinel"
-        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+      # by default every sentinel is reachable and monitors no master (nil reply)
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo ''"
+      }
+      unreachable_sentinels() {
         build_sentinel_get_master_addr_by_name_command() {
-          echo "echo ''"
+          echo "false"
         }
-        get_default_initialize_primary_node() {
-          # shellcheck disable=SC2034
-          primary="fake-primary1"
-          # shellcheck disable=SC2034
-          primary_port="fake-primary-port1"
-        }
+      }
+      get_default_initialize_primary_node() {
+        echo "default primary fallback called"
+        # shellcheck disable=SC2034
+        primary="fake-primary1"
+        # shellcheck disable=SC2034
+        primary_port="fake-primary-port1"
+      }
+
+      It "falls back to the default primary when the data dir holds no persisted data"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
         When call init_or_get_primary_from_redis_sentinel
         The status should be success
         The stdout should include "Empty primary info retrieved from sentinel"
         The stdout should include "Failed to retrieve primary info from sentinel: sentinel-1.redis-sentinel-headless"
-        The stdout should include "no primary node found from all redis sentinels, use default primary node."
+        The stdout should include "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
+        The stdout should include "default primary fallback called"
         The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
         The variable primary should eq "fake-primary1"
         The variable primary_port should eq "fake-primary-port1"
       End
+
+      It "falls back to the default primary when the data dir does not exist"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        rm -rf "$redis_data_dir"
+        When call init_or_get_primary_from_redis_sentinel
+        The status should be success
+        The stdout should include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        The variable primary should eq "fake-primary1"
+      End
+
+      Context "when sentinels are down"
+        Parameters
+          "dump.rdb" file
+          "appendonlydir" dir
+          "appendonly.aof" file
+          "temp-123.rdb" file
+          ".kb-data-protection" file
+          ".restore_keys" dir
+        End
+
+        It "exits non-zero without the default primary when sentinels are down and $1 is persisted"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          unreachable_sentinels
+          if [ "$2" = "dir" ]; then mkdir -p "$redis_data_dir/$1"; else echo "persisted" > "$redis_data_dir/$1"; fi
+          When run init_or_get_primary_from_redis_sentinel
+          The status should be failure
+          The stdout should include "Error occurred while retrieving primary info from sentinel"
+          The stdout should include "Error: no primary node found from all redis sentinels (0 of 2 reachable without a primary) and $redis_data_dir already holds persisted data ($1); refusing to fall back to the default primary while sentinel is configured. Exiting."
+          The stdout should not include "default primary fallback called"
+          The stdout should not include "use default primary node for first bootstrap"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
+      End
+
+      Context "when every sentinel is reachable and monitors no master"
+        peers_setup() {
+          export CURRENT_POD_NAME="redis-1"
+          export REDIS_POD_FQDN_LIST="redis-0.redis-headless.default,redis-1.redis-headless.default,redis-2.redis-headless.default"
+          service_port="6379"
+          echo "persisted" > "$redis_data_dir/dump.rdb"
+        }
+        Before "peers_setup"
+
+        peers_un_setup() {
+          unset CURRENT_POD_NAME
+          unset REDIS_POD_FQDN_LIST
+          unset service_port
+        }
+        After "peers_un_setup"
+
+        It "falls back to the default primary with persisted data when no other pod runs as primary"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          # a cluster restored from backup: data is in place, sentinels are fresh, peers still starting
+          get_peer_replication_role() {
+            [ "$1" = "redis-1.redis-headless.default" ] && echo "asked the current pod"
+            return 0
+          }
+          When call init_or_get_primary_from_redis_sentinel
+          The status should be success
+          The stdout should include "every sentinel is reachable and none monitors $REDIS_COMPONENT_NAME, while $redis_data_dir holds persisted data (dump.rdb); looking for a live primary among the other pods."
+          The stdout should include "pod redis-0.redis-headless.default replication role: unreachable"
+          The stdout should include "pod redis-2.redis-headless.default replication role: unreachable"
+          The stdout should not include "asked the current pod"
+          The stdout should include "no other pod is running as primary, use default primary node."
+          The stdout should include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          The variable primary should eq "fake-primary1"
+        End
+
+        It "follows a live primary instead of the default when sentinels lost their state"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          get_peer_replication_role() {
+            case "$1" in
+              redis-2.*) echo "master" ;;
+              *) echo "slave" ;;
+            esac
+          }
+          When call init_or_get_primary_from_redis_sentinel
+          The status should be success
+          The stdout should include "follow the live primary redis-2.redis-headless.default reported by the pod itself."
+          The stdout should not include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+          The variable primary should eq "redis-2.redis-headless.default"
+          The variable primary_port should eq "6379"
+        End
+
+        It "exits non-zero when several other pods run as master"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          get_peer_replication_role() { echo "master"; }
+          When run init_or_get_primary_from_redis_sentinel
+          The status should be failure
+          The stdout should include "Error: cannot tell which pod is the live primary (both redis-0.redis-headless.default and redis-2.redis-headless.default run as master); refusing to pick a primary while sentinel monitors none. Exiting."
+          The stdout should not include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
+
+        It "exits non-zero when a reachable pod's role cannot be read"
+          Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+          get_peer_replication_role() { echo "unknown"; }
+          When run init_or_get_primary_from_redis_sentinel
+          The status should be failure
+          The stdout should include "(pod redis-0.redis-headless.default is reachable but its role is unknown)"
+          The stdout should not include "default primary fallback called"
+          The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+        End
+      End
+
+      It "exits non-zero with persisted data when only some sentinels are reachable"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        build_sentinel_get_master_addr_by_name_command() {
+          if [ "$1" = "sentinel-0.redis-sentinel-headless" ]; then echo "echo ''"; else echo "false"; fi
+        }
+        echo "persisted" > "$redis_data_dir/dump.rdb"
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "(1 of 2 reachable without a primary)"
+        The stdout should not include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      It "exits non-zero when sentinels answer with an error reply and data is persisted"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "echo 'NOAUTH Authentication required.'"
+        }
+        echo "persisted" > "$redis_data_dir/dump.rdb"
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "(0 of 2 reachable without a primary)"
+        The stdout should not include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      running_as_root() { [ "$(id -u)" = "0" ]; }
+
+      It "exits non-zero when sentinels are down and the data dir cannot be listed"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        Skip if "root can list any dir" running_as_root
+        unreachable_sentinels
+        echo "persisted" > "$redis_data_dir/dump.rdb"
+        chmod 100 "$redis_data_dir"
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "already holds persisted data ($redis_data_dir is not a listable directory)"
+        The stdout should not include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+    End
+  End
+
+  Describe "get_peer_replication_role()"
+    timeout() { shift; "$@"; }
+
+    It "reports master from info replication"
+      redis-cli() { printf '# Replication\r\nrole:master\r\nconnected_slaves:1\r\n'; }
+      When call get_peer_replication_role "redis-0.redis-headless.default"
+      The output should eq "master"
+    End
+
+    It "reports slave from info replication"
+      redis-cli() { printf '# Replication\r\nrole:slave\r\nmaster_host:redis-0\r\n'; }
+      When call get_peer_replication_role "redis-0.redis-headless.default"
+      The output should eq "slave"
+    End
+
+    It "prints nothing when the pod cannot be reached"
+      redis-cli() { echo "Could not connect to Redis" >&2; return 1; }
+      When call get_peer_replication_role "redis-0.redis-headless.default"
+      The status should be success
+      The output should eq ""
+    End
+
+    It "reports unknown on an error reply"
+      redis-cli() { echo "NOAUTH Authentication required."; }
+      When call get_peer_replication_role "redis-0.redis-headless.default"
+      The output should eq "unknown"
     End
   End
 
