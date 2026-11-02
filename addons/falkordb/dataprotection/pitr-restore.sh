@@ -11,7 +11,20 @@ function truncate_aof() {
   # byte offset of the first #TS:<t> annotation after the restore time and keep
   # everything before it. Annotations start a line between commands, so the
   # cut leaves only whole commands.
-  local offset=$(grep -a -b -o '^#TS:[0-9][0-9]*' "$aof_file" |
+  if [ -z "$aof_file" ]; then
+    return
+  fi
+  # grep exits 1 when the file has no annotation at all; anything above that
+  # means the AOF could not be read, and restoring it uncut would ignore the
+  # restore time.
+  local stamps rc
+  stamps=$(grep -a -b -o '^#TS:[0-9][0-9]*' "$aof_file")
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    DP_error_log "Failed to read aof file: $aof_file"
+    exit 1
+  fi
+  local offset=$(printf '%s\n' "$stamps" |
     awk -F: -v rt="$restore_time" '$3 + 0 > rt + 0 { print $1; exit }')
   if [ -z "$offset" ]; then
     return

@@ -430,6 +430,18 @@ SET a 1"
       Assert restored_incr_matches_expected
     End
 
+    It "fails rather than restore an AOF it cannot read uncut"
+      prepare_remote_dir
+      # a grep that cannot read the file, as on an I/O error
+      printf '#!/bin/sh\necho "grep: read error" >&2\nexit 2\n' > "$stub_dir/grep"
+      chmod +x "$stub_dir/grep"
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore
+      The status should be failure
+      The output should include "ERROR: Failed to read aof file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The output should not include "Restore complete."
+    End
+
     It "fails when no archive starts at or before the restore time"
       prepare_remote_archive
       export DP_RESTORE_TIME=restore-at-500
