@@ -135,6 +135,20 @@ spec:
               # can carry them into a restore.
               fdb_write_keys "$NAMESPACE" "$primary" e2e-pitr-early 50
 
+              # The restore cuts the log at the recovery target. A value with
+              # NUL bytes, and a graph, written before the cut have to survive
+              # it byte for byte; copying the log through the shell used to
+              # shorten such values and leave an AOF the server refused.
+              fdb_write_binary_key "$NAMESPACE" "$primary" e2e-pitr-bin
+              fdb_cli "$NAMESPACE" "$primary" GRAPH.QUERY e2e-pitr-graph \
+                "UNWIND range(1, 10) AS i CREATE (:Item {i: i})" >/dev/null
+              # redis-cli exits 0 on an error reply, so confirm the write took.
+              items="$(fdb_graph_node_count "$NAMESPACE" "$primary" e2e-pitr-graph Item)"
+              if [ "$items" != "10" ]; then
+                echo "e2e-pitr-graph holds $items Item nodes after the early write, expected 10" >&2
+                exit 1
+              fi
+
               # The recovery target is read from inside the pod rather than from
               # the machine running chainsaw. The restore time is compared against
               # timestamps the server wrote into the log, and a few seconds of
@@ -150,6 +164,15 @@ spec:
               # Everything from here on must NOT come back.
               fdb_write_keys "$NAMESPACE" "$primary" e2e-pitr-late 50
               fdb_verify_keys "$NAMESPACE" "$primary" e2e-pitr-late 50
+              fdb_cli "$NAMESPACE" "$primary" GRAPH.QUERY e2e-pitr-graph \
+                "UNWIND range(11, 15) AS i CREATE (:Item {i: i})" >/dev/null
+              # Without this, a late write that failed would let the restored
+              # count of 10 pass for the wrong reason.
+              items="$(fdb_graph_node_count "$NAMESPACE" "$primary" e2e-pitr-graph Item)"
+              if [ "$items" != "15" ]; then
+                echo "e2e-pitr-graph holds $items Item nodes after the late write, expected 15" >&2
+                exit 1
+              fi
       catch:
         - events: {}
         - podLogs:
@@ -286,6 +309,14 @@ spec:
               # replayed at all rather than the full backup simply restored.
               fdb_verify_keys "$NAMESPACE" "$primary" e2e-pitr-base 100
               fdb_verify_keys "$NAMESPACE" "$primary" e2e-pitr-early 50
+              fdb_verify_binary_key "$NAMESPACE" "$primary" e2e-pitr-bin
+
+              # 10 nodes were created before the target and 5 after it.
+              items="$(fdb_graph_node_count "$NAMESPACE" "$primary" e2e-pitr-graph Item)"
+              if [ "$items" != "10" ]; then
+                echo "e2e-pitr-graph holds $items Item nodes, expected the 10 created before the target" >&2
+                exit 1
+              fi
 
               # And nothing written after it may be: this is the assertion that
               # separates a real PITR from a restore that replays the whole log.

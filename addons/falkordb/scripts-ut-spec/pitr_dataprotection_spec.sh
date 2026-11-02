@@ -102,6 +102,7 @@ if [ "$1" = "-d" ]; then
   case "$2" in
   restore-at-1500) echo 1500 ;;
   restore-at-500) echo 500 ;;
+  restore-at-1700) echo 1700 ;;
   *) echo "date: invalid date '$2'" >&2; exit 1 ;;
   esac
   exit 0
@@ -217,6 +218,18 @@ EOF
 
   prepare_remote_dir() {
     write_backup_tree "$STUB_REMOTE/1000.1.dir"
+  }
+
+  # Real RESP framing, with NUL bytes in the value written before the restore
+  # time and a NUL-free write after it.
+  write_binary_incr() {
+    local incr="$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof"
+    printf '#TS:1100\r\n*3\r\n$3\r\nSET\r\n$3\r\nbin\r\n$5\r\na\000b\000c\r\n' > "$work_dir/expected.aof"
+    { cat "$work_dir/expected.aof"; printf '#TS:1600\r\n*3\r\n$3\r\nSET\r\n$4\r\nlate\r\n$1\r\n1\r\n'; } > "$incr"
+  }
+
+  restored_incr_matches_expected() {
+    cmp "$work_dir/expected.aof" "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
   }
 
   restored_incr() {
@@ -392,6 +405,41 @@ SET a 1"
 SET a 1"
       The path "$DATA_DIR/appendonlydir/appendonly.aof.manifest" should be exist
       The path "$DATA_DIR/.kb-data-protection" should not be exist
+    End
+
+    It "keeps NUL bytes in the AOF it truncates"
+      prepare_remote_dir
+      write_binary_incr
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore
+      The status should be success
+      The output should include "Truncate aof file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof at byte 43"
+      The output should include "Restore complete."
+      Assert restored_incr_matches_expected
+    End
+
+    It "leaves the AOF alone when nothing in it is after the restore time"
+      prepare_remote_dir
+      write_binary_incr
+      cp "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" "$work_dir/expected.aof"
+      export DP_RESTORE_TIME=restore-at-1700
+      When run run_restore
+      The status should be success
+      The output should not include "Truncate aof file"
+      The output should include "Restore complete."
+      Assert restored_incr_matches_expected
+    End
+
+    It "fails rather than restore an AOF it cannot read uncut"
+      prepare_remote_dir
+      # a grep that cannot read the file, as on an I/O error
+      printf '#!/bin/sh\necho "grep: read error" >&2\nexit 2\n' > "$stub_dir/grep"
+      chmod +x "$stub_dir/grep"
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore
+      The status should be failure
+      The output should include "ERROR: Failed to read aof file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The output should not include "Restore complete."
     End
 
     It "fails when no archive starts at or before the restore time"
