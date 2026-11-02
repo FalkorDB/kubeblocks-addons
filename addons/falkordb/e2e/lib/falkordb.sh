@@ -344,6 +344,46 @@ fdb_verify_keys() {
   fdb_log "verified $count keys with prefix '$prefix' on $pod"
 }
 
+# The value fdb_write_binary_key stores, as `od -An -tx1` prints it with the
+# newline redis-cli appends. The NUL bytes are the point: a value that holds
+# one cannot pass through a shell variable intact.
+FDB_BINARY_VALUE_HEX="61 00 62 00 63 0a"
+
+# fdb_write_binary_key <namespace> <pod> <key>
+# Sets <key> to the five bytes "a\0b\0c", fed to redis-cli -x on stdin so the
+# NUL bytes never travel as arguments.
+fdb_write_binary_key() {
+  local namespace="$1" pod="$2" key="$3"
+  kubectl exec -n "$namespace" "$pod" -c "$FDB_CONTAINER" -- \
+    sh -c 'printf "a\000b\000c" |
+      REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" redis-cli '"$FDB_CLI_FLAGS"' -x SET "$1" >/dev/null' _ "$key"
+  fdb_log "wrote a value with NUL bytes to '$key' on $pod"
+}
+
+# fdb_verify_binary_key <namespace> <pod> <key>
+# Fails unless <key> holds exactly the bytes fdb_write_binary_key stored.
+fdb_verify_binary_key() {
+  local namespace="$1" pod="$2" key="$3" hex
+  hex="$(kubectl exec -n "$namespace" "$pod" -c "$FDB_CONTAINER" -- \
+    sh -c 'REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" redis-cli '"$FDB_CLI_FLAGS"' GET "$1" |
+      od -An -tx1' _ "$key" | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')"
+  if [ "$hex" != "$FDB_BINARY_VALUE_HEX" ]; then
+    fdb_fail "'$key' on $pod holds [$hex], expected [$FDB_BINARY_VALUE_HEX]"
+    return 1
+  fi
+  fdb_log "'$key' on $pod came back byte for byte"
+}
+
+# fdb_graph_node_count <namespace> <pod> <graph> <label>
+# Prints how many nodes with <label> the graph holds. Uses GRAPH.RO_QUERY, so it
+# works on a replica too.
+fdb_graph_node_count() {
+  local namespace="$1" pod="$2" graph="$3" label="$4"
+  # The reply is the column header, then the value, then query statistics.
+  fdb_cli "$namespace" "$pod" GRAPH.RO_QUERY "$graph" \
+    "MATCH (n:$label) RETURN count(n)" | sed -n 2p | tr -d '\r'
+}
+
 # fdb_assert_role <namespace> <pod> <expected master|slave>
 fdb_assert_role() {
   local namespace="$1" pod="$2" expected="$3" actual
