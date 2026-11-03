@@ -22,6 +22,13 @@ test || __() {
 
 declare -A ORIGINAL_PRIORITIES
 redis_service_port=${SERVICE_PORT:-6379}
+# How long writes on the old primary stay paused at most (see
+# failover_with_writes_paused); it covers the waits below with room to spare.
+write_pause_ms=30000
+replica_catch_up_max_attempts=10
+new_primary_max_attempts=15
+new_primary_host=""
+new_primary_port=""
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -250,6 +257,132 @@ execute_sentinel_failover() {
   return 0
 }
 
+# Prints the primary address ("host port") each reachable sentinel reports, one
+# line per sentinel.
+get_sentinel_master_addrs() {
+  local master_name="${CUSTOM_SENTINEL_MASTER_NAME:-$REDIS_COMPONENT_NAME}"
+  local sentinel_pod_fqdn output
+  local -a sentinel_pod_fqdn_list addr
+  IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
+  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+    output=$(redis_config_get "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL get-master-addr-by-name $master_name" 2>/dev/null) || continue
+    read -r -d '' -a addr <<< "$output" || true
+    if [ "${#addr[@]}" -eq 2 ]; then
+      echo "${addr[0]} ${addr[1]}"
+    fi
+  done
+}
+
+# Returns 0 when the primary has replicas online and every one of them has
+# acknowledged its whole replication stream, which stops growing while writes
+# are paused. Replicas acknowledge once a second.
+replicas_caught_up() {
+  local primary_fqdn="$1"
+  local info master_offset offsets offset
+  info=$(redis_config_get "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "INFO replication") || return 1
+  info=${info//$'\r'/}
+  master_offset=$(echo "$info" | sed -n 's/^master_repl_offset:\([0-9]*\).*/\1/p')
+  offsets=$(echo "$info" | sed -n 's/^slave[0-9]*:.*state=online.*offset=\([0-9]*\).*/\1/p')
+  if is_empty "$master_offset" || is_empty "$offsets"; then
+    echo "$primary_fqdn has no replica online" >&2
+    return 1
+  fi
+  for offset in $offsets; do
+    if [ "$offset" -lt "$master_offset" ]; then
+      echo "a replica of $primary_fqdn is at offset $offset of $master_offset" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Waits for a sentinel to report a primary other than initial_addr, and sets
+# new_primary_host and new_primary_port to it.
+wait_for_sentinel_to_switch_master() {
+  local initial_addr="$1"
+  local attempt addr
+  new_primary_host=""
+  new_primary_port=""
+  for ((attempt = 0; attempt < new_primary_max_attempts; attempt++)); do
+    while read -r addr; do
+      if ! is_empty "$addr" && [ "$addr" != "$initial_addr" ]; then
+        read -r new_primary_host new_primary_port <<< "$addr"
+        echo "sentinel switched the primary from $initial_addr to $addr"
+        return 0
+      fi
+    done <<< "$(get_sentinel_master_addrs)"
+    sleep_when_ut_mode_false 1
+  done
+  echo "Error: no sentinel reports a primary other than $initial_addr" >&2
+  return 1
+}
+
+# SENTINEL FAILOVER promotes a replica but leaves the old primary a writable
+# master until Sentinel demotes it, some 10 s later, and whatever it acknowledges
+# meanwhile is lost when it resyncs from the new primary. So writes on it are
+# paused first, the replicas left to catch up, and the old primary is made a
+# replica of the new one here as soon as Sentinel has switched. Sentinel cannot
+# be left to do it: the pause also blocks the PUBLISH it sends its hellos with,
+# and the commands it sends after it on the same link. Paused writers are never
+# acknowledged: once the old primary is a replica they get READONLY.
+failover_with_writes_paused() {
+  local old_primary="$1"
+  local initial_addr attempt caught_up=false
+  initial_addr=$(get_sentinel_master_addrs | head -n 1)
+  if is_empty "$initial_addr"; then
+    echo "Error: no sentinel reports the current primary" >&2
+    return 1
+  fi
+
+  # the timeout only lifts the pause if this script dies half-way
+  if ! call_func_with_retry 3 1 execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT PAUSE $write_pause_ms WRITE"; then
+    echo "Error: failed to pause writes on $old_primary" >&2
+    return 1
+  fi
+  echo "writes paused on $old_primary for up to $write_pause_ms ms"
+
+  for ((attempt = 0; attempt < replica_catch_up_max_attempts; attempt++)); do
+    if replicas_caught_up "$old_primary"; then
+      caught_up=true
+      break
+    fi
+    sleep_when_ut_mode_false 1
+  done
+  if [ "$caught_up" != true ]; then
+    echo "Error: the replicas of $old_primary did not catch up, not switching over" >&2
+    unpause_writes "$old_primary"
+    return 1
+  fi
+
+  if ! execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME"; then
+    unpause_writes "$old_primary"
+    return 1
+  fi
+  if ! wait_for_sentinel_to_switch_master "$initial_addr"; then
+    # If Sentinel switches after all, the old primary takes writes until Sentinel
+    # demotes it, as it did before the pause.
+    unpause_writes "$old_primary"
+    return 1
+  fi
+
+  if call_func_with_retry 3 1 execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "REPLICAOF $new_primary_host $new_primary_port"; then
+    echo "$old_primary is now a replica of $new_primary_host:$new_primary_port"
+  else
+    echo "Warning: failed to make $old_primary a replica of $new_primary_host:$new_primary_port, leaving it to sentinel" >&2
+  fi
+  unpause_writes "$old_primary"
+  return 0
+}
+
+unpause_writes() {
+  local primary_fqdn="$1"
+  if call_func_with_retry 3 1 execute_sub_command "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT UNPAUSE"; then
+    echo "writes unpaused on $primary_fqdn"
+  else
+    echo "Warning: failed to unpause writes on $primary_fqdn, the pause ends after $write_pause_ms ms" >&2
+  fi
+}
+
 # set target candidate highest priority to make sure it will be promoted to master
 set_redis_priorities() {
   local candidate_fqdn="$1"
@@ -325,7 +458,7 @@ switchover_with_candidate() {
 
   local switchover_rc=0
   if [ $set_rc -eq 0 ]; then
-    execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME" || switchover_rc=$?
+    failover_with_writes_paused "$initial_master" || switchover_rc=$?
     if [ $switchover_rc -eq 0 ]; then
       check_switchover_result "$KB_SWITCHOVER_CANDIDATE_FQDN" "" || switchover_rc=$?
     fi
@@ -359,7 +492,7 @@ switchover_without_candidate() {
   initial_master=$(check_redis_kernel_status) || return 1
 
   # do switchover
-  execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME" || return 1
+  failover_with_writes_paused "$initial_master" || return 1
 
   # check switchover result using initial_master
   # if no candidate specified, skip check

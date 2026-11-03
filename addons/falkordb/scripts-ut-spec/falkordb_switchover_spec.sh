@@ -269,6 +269,115 @@ master_host:redis-master"
     }
     After 'cleanup'
 
+    Context "replicas_caught_up()"
+      It "succeeds when every online replica has the primary's offset"
+        redis_config_get() { printf 'role:master\r\nslave0:ip=redis2,port=6379,state=online,offset=500,lag=0\r\nslave1:ip=redis3,port=6379,state=wait_bgsave,offset=0,lag=0\r\nmaster_repl_offset:500\r\n'; }
+        When call replicas_caught_up "redis1"
+        The status should be success
+      End
+
+      It "fails while a replica is behind"
+        redis_config_get() { printf 'role:master\r\nslave0:ip=redis2,port=6379,state=online,offset=480,lag=0\r\nmaster_repl_offset:500\r\n'; }
+        When call replicas_caught_up "redis1"
+        The status should be failure
+        The stderr should include "at offset 480 of 500"
+      End
+
+      It "fails when no replica is online"
+        redis_config_get() { printf 'role:master\r\nconnected_slaves:0\r\nmaster_repl_offset:500\r\n'; }
+        When call replicas_caught_up "redis1"
+        The status should be failure
+        The stderr should include "has no replica online"
+      End
+    End
+
+    Context "wait_for_sentinel_to_switch_master()"
+      It "returns the first primary that differs from the initial one"
+        get_sentinel_master_addrs() { printf '%s\n' "redis1 6379" "redis2 6379"; }
+        check_new_primary() {
+          wait_for_sentinel_to_switch_master "redis1 6379" && echo "new=$new_primary_host:$new_primary_port"
+        }
+        When call check_new_primary
+        The status should be success
+        The stdout should include "new=redis2:6379"
+      End
+
+      It "fails when sentinel keeps the initial primary"
+        get_sentinel_master_addrs() { echo "redis1 6379"; }
+        When call wait_for_sentinel_to_switch_master "redis1 6379"
+        The status should be failure
+        The stderr should include "no sentinel reports a primary other than redis1 6379"
+      End
+    End
+
+    Context "failover_with_writes_paused()"
+      # records every command sent to a pod, in order
+      execute_sub_command() { echo "cmd $1: $4"; return 0; }
+      call_func_with_retry() { shift 2; "$@"; }
+      get_sentinel_master_addrs() {
+        if [ -n "$failover_started" ]; then echo "redis2 6379"; else echo "redis1 6379"; fi
+      }
+      execute_sentinel_failover() { failover_started=true; echo "failover"; return 0; }
+      replicas_caught_up() { return 0; }
+
+      It "pauses writes, fails over, demotes the old primary and only then unpauses"
+        failover_started=""
+        When call failover_with_writes_paused "redis1"
+        The status should be success
+        The line 1 of stdout should eq "cmd redis1: CLIENT PAUSE 30000 WRITE"
+        The line 3 of stdout should eq "failover"
+        The stdout should include "cmd redis1: REPLICAOF redis2 6379"
+        The stdout should include "redis1 is now a replica of redis2:6379"
+        The output should match pattern "*REPLICAOF redis2 6379*cmd redis1: CLIENT UNPAUSE*"
+      End
+
+      It "unpauses and does not fail over when the replicas do not catch up"
+        failover_started=""
+        replicas_caught_up() { return 1; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should include "cmd redis1: CLIENT UNPAUSE"
+        The stdout should not include "failover"
+        The stderr should include "did not catch up"
+      End
+
+      It "unpauses without demoting when sentinel does not switch"
+        failover_started=""
+        execute_sentinel_failover() { return 0; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should include "cmd redis1: CLIENT UNPAUSE"
+        The stdout should not include "REPLICAOF"
+        The stderr should include "no sentinel reports a primary other than redis1 6379"
+      End
+
+      It "unpauses when the failover cannot be started"
+        failover_started=""
+        execute_sentinel_failover() { return 1; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should include "cmd redis1: CLIENT UNPAUSE"
+        The stdout should not include "REPLICAOF"
+      End
+
+      It "does not fail over when writes cannot be paused"
+        failover_started=""
+        execute_sub_command() { return 1; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should not include "failover"
+        The stderr should include "failed to pause writes on redis1"
+      End
+
+      It "fails when no sentinel knows the primary"
+        get_sentinel_master_addrs() { :; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should not include "CLIENT PAUSE"
+        The stderr should include "no sentinel reports the current primary"
+      End
+    End
+
     Context "switchover_with_candidate()"
       It "should execute successful switchover"
         check_redis_role() {
@@ -280,7 +389,7 @@ master_host:redis-master"
         }
         check_redis_kernel_status() { return 0; }
         set_redis_priorities() { return 0; }
-        execute_sentinel_failover() { return 0; }
+        failover_with_writes_paused() { return 0; }
         check_switchover_result() { return 0; }
         recover_redis_priorities() { return 0; }
 
@@ -309,7 +418,7 @@ master_host:redis-master"
           RESPONSE_INDEX=$((RESPONSE_INDEX + 1))
           echo "$response"
         }
-        execute_sentinel_failover() { return 0;}
+        failover_with_writes_paused() { return 0;}
         check_switchover_result() { return 0; }
         When call switchover_without_candidate
         The status should be success
@@ -328,7 +437,7 @@ master_host:redis-master"
         check_redis_kernel_status() {
           echo "redis1"
         }
-        execute_sentinel_failover() {
+        failover_with_writes_paused() {
           return 1
         }
         When call switchover_without_candidate
