@@ -31,6 +31,9 @@ redis_data_dir="/data"
 retry_times=3
 retry_delay_second=2
 service_port=${SERVICE_PORT:-6379}
+redis_server_process_name="redis-server"
+redis_server_launcher_pid=""
+proc_root="/proc"
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -587,19 +590,54 @@ start_redis_server() {
   # server on a pty, which turns every "\n" into "\r\n" (and the INFO section of a
   # crash report, already "\r\n", into "\r\r\n"), leaving stray ^M in the logs.
   local log_format='s/\r+$//; s/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ //; s/^/[falkordb] /'
-  local server_status
+  local log_pid server_status=0
+  exec 3> >(sed -u -E "$log_format")
+  log_pid=$!
+  # This script is the container's PID 1, which ignores SIGTERM unless it traps
+  # it, so the server runs in the background and the signal is passed on to it:
+  # it shuts down cleanly (and fast) instead of being killed at the end of the
+  # grace period. `script` would kill it, so it is signalled directly, and the
+  # command is exec'd so the server is the child of `script`, not of a shell.
   if command -v script >/dev/null 2>&1; then
-    script -q -f -e -c "$exec_cmd" /dev/null 2>&1 | sed -u -E "$log_format"
-    server_status=${PIPESTATUS[0]}
+    script -q -f -e -c "exec $exec_cmd" /dev/null >&3 2>&1 &
   else
-    eval "$exec_cmd" 2>&1 | sed -u -E "$log_format"
-    server_status=${PIPESTATUS[0]}
+    eval "exec $exec_cmd" >&3 2>&1 &
   fi
-  # A pipeline's status is that of its last command (sed), which would hide a
-  # crashed server behind exit code 0. Propagate the server's own status so the
-  # container exits non-zero and kubelet records the failure and restarts it.
+  redis_server_launcher_pid=$!
+  trap 'forward_signal_to_redis_server TERM' TERM
+  trap 'forward_signal_to_redis_server INT' INT
+  # wait returns early when a trapped signal arrives; wait again until the
+  # server has exited, then once more for its status.
+  while kill -0 "$redis_server_launcher_pid" 2>/dev/null; do
+    wait "$redis_server_launcher_pid" || true
+  done
+  wait "$redis_server_launcher_pid" || server_status=$?
+  # let sed print the server's last lines before the container exits
+  exec 3>&-
+  wait "$log_pid" || true
+  # Propagate the server's own status so the container exits non-zero after a
+  # crash and kubelet records the failure and restarts it.
   echo "falkordb server exited with status $server_status"
   return "$server_status"
+}
+
+# Sends the signal to the server started by start_redis_server: the launcher
+# itself when it exec'd the server, or its child when `script` runs it on a pty.
+# The image has no ps or pkill, so the process is found in /proc.
+forward_signal_to_redis_server() {
+  local signal="$1" proc pid stat ppid
+  for proc in "$proc_root"/[0-9]*; do
+    [ "$(cat "$proc/comm" 2>/dev/null)" = "$redis_server_process_name" ] || continue
+    read -r stat < "$proc/stat" 2>/dev/null || continue
+    # the fields after the parenthesised command name are: state ppid ...
+    stat=${stat##*) }
+    read -r _ ppid _ <<< "$stat"
+    pid=${proc##*/}
+    if [ "$pid" = "$redis_server_launcher_pid" ] || [ "$ppid" = "$redis_server_launcher_pid" ]; then
+      echo "forwarding SIG$signal to falkordb server (pid $pid)"
+      kill -"$signal" "$pid" || true
+    fi
+  done
 }
 
 # TODO: if instanceTemplate is specified, the pod service could not be parsed from the pod ordinal.
