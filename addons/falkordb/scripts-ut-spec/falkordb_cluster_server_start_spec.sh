@@ -54,6 +54,15 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The contents of file "$redis_real_conf" should include "include /etc/conf/redis.conf"
       The contents of file "$redis_real_conf" should include "include $redis_extra_conf"
     End
+
+    It "drops what an earlier start or a CONFIG REWRITE left in redis.conf"
+      # a container restart keeps the emptyDir that holds redis.conf
+      printf '%s\n' "include /etc/conf/redis.conf" "loadmodule /var/lib/falkordb/bin/falkordb.so" "replicaof old-primary 6379" > $redis_real_conf
+      When call load_redis_template_conf
+      The line 1 of contents of file "$redis_real_conf" should eq "include /etc/conf/redis.conf"
+      The line 2 of contents of file "$redis_real_conf" should eq "include $redis_extra_conf"
+      The lines of contents of file "$redis_real_conf" should eq 2
+    End
   End
 
   Describe "build_redis_default_accounts()"

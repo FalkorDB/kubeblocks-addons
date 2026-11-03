@@ -40,7 +40,11 @@ load_common_library() {
 }
 
 load_redis_template_conf() {
-  echo "include $redis_template_conf" >> $redis_real_conf
+  # Start from an empty file: it is on an emptyDir that survives a container
+  # restart, so appending would keep the last start's lines and whatever
+  # Sentinel's CONFIG REWRITE added, including a loadmodule line that, with the
+  # --loadmodule the server is started with, loads the module twice and aborts.
+  echo "include $redis_template_conf" > $redis_real_conf
   # if the file redis_extra_conf exists, include it too
   if [ -f $redis_extra_conf ]; then
     echo "include $redis_extra_conf" >> $redis_real_conf
