@@ -446,12 +446,19 @@ master_host:redis-master"
           if [ "$1" = sentinel1 ]; then sleep 3; echo "redis1 6379"; else echo "redis2 6379"; fi
         }
         check_redis_role() { echo "primary"; }
+        # the real clock in ms: now_ms is the spec's fake one
+        real_ms() { local t="${EPOCHREALTIME/[.,]/}"; echo $((t / 1000)); }
         timed() {
-          local started=$SECONDS
-          sentinel_reports_new_primary "redis1 6379" >/dev/null && echo "switched to $new_primary_host after $((SECONDS - started))s"
+          local started elapsed
+          started=$(real_ms)
+          sentinel_reports_new_primary "redis1 6379" >/dev/null || return 1
+          elapsed=$(( $(real_ms) - started ))
+          echo "switched to $new_primary_host"
+          # well short of sentinel1's 3 s, with room for a slow CI runner
+          [ "$elapsed" -lt 2000 ] || echo "took ${elapsed}ms"
         }
         When call timed
-        The stdout should eq "switched to redis2 after 0s"
+        The stdout should eq "switched to redis2"
       End
     End
 
