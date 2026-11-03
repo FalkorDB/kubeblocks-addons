@@ -288,17 +288,21 @@ get_sentinel_master_addrs() {
   done
 }
 
-# Returns 0 when every replica that can be reached has applied the primary's
-# whole replication stream, which stops growing while writes are paused, and the
-# candidate, when there is one, is among them. Each replica is asked itself: the
+# Returns 0 when every replica that can be reached follows the primary and has
+# applied its whole replication stream, which stops growing while writes are
+# paused, and the candidate, when there is one, is among them. A replica follows
+# the primary when its master_host and master_port name the primary's pod or
+# primary_addr, the address sentinel has for it ("host port"), which is what
+# replicas are pointed at behind an announce override, a NodePort or a load
+# balancer; the offset of a replica of another master means nothing here. Each replica is asked itself: the
 # primary lists only the replicas that are online, so a replica still syncing
 # would go unchecked, though Sentinel might promote it. The write pause is
 # renewed before each query: with every query allowed its timeout, a scan of
 # many replicas could outlast the pause, and the offset read at its start would
 # then miss the writes taken since.
 replicas_caught_up() {
-  local primary_fqdn="$1" candidate_fqdn="$2"
-  local info master_offset pod_fqdn role link offset caught_up=0 candidate_caught_up=false
+  local primary_fqdn="$1" candidate_fqdn="$2" primary_addr="$3"
+  local info master_offset pod_fqdn role link offset master_host master_port caught_up=0 candidate_caught_up=false
   local -a redis_pod_fqdn_list
   renew_write_pause
   info=$(redis_config_get "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "INFO replication") || return 1
@@ -324,8 +328,15 @@ replicas_caught_up() {
     role=$(echo "$info" | sed -n 's/^role:\([a-z]*\).*/\1/p')
     link=$(echo "$info" | sed -n 's/^master_link_status:\([a-z]*\).*/\1/p')
     offset=$(echo "$info" | sed -n 's/^slave_repl_offset:\([0-9]*\).*/\1/p')
+    master_host=$(echo "$info" | sed -n 's/^master_host:\([^[:space:]]*\).*/\1/p')
+    master_port=$(echo "$info" | sed -n 's/^master_port:\([0-9]*\).*/\1/p')
     if [ "$role" != "slave" ]; then
       echo "$pod_fqdn is not a replica (role: ${role:-unknown})" >&2
+      return 1
+    fi
+    if ! { [ "$master_host" = "$primary_fqdn" ] && [ "$master_port" = "$redis_service_port" ]; } &&
+       { is_empty "$primary_addr" || [ "$master_host $master_port" != "$primary_addr" ]; }; then
+      echo "replica $pod_fqdn follows ${master_host:-unknown}:${master_port:-unknown}, not $primary_fqdn" >&2
       return 1
     fi
     if [ "$link" != "up" ] || is_empty "$offset" || [ "$offset" -lt "$master_offset" ]; then
@@ -447,7 +458,7 @@ failover_with_writes_paused() {
   echo "writes paused on $old_primary for up to $write_pause_ms ms at a time"
 
   for ((attempt = 0; attempt < replica_catch_up_max_attempts; attempt++)); do
-    if replicas_caught_up "$old_primary" "$KB_SWITCHOVER_CANDIDATE_FQDN"; then
+    if replicas_caught_up "$old_primary" "$KB_SWITCHOVER_CANDIDATE_FQDN" "$initial_addr"; then
       caught_up=true
       break
     fi

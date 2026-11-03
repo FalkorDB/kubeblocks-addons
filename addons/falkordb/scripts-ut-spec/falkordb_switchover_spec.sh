@@ -316,7 +316,7 @@ master_host:redis-master"
           redis3) [ -n "$redis3_info" ] || return 1; printf '%b' "$redis3_info" ;;
         esac
       }
-      caught='role:slave\r\nmaster_link_status:up\r\nslave_repl_offset:500\r\n'
+      caught='role:slave\r\nmaster_host:redis1\r\nmaster_port:6379\r\nmaster_link_status:up\r\nslave_repl_offset:500\r\n'
 
       It "succeeds when every replica has applied the primary's offset"
         redis2_info="$caught"; redis3_info="$caught"
@@ -325,14 +325,14 @@ master_host:redis-master"
       End
 
       It "fails while a replica still syncs, though the primary would not list it as online"
-        redis2_info="$caught"; redis3_info='role:slave\r\nmaster_link_status:down\r\nslave_repl_offset:0\r\n'
+        redis2_info="$caught"; redis3_info='role:slave\r\nmaster_host:redis1\r\nmaster_port:6379\r\nmaster_link_status:down\r\nslave_repl_offset:0\r\n'
         When call replicas_caught_up "redis1" ""
         The status should be failure
         The stderr should include "replica redis3 is at offset 0 of 500 (link down)"
       End
 
       It "fails while a replica is behind"
-        redis2_info='role:slave\r\nmaster_link_status:up\r\nslave_repl_offset:480\r\n'; redis3_info="$caught"
+        redis2_info='role:slave\r\nmaster_host:redis1\r\nmaster_port:6379\r\nmaster_link_status:up\r\nslave_repl_offset:480\r\n'; redis3_info="$caught"
         When call replicas_caught_up "redis1" ""
         The status should be failure
         The stderr should include "replica redis2 is at offset 480 of 500"
@@ -377,6 +377,21 @@ master_host:redis-master"
         The line 3 of stdout should eq "replica redis2 cannot be reached, skipping it"
         The line 4 of stdout should eq "renew"
         The lines of stdout should eq 4
+      End
+
+      It "fails when a replica follows another master, whatever its offset"
+        redis2_info="$caught"; redis3_info='role:slave\r\nmaster_host:redis2\r\nmaster_port:6379\r\nmaster_link_status:up\r\nslave_repl_offset:900\r\n'
+        When call replicas_caught_up "redis1" "" "redis1 6379"
+        The status should be failure
+        The stderr should include "replica redis3 follows redis2:6379, not redis1"
+      End
+
+      It "accepts a replica that follows the address sentinel has for the primary"
+        # behind a load balancer the replicas follow its address, not the pod's name
+        lb='role:slave\r\nmaster_host:lb-0.example.com\r\nmaster_port:6379\r\nmaster_link_status:up\r\nslave_repl_offset:500\r\n'
+        redis2_info="$lb"; redis3_info="$lb"
+        When call replicas_caught_up "redis1" "" "lb-0.example.com 6379"
+        The status should be success
       End
 
       It "fails when another pod runs as a master"

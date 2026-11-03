@@ -1241,6 +1241,7 @@ Describe "FalkorDB Start Bash Script Tests"
       When call query_timeouts
       The line 1 of stdout should eq "sentinel-0 3"
       The line 2 of stdout should eq "sentinel-0 1"
+      The line 3 of stdout should eq "sentinel-0 1"
       The lines of stdout should eq 3
     End
 
