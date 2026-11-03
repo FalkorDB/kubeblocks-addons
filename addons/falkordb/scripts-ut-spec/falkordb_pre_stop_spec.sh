@@ -25,6 +25,9 @@ Describe "FalkorDB Pre-Stop Script Tests"
   }
   AfterAll 'cleanup'
 
+  # timeout is an external command, so it could not run the redis-cli stubs
+  timeout() { shift; "$@"; }
+
   Describe "acl_save_before_stop()"
     setup_env() {
       export SERVICE_PORT="6379"
@@ -194,6 +197,12 @@ Describe "FalkorDB Pre-Stop Script Tests"
   End
 
   Describe "current_pod_is_master()"
+    It "gives up on a server that does not answer"
+      timeout() { echo "timeout $1"; return 124; }
+      When call current_pod_is_master
+      The status should be failure
+    End
+
     It "is true when the server reports role:master"
       redis-cli() { printf 'role:master\r\nconnected_slaves:1\r\n'; }
       When call current_pod_is_master

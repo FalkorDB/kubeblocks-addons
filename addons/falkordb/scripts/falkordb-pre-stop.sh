@@ -33,10 +33,10 @@ load_common_library() {
 acl_save_before_stop() {
   service_port=${SERVICE_PORT:-6379}
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port -a $REDIS_DEFAULT_PASSWORD acl save"
+    acl_save_command="timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port -a $REDIS_DEFAULT_PASSWORD acl save"
     logging_mask_acl_save_command="${acl_save_command/$REDIS_DEFAULT_PASSWORD/********}"
   else
-    acl_save_command="redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port acl save"
+    acl_save_command="timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h localhost -p $service_port acl save"
     logging_mask_acl_save_command="$acl_save_command"
   fi
   echo "acl save command: $logging_mask_acl_save_command"
@@ -48,12 +48,14 @@ acl_save_before_stop() {
   fi
 }
 
+# Bounded, like the hand-over itself: a server that hangs must not use up the
+# termination grace period before it is even asked to shut down.
 current_pod_is_master() {
   local service_port=${SERVICE_PORT:-6379} output
   if ! is_empty "$REDIS_DEFAULT_PASSWORD"; then
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h localhost -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" --no-auth-warning info replication 2>/dev/null) || return 1
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h localhost -p "$service_port" -a "$REDIS_DEFAULT_PASSWORD" --no-auth-warning info replication 2>/dev/null) || return 1
   else
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h localhost -p "$service_port" info replication 2>/dev/null) || return 1
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h localhost -p "$service_port" info replication 2>/dev/null) || return 1
   fi
   [[ "$output" == *role:master* ]]
 }

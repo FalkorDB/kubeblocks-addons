@@ -446,8 +446,10 @@ master_host:redis-master"
           if [ "$1" = sentinel1 ]; then sleep 3; echo "redis1 6379"; else echo "redis2 6379"; fi
         }
         check_redis_role() { echo "primary"; }
-        # the real clock in ms: now_ms is the spec's fake one
-        real_ms() { local t="${EPOCHREALTIME/[.,]/}"; echo $((t / 1000)); }
+        # the real clock in ms, as the scripts read it: now_ms is the spec's fake one
+        real_ms() {
+          if [ -n "${EPOCHREALTIME:-}" ]; then local t="${EPOCHREALTIME/[.,]/}"; echo $((t / 1000)); else date +%s%3N; fi
+        }
         timed() {
           local started elapsed
           started=$(real_ms)
