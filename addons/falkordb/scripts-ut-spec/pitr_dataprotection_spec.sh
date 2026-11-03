@@ -5,7 +5,8 @@
 # each one the way the falkordb-for-pitr ActionSet does (common-scripts.sh
 # first) and run it against stub datasafed, redis-cli, redis-check-rdb, date,
 # stat and sleep binaries. The datasafed stub keeps the backup repo in a local
-# directory, so a case can check what was uploaded, removed or restored.
+# directory, so a case can check what was uploaded, removed or restored. The
+# sharded restore also stubs redis-server, the server it replays the AOF in.
 Describe "FalkorDB PITR dataprotection scripts"
   setup() {
     # Resolved before the scripts change into the work directory.
@@ -20,21 +21,28 @@ Describe "FalkorDB PITR dataprotection scripts"
     cat > "$stub_dir/datasafed" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$STUB_DATASAFED_LOG"
+# paths are relative to DATASAFED_BACKEND_BASE_PATH, as in the real datasafed
+STUB_REMOTE="$STUB_REMOTE${DATASAFED_BACKEND_BASE_PATH%/}"
+mkdir -p "$STUB_REMOTE"
 cmd=$1; shift
 case "$cmd" in
 list)
+  [ "${STUB_LIST_RC:-0}" -ne 0 ] && exit "$STUB_LIST_RC"
   dirs_only=false recursive=false
+  # --older-than lists every file: the cases that pass it treat them all as expired
   while [ $# -gt 1 ]; do
     case "$1" in
     -d) dirs_only=true ;;
-    -r) recursive=true ;;
+    -r|--recursive) recursive=true ;;
+    --older-than) shift ;;
     esac
     shift
   done
   path=${1#/}
   cd "$STUB_REMOTE" || exit 1
   if $recursive; then
-    find "${path%/}" -type f | sort
+    find "${path%/}" -type f 2>/dev/null | sort
+    [ -n "${path%/}" ] || find . -type f | sed 's|^\./||' | sort
   elif $dirs_only; then
     ls -p | grep '/$'
   else
@@ -74,7 +82,7 @@ rm)
   rm -rf "${STUB_REMOTE:?}/$1"
   ;;
 stat)
-  echo "TotalSize 0"
+  echo "TotalSize ${STUB_TOTAL_SIZE:-0}"
   ;;
 esac
 EOF
@@ -86,6 +94,23 @@ case "$*" in
 *"CONFIG GET aof-use-rdb-preamble"*) printf 'aof-use-rdb-preamble\nyes\n' ;;
 *"CONFIG GET aof-timestamp-enabled"*) printf 'aof-timestamp-enabled\nyes\n' ;;
 *"CONFIG GET aof-disable-auto-gc"*) printf 'aof-disable-auto-gc\nyes\n' ;;
+# three primaries own slots; the replica and the failed-over primary do not count.
+# STUB_FAILED_PRIMARY_SLOTS gives the failed primary slots, which it has not handed over yet.
+*"CLUSTER NODES"*)
+  [ -n "$STUB_CLUSTER_NODES_ERR" ] && { echo "NOAUTH Authentication required."; exit 0; }
+  echo "a1 10.0.0.1:6379@16379 $([ -n "$STUB_MYSELF_REPLICA" ] || echo myself,)master - 0 0 1 connected 0-5460"
+  echo "b1 10.0.0.2:6379@16379 master - 0 0 2 connected 5461-10922"
+  echo "c1 10.0.0.3:6379@16379 master - 0 0 3 connected 10923-16383"
+  echo "c2 10.0.0.4:6379@16379 ${STUB_MYSELF_REPLICA:+myself,}slave c1 0 0 3 connected"
+  echo "d1 10.0.0.5:6379@16379 master,fail - 0 0 4 disconnected ${STUB_FAILED_PRIMARY_SLOTS:-}"
+  ;;
+*" PING"*) echo "${STUB_PING:-PONG}" ;;
+# the stub redis-server recorded where it would save; the "RDB" is the AOF it replayed
+*" SAVE"*)
+  . "$STUB_SERVER_STATE"
+  cat "$server_dir"/appendonlydir/*.incr.aof > "$server_dir/$server_dbfilename"
+  echo OK
+  ;;
 *) echo OK ;;
 esac
 EOF
@@ -95,9 +120,14 @@ EOF
 echo "[offset 0] Checking RDB file $1"
 echo "[info] ctime '1000'"
 EOF
-    # Now is 2000; `date -d` parses the restore times the cases use.
+    # Now is 2000; `date -d` parses the restore times the cases use, and
+    # `date -u -d @<t>` formats <t> as T<t>.
     cat > "$stub_dir/date" <<'EOF'
 #!/bin/sh
+if [ "$1" = "-u" ] && [ "$2" = "-d" ]; then
+  echo "T${3#@}"
+  exit 0
+fi
 if [ "$1" = "-d" ]; then
   case "$2" in
   restore-at-1500) echo 1500 ;;
@@ -108,7 +138,8 @@ if [ "$1" = "-d" ]; then
   exit 0
 fi
 case "$*" in
-"+%s") echo 2000 ;;
+# STUB_CLOCK_FILE, when it exists, holds a now other than 2000
+"+%s") if [ -f "$STUB_CLOCK_FILE" ]; then cat "$STUB_CLOCK_FILE"; else echo 2000; fi ;;
 *) echo "1970-01-01 00:33:20" ;;
 esac
 EOF
@@ -122,8 +153,44 @@ EOF
     cat > "$stub_dir/sleep" <<'EOF'
 #!/bin/sh
 echo round >> "$STUB_SLEEP_LOG"
+# STUB_ON_SLEEP runs between rounds, e.g. to rewrite the AOF
+[ -z "$STUB_ON_SLEEP" ] || sh -c "$STUB_ON_SLEEP"
 [ "$(wc -l < "$STUB_SLEEP_LOG")" -ge "${STUB_ROUNDS:-1}" ] && kill -TERM "$PPID"
 exit 0
+EOF
+    # `redis-check-aof --truncate-to-timestamp <t> <manifest>`: records its
+    # arguments and cuts the line-based fixtures at the first #TS: after <t>, the
+    # way the real one cuts at an annotation between commands; STUB_CHECK_AOF_RC fails it.
+    cat > "$stub_dir/redis-check-aof" <<'EOF'
+#!/bin/bash
+echo "$*" > "$STUB_CHECK_AOF_ARGS"
+[ "${STUB_CHECK_AOF_RC:-0}" -ne 0 ] && { echo "Bad file format" >&2; exit "$STUB_CHECK_AOF_RC"; }
+t=$2 dir=$(dirname "$3")
+for f in "$dir"/*.incr.aof; do
+  [ -f "$f" ] || continue
+  offset=$(grep -a -b -o '^#TS:[0-9]*' "$f" | awk -F: -v t="$t" '$3 + 0 > t + 0 { print $1; exit }')
+  [ -n "$offset" ] && head -c "$offset" "$f" > "$f.cut" && mv "$f.cut" "$f"
+done
+exit 0
+EOF
+    # `timeout <seconds> <command...>`: runs the command, unbounded
+    printf '#!/bin/sh\nshift\nexec "$@"\n' > "$stub_dir/timeout"
+    # Records its arguments and where it would save, then waits to be stopped,
+    # or exits at once with STUB_SERVER_RC.
+    cat > "$stub_dir/redis-server" <<'EOF'
+#!/bin/bash
+echo "$*" > "$STUB_SERVER_ARGS"
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --dir) echo "server_dir='$2'" >> "$STUB_SERVER_STATE" ;;
+  --dbfilename) echo "server_dbfilename='$2'" >> "$STUB_SERVER_STATE" ;;
+  esac
+  shift
+done
+[ -n "$STUB_SERVER_RC" ] && exit "$STUB_SERVER_RC"
+# a server that does not act on TERM; only KILL stops it
+[ -n "$STUB_SERVER_IGNORE_TERM" ] && trap '' TERM
+exec /bin/sleep 30
 EOF
     chmod +x "$stub_dir"/*
 
@@ -139,15 +206,29 @@ EOF
     export STUB_REMOTE="$work_dir/remote"
     export STUB_DATASAFED_LOG="$work_dir/datasafed.log"
     export STUB_SLEEP_LOG="$work_dir/sleep.log"
+    export STUB_SERVER_ARGS="$work_dir/server.args"
+    export STUB_SERVER_STATE="$work_dir/server.state"
+    export STUB_CHECK_AOF_ARGS="$work_dir/check-aof.args"
+    export STUB_CLOCK_FILE="$work_dir/clock"
+    export FALKORDB_MODULE="$work_dir/falkordb.so"
     : > "$STUB_DATASAFED_LOG"
     : > "$STUB_SLEEP_LOG"
+    : > "$STUB_SERVER_STATE"
     unset REDIS_CLI_TLS_CMD DP_TTL_SECONDS DP_RESTORE_KEY_PATTERNS DP_RESTORE_TIME \
-      STUB_PUSH_RC STUB_PULL_RC STUB_RM_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS
+      STUB_PUSH_RC STUB_PULL_RC STUB_RM_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS \
+      MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS \
+      STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS \
+      PURGE_INTERVAL_SECONDS STUB_SERVER_IGNORE_TERM PITR_STOP_TIMEOUT_SECONDS \
+      STUB_CHECK_AOF_RC STUB_MYSELF_REPLICA STUB_LIST_RC STUB_TOTAL_SIZE STUB_CLUSTER_NODES_ERR \
+      STATUS_INTERVAL_SECONDS
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
     join_scripts common-scripts.sh pitr-backup.sh > "$work_dir/backup.sh"
-    join_scripts common-scripts.sh switch-data-dir.sh pitr-restore.sh > "$work_dir/restore.sh"
+    join_scripts common-scripts.sh switch-data-dir.sh pitr-restore-common.sh pitr-restore.sh > "$work_dir/restore.sh"
+    # falkordb-cluster-for-pitr-v2: prepareData, then the postReady job that rebuilds the RDB
+    join_scripts common-scripts.sh pitr-restore-common.sh pitr-restore-cluster-users.sh > "$work_dir/restore-cluster-users.sh"
+    join_scripts common-scripts.sh pitr-restore-common.sh pitr-restore-cluster-data.sh > "$work_dir/restore-cluster-data.sh"
   }
 
   join_scripts() {
@@ -175,6 +256,34 @@ EOF
 
   run_restore() {
     (cd "$work_dir/run" && "$SHELLSPEC_SHELL" "$work_dir/restore.sh" 2>&1)
+  }
+
+  run_restore_cluster_users() {
+    (cd "$work_dir/run" && "$SHELLSPEC_SHELL" "$work_dir/restore-cluster-users.sh" 2>&1)
+  }
+
+  run_restore_cluster_data() {
+    (cd "$work_dir/run" && "$SHELLSPEC_SHELL" "$work_dir/restore-cluster-data.sh" 2>&1)
+  }
+
+  # This archiver is shard-a of a three shard Backup; shard-b and shard-c
+  # published their ranges earlier.
+  prepare_sharded_backup() {
+    export MODE=cluster
+    export CLUSTER_STATUS_INTERVAL_SECONDS=0
+    export DP_BACKUP_BASE_PATH=/fdb-aof/shard-a
+    prepare_rewritten_aof
+    rm -rf "$STUB_REMOTE/1000.1.dir"
+    echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+    mkdir -p "$STUB_REMOTE/fdb-aof/shard-b" "$STUB_REMOTE/fdb-aof/shard-c"
+    # <start> <end> <published at> <shard primary id>; now is 2000, and the
+    # stub's CLUSTER NODES has primaries a1 (this archiver's), b1 and c1
+    echo "900 1800 1990 b1" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
+    echo "1200 1950 1990 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+  }
+
+  backup_info() {
+    cat "$DP_BACKUP_INFO_FILE"
   }
 
   # Redis has rewritten the AOF to seq 2, so seq 1 is ready to be archived.
@@ -216,20 +325,14 @@ EOF
     (cd "$work_dir/archive" && tar -cf "$STUB_REMOTE/1000.1.tar.zst" .)
   }
 
+  # pitr-backup.sh names the tar members without a ./ prefix
+  prepare_remote_archive_as_backed_up() {
+    write_backup_tree "$work_dir/archive"
+    (cd "$work_dir/archive" && tar -cf "$STUB_REMOTE/1000.1.tar.zst" appendonlydir users.acl)
+  }
+
   prepare_remote_dir() {
     write_backup_tree "$STUB_REMOTE/1000.1.dir"
-  }
-
-  # Real RESP framing, with NUL bytes in the value written before the restore
-  # time and a NUL-free write after it.
-  write_binary_incr() {
-    local incr="$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof"
-    printf '#TS:1100\r\n*3\r\n$3\r\nSET\r\n$3\r\nbin\r\n$5\r\na\000b\000c\r\n' > "$work_dir/expected.aof"
-    { cat "$work_dir/expected.aof"; printf '#TS:1600\r\n*3\r\n$3\r\nSET\r\n$4\r\nlate\r\n$1\r\n1\r\n'; } > "$incr"
-  }
-
-  restored_incr_matches_expected() {
-    cmp "$work_dir/expected.aof" "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
   }
 
   restored_incr() {
@@ -367,6 +470,99 @@ EOF
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
+    It "uploads a new seq whole even when its files are older than the last upload round"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      # A rewrite that started before round 1 (now is 2000) and finished after it:
+      # its base (ctime 1000) and idle incr (mtime 1500) are older than round 1.
+      export STUB_ON_SLEEP='
+        d="$DATA_DIR/appendonlydir"
+        echo base-2 > "$d/appendonly.aof.2.base.rdb"
+        echo incr-2 > "$d/appendonly.aof.2.incr.aof"
+        echo "file appendonly.aof.2.incr.aof seq 2 type i" > "$d/appendonly.aof.manifest"'
+      export STUB_ROUNDS=2
+      When run run_backup
+      The status should be success
+      The output should include "Archived files"
+      The path "$STUB_REMOTE/1000.1.tar.zst" should be exist
+      The path "$STUB_REMOTE/1000.2.dir/appendonlydir/appendonly.aof.2.base.rdb" should be exist
+      The path "$STUB_REMOTE/1000.2.dir/appendonlydir/appendonly.aof.2.incr.aof" should be exist
+      The path "$STUB_REMOTE/1000.2.dir/users.acl" should be exist
+    End
+
+    It "purges expired archives but keeps the live seq's files"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      echo "old archive" > "$STUB_REMOTE/900.1.tar.zst"
+      export DP_TTL_SECONDS=60
+      export PURGE_INTERVAL_SECONDS=0
+      When run run_backup
+      The status should be success
+      The output should include "Cleanup expired aof files: 900.1.tar.zst"
+      The path "$STUB_REMOTE/900.1.tar.zst" should not be exist
+      The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.base.rdb" should be exist
+      The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+    End
+
+    It "reports the window up to what the last complete round archived"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      When run run_backup
+      The status should be success
+      The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      # the round started at 2000: up to 1999, less the AOF write delay
+      The contents of file "$DP_BACKUP_INFO_FILE" should include '"timeRange":{"start":"T1000","end":"T1996"}'
+    End
+
+    It "publishes a later round's end while the size stays the same"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      export STATUS_INTERVAL_SECONDS=0
+      export STUB_ROUNDS=2
+      # the second round starts at 2020 and uploads nothing new
+      export STUB_ON_SLEEP='echo 2020 > "$STUB_CLOCK_FILE"'
+      When run run_backup
+      The status should be success
+      The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The contents of file "$DP_BACKUP_INFO_FILE" should include '"timeRange":{"start":"T1000","end":"T2016"}'
+    End
+
+    It "reports no window while the archive starts after the covered end"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      # the base was created at 1000 and the round started at 1002: it covers up to 998
+      echo 1002 > "$STUB_CLOCK_FILE"
+      When run run_backup
+      The status should be success
+      The output should include "save_backup_status: the archives cover no time yet"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
+    It "reports no window while no round has archived everything"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      export STUB_PUSH_FAIL_ONCE="appendonly.aof.1.base.rdb"
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: update_aof_file: failed to upload"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
+    It "leaves the status alone when the archives cannot be listed"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      export STUB_LIST_RC=1
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: save_backup_status: failed to list the archives, retrying next round"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
     It "retries a failed upload of the live AOF on the next round"
       prepare_rewritten_aof
       echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
@@ -407,38 +603,35 @@ SET a 1"
       The path "$DATA_DIR/.kb-data-protection" should not be exist
     End
 
-    It "keeps NUL bytes in the AOF it truncates"
+    # The cut itself is redis-check-aof's: it parses the RESP framing, so values
+    # holding NUL bytes or a "\n#TS:<t>" are neither cut at nor altered.
+    It "has redis-check-aof cut the restored AOF's manifest at the restore time"
       prepare_remote_dir
-      write_binary_incr
       export DP_RESTORE_TIME=restore-at-1500
       When run run_restore
       The status should be success
-      The output should include "Truncate aof file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof at byte 43"
+      The output should include "Truncate aof: $DATA_DIR/appendonlydir/appendonly.aof.manifest to 1500"
+      The contents of file "$STUB_CHECK_AOF_ARGS" should equal "--truncate-to-timestamp 1500 $DATA_DIR/appendonlydir/appendonly.aof.manifest"
       The output should include "Restore complete."
-      Assert restored_incr_matches_expected
     End
 
-    It "leaves the AOF alone when nothing in it is after the restore time"
+    It "fails rather than restore an archive without an AOF manifest uncut"
       prepare_remote_dir
-      write_binary_incr
-      cp "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" "$work_dir/expected.aof"
-      export DP_RESTORE_TIME=restore-at-1700
-      When run run_restore
-      The status should be success
-      The output should not include "Truncate aof file"
-      The output should include "Restore complete."
-      Assert restored_incr_matches_expected
-    End
-
-    It "fails rather than restore an AOF it cannot read uncut"
-      prepare_remote_dir
-      # a grep that cannot read the file, as on an I/O error
-      printf '#!/bin/sh\necho "grep: read error" >&2\nexit 2\n' > "$stub_dir/grep"
-      chmod +x "$stub_dir/grep"
+      rm "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.manifest"
       export DP_RESTORE_TIME=restore-at-1500
       When run run_restore
       The status should be failure
-      The output should include "ERROR: Failed to read aof file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The output should include "ERROR: No AOF manifest under $DATA_DIR to truncate"
+      The output should not include "Restore complete."
+    End
+
+    It "fails rather than restore an AOF redis-check-aof cannot read uncut"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1500
+      export STUB_CHECK_AOF_RC=1
+      When run run_restore
+      The status should be failure
+      The output should include "ERROR: Failed to truncate aof: $DATA_DIR/appendonlydir/appendonly.aof.manifest"
       The output should not include "Restore complete."
     End
 
@@ -512,6 +705,238 @@ SET a 1"
       The output should include "ERROR: Unknown aof_file type: 1000.1.bad"
       The output should not include "Restore complete."
       The path "$DATA_DIR/.kb-data-protection" should be exist
+    End
+  End
+
+  Describe "pitr-backup.sh in a sharded cluster"
+    It "publishes its shard's range and reports the time every shard covers"
+      prepare_sharded_backup
+      When run run_backup
+      The status should be success
+      The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The path "$STUB_REMOTE/fdb-aof/shard-a/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
+      # the archive starts at its base; the round that started at 2000 covers up to 1999,
+      # less the 3s the server may hold back its AOF write
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 2000 a1"
+      The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
+      The result of function backup_info should include '{"shard":"shard-a","start":"T1000","end":"T1996"}'
+      The result of function backup_info should include '{"shard":"shard-b","start":"T900","end":"T1800"}'
+      The result of function backup_info should include '{"shard":"shard-c","start":"T1200","end":"T1950"}'
+    End
+
+    It "ignores the range of a shard removed by a scale-in"
+      prepare_sharded_backup
+      # a fourth shard, gone from the cluster: its primary owns no slots, even
+      # while its range is still fresh
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
+      echo "800 1500 1995 x9" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "ignoring shard-d, whose primary x9 owns no slots"
+      The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
+      The result of function backup_info should not include '"shard":"shard-d"'
+    End
+
+    It "publishes its primary's id when it archives a replica"
+      prepare_sharded_backup
+      export STUB_MYSELF_REPLICA=1
+      When run run_backup
+      The status should be success
+      The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 2000 c1"
+    End
+
+    It "keeps its last range when the archive listing fails"
+      prepare_sharded_backup
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-a"
+      echo "1000 1996 1990 a1" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
+      export STUB_LIST_RC=1
+      When run run_backup
+      The status should be success
+      The output should include "save_cluster_backup_status: failed to list the shards"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 1990 a1"
+    End
+
+    It "leaves the status alone when the cluster's shards cannot be read"
+      prepare_sharded_backup
+      export STUB_CLUSTER_NODES_ERR=1
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: save_cluster_backup_status: cannot read the cluster's shards"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
+    It "counts a failed primary that still owns slots as a shard"
+      prepare_sharded_backup
+      export STUB_FAILED_PRIMARY_SLOTS=0-10
+      When run run_backup
+      The status should be success
+      The output should include "3 of 4 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "reports no coverage once retention has removed every archive"
+      prepare_sharded_backup
+      # nothing left to archive or restore: no live AOF, no archive in the repo
+      rm "$DATA_DIR"/appendonlydir/appendonly.aof.1.*
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-a"
+      echo "1000 1996 1990 a1" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "update_aof_file:"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "0 0 2000 a1"
+      The output should include "2 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "withdraws the window while a shard has archived nothing"
+      prepare_sharded_backup
+      echo "0 0 1990 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "2 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "does not let a removed shard's range stand in for a live shard with none"
+      prepare_sharded_backup
+      rm "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      # removed by a scale-in moments ago: still fresh, and covering the time
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
+      echo "800 1900 1995 x9" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "ignoring shard-d, whose primary x9 owns no slots"
+      The output should include "2 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "withdraws the window when a live shard's archiver stops publishing"
+      prepare_sharded_backup
+      echo "1200 1950 1500 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "ignoring shard-c, whose archiver last published at 1500"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "withdraws the window when the shards share no time"
+      prepare_sharded_backup
+      echo "1900 1950 1990 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "they share no time yet"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "claims no time for its shard while the live AOF cannot be uploaded"
+      prepare_sharded_backup
+      export STUB_PUSH_RC=42
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: update_aof_file: failed to upload"
+      The path "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should not be exist
+      The result of function backup_info should include '"timeRange":null'
+    End
+  End
+
+  Describe "pitr-restore-cluster-users.sh"
+    It "restores only users.acl from a tar.zst archive"
+      prepare_remote_archive_as_backed_up
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore_cluster_users
+      The status should be success
+      The output should include "Restored users.acl from 1000.1.tar.zst"
+      The contents of file "$DATA_DIR/users.acl" should equal "user default on nopass ~* +@all"
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.manifest" should not be exist
+      The path "$DATA_DIR/.kb-data-protection" should not be exist
+    End
+
+    It "restores only users.acl from a .dir"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore_cluster_users
+      The status should be success
+      The output should include "Restored users.acl from 1000.1.dir/"
+      The contents of file "$DATA_DIR/users.acl" should equal "user default on nopass ~* +@all"
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.manifest" should not be exist
+    End
+
+    It "fails when no archive starts at or before the restore time"
+      prepare_remote_archive_as_backed_up
+      export DP_RESTORE_TIME=restore-at-500
+      When run run_restore_cluster_users
+      The status should be failure
+      The output should include "ERROR: No backup found for the given restore time: restore-at-500"
+      The path "$DATA_DIR/users.acl" should not be exist
+    End
+  End
+
+  Describe "pitr-restore-cluster-data.sh"
+    # the stub server's "RDB" is the AOF it was given
+    rebuilt_rdb() {
+      cat "$DATA_DIR/kb-dp-dump.rdb"
+    }
+
+    It "replays the AOF cut at the restore time and leaves its RDB for restore-cluster.sh"
+      prepare_remote_archive_as_backed_up
+      touch "$FALKORDB_MODULE"
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore_cluster_data
+      The status should be success
+      The output should include "Replayed 1000.1.tar.zst to restore-at-1500 in $DATA_DIR/kb-dp-dump.rdb"
+      The result of function rebuilt_rdb should equal "#TS:1100
+SET a 1"
+      The contents of file "$STUB_SERVER_ARGS" should include "--appendonly yes --appenddirname appendonlydir --appendfilename appendonly.aof --dbfilename kb-dp-dump.rdb"
+      The contents of file "$STUB_SERVER_ARGS" should include "--loadmodule $FALKORDB_MODULE"
+      The path "$DATA_DIR/.kb-pitr-restore" should not be exist
+      The path "$DATA_DIR/users.acl" should not be exist
+    End
+
+    It "kills a server that does not stop on TERM"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1500
+      export STUB_SERVER_IGNORE_TERM=1
+      export PITR_STOP_TIMEOUT_SECONDS=0
+      # the watchdog sleeps before it kills; do not let the stub end it instead
+      export STUB_ROUNDS=1000000
+      When run run_restore_cluster_data
+      The status should be success
+      The output should include "Replayed 1000.1.dir/ to restore-at-1500"
+      The path "$DATA_DIR/kb-dp-dump.rdb" should be exist
+    End
+
+    It "fails when the server is still loading at the deadline"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1500
+      export STUB_PING="LOADING Redis is loading the dataset in memory"
+      export PITR_LOAD_TIMEOUT_SECONDS=0
+      When run run_restore_cluster_data
+      The status should be failure
+      The output should include "ERROR: The server replaying 1000.1.dir/ did not load the AOF within 0s"
+      The path "$DATA_DIR/kb-dp-dump.rdb" should not be exist
+    End
+
+    It "fails when the server exits instead of loading the AOF"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1500
+      export STUB_PING="Could not connect to Redis"
+      export STUB_SERVER_RC=1
+      # the wait loop sleeps while the server starts; do not let the stub end the run
+      export STUB_ROUNDS=1000000
+      When run run_restore_cluster_data
+      The status should be failure
+      The output should include "ERROR: The server replaying 1000.1.dir/ exited before it loaded the AOF"
+      The path "$DATA_DIR/kb-dp-dump.rdb" should not be exist
+    End
+
+    It "fails when no archive starts at or before the restore time"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-500
+      When run run_restore_cluster_data
+      The status should be failure
+      The output should include "ERROR: No backup found for the given restore time: restore-at-500"
+      The path "$STUB_SERVER_ARGS" should not be exist
     End
   End
 End

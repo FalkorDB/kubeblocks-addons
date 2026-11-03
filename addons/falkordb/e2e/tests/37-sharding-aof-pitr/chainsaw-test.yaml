@@ -1,0 +1,392 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-aof-pitr
+spec:
+  description: >-
+    Archive a sharded cluster with the `aof` method and restore it to a point in time.
+
+    Every shard has its own primary and its own AOF, so the continuous backup is
+    one archiver per shard, all reporting into one Backup. The Backup may only
+    offer the times every shard has archived, and a restore has to replay every
+    shard to the same restoreTime: a shard that replays its whole log, or one
+    that is restored from the wrong shard's archive, leaves a cluster that comes
+    up Running and answers for every slot while holding writes from after the
+    target, or none of a shard's writes from before it.
+
+    So the writes on both sides of the target are spread over every shard, and
+    the source confirms each shard holds some of each before the restore.
+  steps:
+    - name: create the source sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shpitr
+            tail: 100
+
+    - name: the cluster forms and owns every slot
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_assert_shard_count "$NAMESPACE" fdb-shpitr shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shpitr shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
+      catch:
+        - events: {}
+
+    - name: turn on continuous aof archiving
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # A sharding's policy fans out to one target per shard, so the
+              # continuous Backup it starts runs one archiver per shard.
+              policy="$(kubectl get backuppolicy -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-shpitr" \
+                -o jsonpath='{.items[0].metadata.name}')"
+              targets="$(kubectl get backuppolicy -n "$NAMESPACE" "$policy" \
+                -o jsonpath='{range .spec.targets[*]}{.name}{"\n"}{end}' | grep -c . || true)"
+              if [ "$targets" -lt 3 ]; then
+                echo "expected one backup target per shard in $policy, got $targets" >&2
+                kubectl get backuppolicy -n "$NAMESPACE" "$policy" -o yaml >&2
+                exit 1
+              fi
+
+              schedule="$(kubectl get backupschedule -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=fdb-shpitr" \
+                -o jsonpath='{.items[0].metadata.name}')"
+              if [ -z "$schedule" ]; then
+                echo "no BackupSchedule was generated for fdb-shpitr" >&2
+                kubectl get backupschedule -n "$NAMESPACE" >&2
+                exit 1
+              fi
+
+              methods="$(kubectl get backupschedule -n "$NAMESPACE" "$schedule" \
+                -o jsonpath='{range .spec.schedules[*]}{.backupMethod}{"\n"}{end}')"
+              index=0
+              found=""
+              for method in $methods; do
+                if [ "$method" = "aof" ]; then
+                  found="$index"
+                  break
+                fi
+                index=$((index + 1))
+              done
+              if [ -z "$found" ]; then
+                echo "the sharded schedule has no aof method: $methods" >&2
+                exit 1
+              fi
+
+              kubectl patch backupschedule -n "$NAMESPACE" "$schedule" --type=json \
+                -p "[{\"op\":\"replace\",\"path\":\"/spec/schedules/$found/enabled\",\"value\":true}]"
+      catch:
+        - events: {}
+
+    - name: every shard archives and the backup reports their common window
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The window is only reported once all three shards have archived,
+              # and each shard's own range is listed in status.extras.
+              fdb_retry "the continuous backup to report every shard's range" bash -c '
+                name=$(kubectl get backup -n "'"$NAMESPACE"'" \
+                  -l dataprotection.kubeblocks.io/backup-type=Continuous \
+                  -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)
+                [ -n "$name" ] || { echo "no continuous backup yet" >&2; exit 1; }
+                end=$(kubectl get backup -n "'"$NAMESPACE"'" "$name" \
+                  -o jsonpath="{.status.timeRange.end}" 2>/dev/null)
+                [ -n "$end" ] || { echo "$name has no timeRange.end yet" >&2; exit 1; }
+                shards=$(kubectl get backup -n "'"$NAMESPACE"'" "$name" \
+                  -o jsonpath="{range .status.extras[*]}{.shard}{\"\n\"}{end}" | grep -c . || true)
+                [ "$shards" -eq 3 ] || { echo "$name lists $shards shard ranges, expected 3" >&2; exit 1; }
+                echo "continuous backup $name covers every shard up to $end"
+              '
+      catch:
+        - events: {}
+        - script:
+            content: kubectl get backup -n "$NAMESPACE" -o yaml
+        - podLogs:
+            selector: app.kubernetes.io/managed-by=kubeblocks-dataprotection
+            tail: 100
+
+    - name: write on every shard before and after a recovery target
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shpitr shard)"
+              state="$(fdb_state_dir)"
+
+              # 100 keys hash into slots owned by all three shards.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shpitr-early 100
+              fdb_write_binary_key "$NAMESPACE" "$pod" e2e-shpitr-bin
+              fdb_cli "$NAMESPACE" "$pod" GRAPH.QUERY e2e-shpitr-graph \
+                "UNWIND range(1, 10) AS i CREATE (:Item {i: i})" >/dev/null
+              items="$(fdb_graph_node_count "$NAMESPACE" "$pod" e2e-shpitr-graph Item)"
+              if [ "$items" != "10" ]; then
+                echo "e2e-shpitr-graph holds $items Item nodes after the early write, expected 10" >&2
+                exit 1
+              fi
+
+              # The target is read from inside the cluster: it is compared with
+              # the #TS: stamps the shards wrote, not with this machine's clock.
+              # The shell has no pipefail, so kubectl's status is checked before
+              # the \r is stripped, and an empty time fails rather than letting
+              # the window comparisons below pass without waiting.
+              cluster_time() {
+                local t
+                t="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
+                  date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+                t="$(printf '%s' "$t" | tr -d '\r')"
+                case "$t" in
+                  ????-??-??T??:??:??Z) echo "$t" ;;
+                  *) echo "read [$t] as the cluster time" >&2; return 1 ;;
+                esac
+              }
+
+              sleep 15
+              target="$(cluster_time)" || exit 1
+              echo "$target" > "$state/restore-time"
+              echo "recovery target is $target"
+              sleep 15
+
+              # Everything from here on must NOT come back, on any shard.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shpitr-late 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shpitr-late 100
+              fdb_cli "$NAMESPACE" "$pod" GRAPH.QUERY e2e-shpitr-graph \
+                "UNWIND range(11, 15) AS i CREATE (:Item {i: i})" >/dev/null
+              items="$(fdb_graph_node_count "$NAMESPACE" "$pod" e2e-shpitr-graph Item)"
+              if [ "$items" != "15" ]; then
+                echo "e2e-shpitr-graph holds $items Item nodes after the late write, expected 15" >&2
+                exit 1
+              fi
+
+              # The restore waits for the archive to cover this, so every shard
+              # has shipped its late writes and only the cut can keep them out.
+              sleep 1
+              late_done="$(cluster_time)" || exit 1
+              echo "$late_done" > "$state/late-done"
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: ""
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # Without -c each pod answers only for the keys it holds, so this
+              # proves every shard has writes on both sides of the target, and
+              # the restore below is checked against every shard's archive.
+              for p in $(fdb_sharding_pods "$NAMESPACE" fdb-shpitr shard); do
+                early="$(fdb_cli "$NAMESPACE" "$p" --scan --pattern 'e2e-shpitr-early:*' | grep -c . || true)"
+                late="$(fdb_cli "$NAMESPACE" "$p" --scan --pattern 'e2e-shpitr-late:*' | grep -c . || true)"
+                echo "$p holds $early early and $late late keys"
+                if [ "$early" -eq 0 ] || [ "$late" -eq 0 ]; then
+                  echo "$p does not hold writes from both sides of the target" >&2
+                  exit 1
+                fi
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shpitr
+            tail: 100
+
+    - name: the window catches up past the late writes
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              target="$(cat "$(fdb_state_dir)/restore-time")"
+              late_done="$(cat "$(fdb_state_dir)/late-done")"
+
+              # timeRange.end is the earliest of the shards' archived ends, so
+              # this also waits for the slowest shard. Waiting past the late
+              # writes, not just the target, means every shard's archive holds
+              # them: a restore that ignored restoreTime would bring them back.
+              fdb_retry "the archive to cover $late_done on every shard" bash -c '
+                name=$(kubectl get backup -n "'"$NAMESPACE"'" \
+                  -l dataprotection.kubeblocks.io/backup-type=Continuous \
+                  -o jsonpath="{.items[0].metadata.name}")
+                start=$(kubectl get backup -n "'"$NAMESPACE"'" "$name" \
+                  -o jsonpath="{.status.timeRange.start}")
+                end=$(kubectl get backup -n "'"$NAMESPACE"'" "$name" \
+                  -o jsonpath="{.status.timeRange.end}")
+                [ -n "$end" ] || { echo "no timeRange.end yet" >&2; exit 1; }
+                # RFC3339 in UTC sorts lexicographically.
+                if [ "$end" \< "'"$late_done"'" ]; then
+                  echo "the shards only share up to $end, the late writes finished at '"$late_done"'" >&2
+                  exit 1
+                fi
+                if [ "'"$target"'" \< "$start" ]; then
+                  echo "the window starts at $start, after the target '"$target"'" >&2
+                  exit 1
+                fi
+                echo "the shards share $start to $end, around the target"
+              '
+      catch:
+        - events: {}
+        - script:
+            content: kubectl get backup -n "$NAMESPACE" -o yaml
+
+    - name: restore to the recovery target
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              target="$(cat "$(fdb_state_dir)/restore-time")"
+              continuous="$(kubectl get backup -n "$NAMESPACE" \
+                -l dataprotection.kubeblocks.io/backup-type=Continuous \
+                -o jsonpath='{.items[0].metadata.name}')"
+              if [ -z "$continuous" ]; then
+                echo "no continuous backup to restore from" >&2
+                exit 1
+              fi
+              echo "restoring from continuous backup $continuous to $target"
+
+              # Keyed by the sharding name; KubeBlocks maps each new shard onto
+              # one shard's archive, and every shard gets the same restoreTime.
+              kubectl apply -n "$NAMESPACE" -f - <<EOF
+              apiVersion: apps.kubeblocks.io/v1
+              kind: Cluster
+              metadata:
+                name: fdb-shpitr-r
+                annotations:
+                  kubeblocks.io/restore-from-backup: '{"shard":{"name":"$continuous","namespace":"$NAMESPACE","volumeRestorePolicy":"Parallel","restoreTime":"$target"}}'
+              spec:
+                terminationPolicy: WipeOut
+                clusterDef: falkordb
+                topology: cluster
+                shardings:
+                  - name: shard
+                    shardingDef: falkordb-cluster
+                    shards: 3
+                    template:
+                      name: falkordb
+                      disableExporter: true
+                      replicas: 1
+                      resources:
+                        limits:
+                          cpu: '0.5'
+                          memory: 512Mi
+                        requests:
+                          cpu: 100m
+                          memory: 512Mi
+                      volumeClaimTemplates:
+                        - name: data
+                          spec:
+                            accessModes:
+                              - ReadWriteOnce
+                            resources:
+                              requests:
+                                storage: 1Gi
+              EOF
+        - assert:
+            file: assert-restored-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shpitr-r
+            tail: 200
+        - script:
+            content: kubectl get restore -n "$NAMESPACE" -o yaml
+      cleanup:
+        # Script-created, so chainsaw does not track it; see 12-sharding-backup-restore.
+        - script:
+            content: |
+              kubectl delete cluster fdb-shpitr-r -n "$NAMESPACE" \
+                --ignore-not-found --wait=true --timeout=5m
+
+    - name: every restored shard stops exactly at the recovery target
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-shpitr-r shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shpitr-r shard)"
+              fdb_retry "the restored cluster to cover all 16384 slots" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every restored pod to see one cluster of 3 primaries" \
+                fdb_assert_single_cluster "$NAMESPACE" fdb-shpitr-r shard 3
+
+              # Every early key, whichever source shard archived it.
+              fdb_retry "the early keys of every shard" \
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-shpitr-early 100
+              fdb_verify_binary_key "$NAMESPACE" "$pod" e2e-shpitr-bin
+              items="$(fdb_graph_node_count "$NAMESPACE" "$pod" e2e-shpitr-graph Item)"
+              if [ "$items" != "10" ]; then
+                echo "e2e-shpitr-graph holds $items Item nodes, expected the 10 created before the target" >&2
+                exit 1
+              fi
+
+              # And no late key, from any shard. -c follows each key to its owner.
+              # Any reply but 0 or 1 (an error, CLUSTERDOWN, no reply) fails the
+              # step: counting only 1s would pass without proving anything.
+              if ! survivors="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
+                sh -c 'i=0; n=0
+                  while [ "$i" -lt 100 ]; do
+                    r="$(REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" redis-cli -c EXISTS "e2e-shpitr-late:$i" | tr -d "\r")"
+                    case "$r" in
+                    0) ;;
+                    1) n=$((n + 1)) ;;
+                    *) echo "EXISTS e2e-shpitr-late:$i replied [$r]" >&2; exit 1 ;;
+                    esac
+                    i=$((i + 1))
+                  done
+                  echo "$n"')"; then
+                echo "could not check every late key on the restored cluster" >&2
+                exit 1
+              fi
+              survivors="$(printf '%s' "$survivors" | tr -d '\r')"
+              if [ "$survivors" != "0" ]; then
+                echo "$survivors of 100 late keys survived a restore to $(cat "$(fdb_state_dir)/restore-time")" >&2
+                echo "some shard was replayed past the recovery target" >&2
+                exit 1
+              fi
+              echo "writes made after the recovery target are absent on every shard"
+
+              # The restored cluster takes writes into every slot range.
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shpitr-post 100
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shpitr-post 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shpitr-r
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

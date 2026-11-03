@@ -63,11 +63,13 @@ function DP_pull_directory() {
 # Clean up expired logfiles.
 # Default interval is 60s
 # Default rootPath is /
+# Files whose path contains the optional 5th argument are kept.
 function DP_purge_expired_files() {
   local currentUnix="${1:?missing current unix}"
   local last_purge_time="${2:?missing last_purge_time}"
   local root_path=${3:-"/"}
   local interval_seconds=${4:-60}
+  local keep=${5:-}
   local diff_time=$((${currentUnix} - ${last_purge_time}))
   if [[ -z ${DP_TTL_SECONDS} || ${diff_time} -lt ${interval_seconds} ]]; then
     return
@@ -75,7 +77,21 @@ function DP_purge_expired_files() {
   expiredUnix=$((${currentUnix} - ${DP_TTL_SECONDS}))
   files=$(datasafed list -f --recursive --older-than ${expiredUnix} ${root_path})
   for file in ${files}; do
+    if [ -n "${keep}" ] && [[ "${file}" == *"${keep}"* ]]; then
+      continue
+    fi
     datasafed rm ${file}
     echo ${file}
   done
+}
+
+# List the aof archives at the root of the backup repo, named
+# ${base_file_ctime}.${seq}.dir/ or ${base_file_ctime}.${seq}.tar.zst, and
+# nothing else the repo holds next to them (such as the archive range file of
+# a sharded backup).
+# Returns non-zero when the listing fails, which a pipeline into the filter would hide.
+function DP_pitr_list_archives() {
+  local listing
+  listing=$(datasafed list /) || return 1
+  awk '/^[0-9]+\.[0-9]+\./' <<<"${listing}"
 }
