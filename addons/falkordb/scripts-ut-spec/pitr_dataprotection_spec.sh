@@ -190,7 +190,7 @@ EOF
     unset REDIS_CLI_TLS_CMD DP_TTL_SECONDS DP_RESTORE_KEY_PATTERNS DP_RESTORE_TIME \
       STUB_PUSH_RC STUB_PULL_RC STUB_RM_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS \
       MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS \
-      STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS
+      STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -654,6 +654,20 @@ SET a 1"
       The result of function backup_info should include '"timeRange":null'
     End
 
+    It "removes its range once retention has removed every archive"
+      prepare_sharded_backup
+      # nothing left to archive or restore: no live AOF, no archive in the repo
+      rm "$DATA_DIR"/appendonlydir/appendonly.aof.1.*
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-a"
+      echo "1000 1999" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "update_aof_file:"
+      The path "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should not be exist
+      The output should include "2 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
     It "withdraws the window while a shard has archived nothing"
       prepare_sharded_backup
       rm "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
@@ -734,6 +748,17 @@ SET a 1"
       The contents of file "$STUB_SERVER_ARGS" should include "--loadmodule $FALKORDB_MODULE"
       The path "$DATA_DIR/.kb-pitr-restore" should not be exist
       The path "$DATA_DIR/users.acl" should not be exist
+    End
+
+    It "fails when the server is still loading at the deadline"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1500
+      export STUB_PING="LOADING Redis is loading the dataset in memory"
+      export PITR_LOAD_TIMEOUT_SECONDS=0
+      When run run_restore_cluster_data
+      The status should be failure
+      The output should include "ERROR: The server replaying 1000.1.dir/ did not load the AOF within 0s"
+      The path "$DATA_DIR/kb-dp-dump.rdb" should not be exist
     End
 
     It "fails when the server exits instead of loading the AOF"

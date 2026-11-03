@@ -273,8 +273,21 @@ CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
 global_cluster_status_time=0
 
 function publish_archive_range() {
-  local start=$(DP_pitr_list_archives | awk -F '.' '{print $1}' | sort -n | head -n 1)
-  if [ -z "$start" ] || [ "${global_archived_until}" -le 0 ]; then
+  local archives start
+  if ! archives=$(DP_pitr_list_archives); then
+    return
+  fi
+  start=$(awk -F '.' '{print $1}' <<<"${archives}" | sort -n | head -n 1)
+  if [ -z "$start" ]; then
+    # Retention has removed every archive of this shard. A range left behind
+    # would keep the shard counted and the window offered with nothing to restore.
+    if datasafed list / | grep -Fxq "${ARCHIVE_RANGE_FILE}" &&
+      ! datasafed rm "${ARCHIVE_RANGE_FILE}"; then
+      DP_error_log "publish_archive_range: failed to remove ${ARCHIVE_RANGE_FILE} of a shard with no archives, retrying next round"
+    fi
+    return
+  fi
+  if [ "${global_archived_until}" -le 0 ]; then
     return
   fi
   if ! echo "${start} ${global_archived_until}" | datasafed push - "${ARCHIVE_RANGE_FILE}"; then
