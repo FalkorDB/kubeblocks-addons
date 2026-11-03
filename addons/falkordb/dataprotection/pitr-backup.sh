@@ -236,10 +236,15 @@ function update_aof_file() {
 
 function purge_expired_files() {
   local current_unix=$(date +%s)
+  local interval_seconds=${PURGE_INTERVAL_SECONDS:-600}
+  # the same checks DP_purge_expired_files makes, before the prefix below reads the base file
+  if [ -z "${DP_TTL_SECONDS}" ] || [ $((current_unix - global_last_purge_time)) -lt "${interval_seconds}" ]; then
+    return
+  fi
   # The live seq's base is uploaded once, while its incr keeps being updated, so
   # a seq that lives longer than the TTL would lose its base and be unrestorable.
   local live_dir="$(get_backup_files_prefix "$(aof_base_file "$global_backup_seq")").dir/"
-  info=$(DP_purge_expired_files ${current_unix} ${global_last_purge_time} / "${PURGE_INTERVAL_SECONDS:-600}" "${live_dir}")
+  info=$(DP_purge_expired_files ${current_unix} ${global_last_purge_time} / "${interval_seconds}" "${live_dir}")
   if [ ! -z "${info}" ]; then
     global_last_purge_time=${current_unix}
     DP_log "Cleanup expired aof files: ${info}"
