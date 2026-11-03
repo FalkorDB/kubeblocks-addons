@@ -730,6 +730,7 @@ master_host:redis-master"
             echo "secondary"
           fi
         }
+        redis_config_get() { printf 'replica-priority\n100\n'; }
         set_redis_priorities() { echo "set_redis_priorities called"; }
         failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
         When call switchover_with_candidate
@@ -737,6 +738,39 @@ master_host:redis-master"
         The stdout should include "redis2 is already the only primary, nothing to do"
         The stdout should not include "called"
         The stderr should equal ""
+      End
+
+      It "does not take the switchover as done while another pod does not answer"
+        check_redis_role() {
+          case "$1" in
+            redis1) return 1 ;;
+            redis2) echo "primary" ;;
+            *) echo "secondary" ;;
+          esac
+        }
+        redis_config_get() { printf 'replica-priority\n100\n'; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be failure
+        The stderr should include "not in secondary role"
+        The stdout should not include "called"
+      End
+
+      It "does not report success while the candidate keeps the temporary replica-priority"
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        redis_config_get() { printf 'replica-priority\n1\n'; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be failure
+        The stderr should be present
+        The stdout should not include "nothing to do"
+        The stdout should not include "called"
       End
 
       It "still fails when the candidate is a primary but not the only one"
@@ -793,21 +827,49 @@ master_host:redis-master"
       # KubeBlocks may run the action again for an OpsRequest it has already run.
       It "does not fail over again once the primary has left the pod being switched over"
         export KB_SWITCHOVER_CURRENT_NAME="redis1"
-        check_redis_kernel_status() { echo "redis2.redis-headless.default.svc.cluster.local"; }
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
         failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
         When call switchover_without_candidate
         The status should be success
-        The stdout should include "redis1 is no longer the primary (redis2.redis-headless.default.svc.cluster.local is), nothing to do"
+        The stdout should include "redis1 is no longer the primary (redis2 is), nothing to do"
         The stdout should not include "called"
       End
 
       It "fails over when the pod being switched over is still the primary"
         export KB_SWITCHOVER_CURRENT_NAME="redis1"
-        check_redis_kernel_status() { echo "redis1.redis-headless.default.svc.cluster.local"; }
+        check_redis_role() {
+          if [ "$1" = "redis1" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
         failover_with_writes_paused() { echo "failover_with_writes_paused $1"; }
         When call switchover_without_candidate
         The status should be success
-        The stdout should include "failover_with_writes_paused redis1.redis-headless.default.svc.cluster.local"
+        The stdout should include "failover_with_writes_paused redis1"
+      End
+
+      It "does not take the switchover as done while a pod does not answer"
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        check_redis_role() {
+          case "$1" in
+            redis1) return 1 ;;
+            redis2) echo "primary" ;;
+            *) echo "secondary" ;;
+          esac
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused $1"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stdout should not include "nothing to do"
+        The stdout should include "failover_with_writes_paused redis2"
       End
     End
 

@@ -123,6 +123,24 @@ check_redis_kernel_status() {
   return 0
 }
 
+# The one primary when every data pod answers and exactly one of them is primary.
+# Unlike check_redis_kernel_status it fails when a pod does not answer, since that
+# pod may be a primary too: a repeated switchover is taken as done only on this.
+only_primary_of_all_pods() {
+  local role primary="" redis_pod_fqdn
+  local -a redis_pod_fqdn_list
+  IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
+  for redis_pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
+    role=$(check_redis_role "$redis_pod_fqdn" "$redis_service_port") || return 1
+    if [[ "$role" == "primary" ]]; then
+      [[ -z "$primary" ]] || return 1
+      primary="$redis_pod_fqdn"
+    fi
+  done
+  [[ -n "$primary" ]] || return 1
+  echo "$primary"
+}
+
 check_switchover_result() {
   local expected_master="$1"
   local initial_master="$2"
@@ -668,10 +686,19 @@ switchover_with_candidate() {
   candidate_role=$(check_redis_role "$KB_SWITCHOVER_CANDIDATE_FQDN" "$redis_service_port")
   # KubeBlocks can run the action a second time for the same OpsRequest, before
   # the role labels catch up with the first run; that run has already succeeded.
-  if [[ "$candidate_role" == "primary" ]] && current_master=$(check_redis_kernel_status) &&
+  # It is done only when every pod answers with the candidate as the one primary
+  # and the candidate no longer has the temporary replica-priority 1 that a run
+  # sets and then restores: a run that could not restore it is not a success.
+  if [[ "$candidate_role" == "primary" ]] && current_master=$(only_primary_of_all_pods) &&
     [[ "$current_master" == "$KB_SWITCHOVER_CANDIDATE_FQDN"* ]]; then
-    echo "$KB_SWITCHOVER_CANDIDATE_FQDN is already the only primary, nothing to do"
-    return 0
+    local candidate_priority
+    candidate_priority=$(redis_config_get "$KB_SWITCHOVER_CANDIDATE_FQDN" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG GET replica-priority" | sed -n '2p')
+    if [[ -n "$candidate_priority" && "$candidate_priority" != "1" ]]; then
+      echo "$KB_SWITCHOVER_CANDIDATE_FQDN is already the only primary, nothing to do"
+      return 0
+    fi
+    echo "Error: $KB_SWITCHOVER_CANDIDATE_FQDN is already the only primary, but its replica-priority is '$candidate_priority': an earlier run may not have restored the priorities" >&2
+    return 1
   fi
   if [[ "$candidate_role" != "secondary" ]]; then
     echo "Error: Candidate node $KB_SWITCHOVER_CANDIDATE_FQDN is not in secondary role" >&2
@@ -727,9 +754,12 @@ switchover_without_candidate() {
   initial_master=$(check_redis_kernel_status) || return 1
 
   # A second run of the action for the same OpsRequest would move the primary
-  # back; once it has left the pod KubeBlocks asked to switch over, we are done.
-  if ! is_empty "$KB_SWITCHOVER_CURRENT_NAME" && [[ "${initial_master%%.*}" != "$KB_SWITCHOVER_CURRENT_NAME" ]]; then
-    echo "$KB_SWITCHOVER_CURRENT_NAME is no longer the primary ($initial_master is), nothing to do"
+  # back; once every pod answers and the one primary is no longer the pod
+  # KubeBlocks asked to switch over, we are done.
+  local current_master
+  if ! is_empty "$KB_SWITCHOVER_CURRENT_NAME" && current_master=$(only_primary_of_all_pods) &&
+    [[ "${current_master%%.*}" != "$KB_SWITCHOVER_CURRENT_NAME" ]]; then
+    echo "$KB_SWITCHOVER_CURRENT_NAME is no longer the primary ($current_master is), nothing to do"
     return 0
   fi
 
