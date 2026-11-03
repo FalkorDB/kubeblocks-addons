@@ -283,7 +283,7 @@ function save_cluster_backup_status() {
   local root
   root=$(dirname "${DP_BACKUP_BASE_PATH}")
   local shards targets target range start end
-  local ranges=0 cluster_start=0 cluster_end=0 extras=""
+  local found="" ranges=0 cluster_start=0 cluster_end=0 extras=""
   shards=$(cluster_shard_count)
   if ! targets=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed list -d /); then
     DP_error_log "save_cluster_backup_status: failed to list the shards under ${root}"
@@ -297,11 +297,24 @@ function save_cluster_backup_status() {
     if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ ]]; then
       continue
     fi
+    found="${found}${end} ${start} ${target}"$'\n'
+  done
+  # The directory of a shard removed by a scale-in stays in the repo, its end
+  # stopped when its archiver did. Disabling and enabling the aof method does not
+  # drop it, as the Backup keeps its name and path. So with more ranges than the
+  # cluster has shards, the extra ones are taken to be removed shards: they are
+  # the ranges whose end is oldest, as every live shard's end keeps advancing.
+  while read -r end start target; do
+    [ -n "${target}" ] || continue
+    if [ -n "${shards}" ] && [ "${shards}" -gt 0 ] && [ "${ranges}" -ge "${shards}" ]; then
+      DP_log "save_cluster_backup_status: ignoring ${target}, whose archive stopped at ${end}: the cluster has ${shards} shards"
+      continue
+    fi
     ranges=$((ranges + 1))
     [ "${start}" -gt "${cluster_start}" ] && cluster_start=${start}
     { [ "${cluster_end}" -eq 0 ] || [ "${end}" -lt "${cluster_end}" ]; } && cluster_end=${end}
     extras="${extras:+${extras},}{\"shard\":\"${target}\",\"start\":\"$(date -u -d @"${start}" +%Y-%m-%dT%H:%M:%SZ)\",\"end\":\"$(date -u -d @"${end}" +%Y-%m-%dT%H:%M:%SZ)\"}"
-  done
+  done <<<"$(printf '%s' "${found}" | sort -k1,1nr -k3,3)"
   local total_size
   total_size=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed stat / | grep TotalSize | awk '{print $2}')
   if [ -z "${shards}" ] || [ "${shards}" -eq 0 ] || [ "${ranges}" -lt "${shards}" ] ||

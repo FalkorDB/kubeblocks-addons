@@ -609,6 +609,18 @@ SET a 1"
       The result of function backup_info should include '{"shard":"shard-c","start":"T1200","end":"T1950"}'
     End
 
+    It "ignores the stopped range of a shard removed by a scale-in"
+      prepare_sharded_backup
+      # a fourth shard, gone from the cluster, whose archiver stopped at 1500
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
+      echo "800 1500" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "ignoring shard-d, whose archive stopped at 1500: the cluster has 3 shards"
+      The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
+      The result of function backup_info should not include '"shard":"shard-d"'
+    End
+
     It "withdraws the window while a shard has archived nothing"
       prepare_sharded_backup
       rm "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"

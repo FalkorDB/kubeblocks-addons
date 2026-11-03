@@ -740,6 +740,8 @@ metadata:
 
 Every shard of the new cluster replays one source shard's archive, cut at the same `restoreTime`, and writes the result through the new cluster, so each key lands on the shard that owns its slot in the new cluster. The new cluster should have as many shards as the source.
 
+A shard removed by a scale-in leaves its archive in the `Backup`, and that archive stops advancing. When the `Backup` holds more shard ranges than the cluster has shards, the window leaves out the extra ones with the oldest end, so it keeps following the live shards. Restoring to a time before the scale-in still needs a new cluster with as many shards as the source had then.
+
 > [!NOTE]
 > The shards agree on the restore time to the precision of the AOF timestamps (one second) and of the clocks of the nodes the shards run on.
 > Writes made within the second of `restoreTime` are kept, and a write that touched several shards (for example a client writing keys of different slots one after another) can come back on one shard and not another if it spans that second.
