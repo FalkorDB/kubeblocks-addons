@@ -30,6 +30,9 @@ redis_acl_file_bak="/data/users.acl.bak"
 redis_data_dir="/data"
 retry_times=3
 retry_delay_second=2
+# how long the start waits for a sentinel failing this pod over (see build_replicaof_config)
+sentinel_failover_wait_max_attempts=15
+sentinel_failover_wait_delay_second=2
 service_port=${SERVICE_PORT:-6379}
 redis_server_process_name="redis-server"
 redis_server_launcher_pid=""
@@ -180,11 +183,64 @@ build_redis_tls_config() {
 
 build_replicaof_config() {
   init_or_get_primary_from_redis_sentinel
+  # Sentinel still names this pod while it fails it over after it went away:
+  # starting as master then makes a second primary next to the replica Sentinel
+  # promotes. Wait for the failover, then ask again.
+  if check_current_pod_is_primary && wait_while_sentinel_fails_over_current_pod; then
+    init_or_get_primary_from_redis_sentinel
+  fi
   if check_current_pod_is_primary; then
     return
   else
     echo "replicaof $primary $primary_port" >> $redis_real_conf
   fi
+}
+
+# Prints the flags (such as "master,s_down,o_down") the sentinel holds for the
+# primary it monitors, and nothing when it cannot be asked or monitors none.
+get_sentinel_primary_flags() {
+  local sentinel_pod_fqdn="$1"
+  local output
+  sentinel_service_port=${SENTINEL_SERVICE_PORT:-26379}
+  unset_xtrace_when_ut_mode_false
+  if is_empty "$SENTINEL_PASSWORD"; then
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_pod_fqdn" -p "$sentinel_service_port" sentinel master "$REDIS_COMPONENT_NAME" 2>/dev/null)
+  else
+    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_pod_fqdn" -p "$sentinel_service_port" -a "$SENTINEL_PASSWORD" --no-auth-warning sentinel master "$REDIS_COMPONENT_NAME" 2>/dev/null)
+  fi
+  set_xtrace_when_ut_mode_false
+  # the reply is a list of alternating field names and values
+  echo "$output" | sed -n '/^flags$/{n;p;q;}'
+}
+
+# Returns 0 after waiting while any sentinel is failing over its primary, this
+# pod, and 1 straight away when none is. A sentinel that only sees the pod down
+# is not waited for: when every pod restarts at once that would hand a replica,
+# perhaps behind this pod, the time to be promoted. A failover that has started
+# goes on even if the pod comes back, so it is waited for, though not forever.
+wait_while_sentinel_fails_over_current_pod() {
+  if is_empty "$SENTINEL_COMPONENT_NAME" || is_empty "$SENTINEL_POD_FQDN_LIST"; then
+    return 1
+  fi
+  local attempt sentinel_pod_fqdn flags waited=1
+  for ((attempt = 0; attempt < sentinel_failover_wait_max_attempts; attempt++)); do
+    local failing_over=""
+    for sentinel_pod_fqdn in $(split "$SENTINEL_POD_FQDN_LIST" ","); do
+      flags=$(get_sentinel_primary_flags "$sentinel_pod_fqdn")
+      if [[ ",$flags," == *,failover_in_progress,* ]]; then
+        failing_over="$sentinel_pod_fqdn ($flags)"
+        break
+      fi
+    done
+    if is_empty "$failing_over"; then
+      return $waited
+    fi
+    waited=0
+    echo "sentinel $failing_over is failing over this pod, its primary; waiting for it before starting."
+    sleep_when_ut_mode_false "$sentinel_failover_wait_delay_second"
+  done
+  echo "sentinel is still failing over this pod after $((sentinel_failover_wait_max_attempts * sentinel_failover_wait_delay_second))s; asking it for the primary again."
+  return 0
 }
 
 rebuild_redis_acl_file() {

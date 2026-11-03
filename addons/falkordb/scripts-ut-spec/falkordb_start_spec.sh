@@ -1109,6 +1109,107 @@ Describe "FalkorDB Start Bash Script Tests"
     End
   End
 
+  Describe "get_sentinel_primary_flags()"
+    It "prints the flags field of the sentinel's reply"
+      timeout() { shift; "$@"; }
+      redis-cli() { printf '%s\n' name mymaster ip falkordb-0 flags "master,failover_in_progress" num-slaves 1; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The stdout should eq "master,failover_in_progress"
+    End
+
+    It "prints nothing when the sentinel monitors no primary"
+      timeout() { shift; "$@"; }
+      redis-cli() { echo "ERR No such master with that name"; return 1; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The stdout should eq ""
+    End
+  End
+
+  Describe "wait_while_sentinel_fails_over_current_pod()"
+    setup() {
+      export SENTINEL_COMPONENT_NAME="falkordb-sent"
+      export SENTINEL_POD_FQDN_LIST="sentinel-0,sentinel-1"
+      sentinel_failover_wait_max_attempts=3
+      flags_calls_file="./sentinel-flags-calls"
+      echo 0 > "$flags_calls_file"
+    }
+    cleanup_sentinel_env() {
+      unset SENTINEL_COMPONENT_NAME SENTINEL_POD_FQDN_LIST
+      sentinel_failover_wait_max_attempts=15
+      rm -f "$flags_calls_file"
+    }
+    Before 'setup'
+    After 'cleanup_sentinel_env'
+
+    It "does not wait when no sentinel is failing the pod over"
+      get_sentinel_primary_flags() { echo "master"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should eq ""
+    End
+
+    It "does not wait for a sentinel that only sees the pod down"
+      get_sentinel_primary_flags() { echo "master,s_down,o_down"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+    End
+
+    It "waits while one sentinel is failing the pod over, then returns 0"
+      # the second sentinel runs the failover, which ends after two rounds; the
+      # stub runs in a command substitution, so it counts its calls in a file
+      get_sentinel_primary_flags() {
+        local calls=$(( $(cat "$flags_calls_file") + 1 ))
+        echo "$calls" > "$flags_calls_file"
+        if [ "$1" = "sentinel-1" ] && [ "$calls" -le 4 ]; then echo "master,o_down,failover_in_progress"; else echo "master"; fi
+      }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be success
+      The stdout should include "sentinel sentinel-1 (master,o_down,failover_in_progress) is failing over this pod"
+      The stdout should not include "still failing over"
+    End
+
+    It "stops waiting after the last attempt"
+      get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be success
+      The stdout should include "still failing over this pod after 6s"
+    End
+
+    It "does not wait without sentinel"
+      unset SENTINEL_COMPONENT_NAME
+      get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+    End
+  End
+
+  Describe "build_replicaof_config()"
+    setup() {
+      echo "" > $redis_real_conf
+      resolve_calls=0
+    }
+    Before 'setup'
+    # the first answer names this pod; after the failover it names the other one
+    init_or_get_primary_from_redis_sentinel() {
+      resolve_calls=$((resolve_calls + 1))
+      if [ "$resolve_calls" -eq 1 ]; then primary="this-pod"; else primary="other-pod"; fi
+      primary_port=6379
+    }
+    check_current_pod_is_primary() { [ "$primary" = "this-pod" ]; }
+
+    It "follows the pod sentinel promotes while it was failing this pod over"
+      wait_while_sentinel_fails_over_current_pod() { return 0; }
+      When call build_replicaof_config
+      The contents of file "$redis_real_conf" should include "replicaof other-pod 6379"
+    End
+
+    It "starts as primary when no sentinel is failing it over"
+      wait_while_sentinel_fails_over_current_pod() { return 1; }
+      When call build_replicaof_config
+      The contents of file "$redis_real_conf" should not include "replicaof"
+    End
+  End
+
   Describe "get_peer_replication_role()"
     timeout() { shift; "$@"; }
 
