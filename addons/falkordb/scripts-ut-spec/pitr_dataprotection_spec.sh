@@ -82,7 +82,7 @@ rm)
   rm -rf "${STUB_REMOTE:?}/$1"
   ;;
 stat)
-  echo "TotalSize 0"
+  echo "TotalSize ${STUB_TOTAL_SIZE:-0}"
   ;;
 esac
 EOF
@@ -97,7 +97,8 @@ case "$*" in
 # three primaries own slots; the replica and the failed-over primary do not count.
 # STUB_FAILED_PRIMARY_SLOTS gives the failed primary slots, which it has not handed over yet.
 *"CLUSTER NODES"*)
-  echo "a1 10.0.0.1:6379@16379 ${STUB_MYSELF_REPLICA:-myself,}master - 0 0 1 connected 0-5460"
+  [ -n "$STUB_CLUSTER_NODES_ERR" ] && { echo "NOAUTH Authentication required."; exit 0; }
+  echo "a1 10.0.0.1:6379@16379 $([ -n "$STUB_MYSELF_REPLICA" ] || echo myself,)master - 0 0 1 connected 0-5460"
   echo "b1 10.0.0.2:6379@16379 master - 0 0 2 connected 5461-10922"
   echo "c1 10.0.0.3:6379@16379 master - 0 0 3 connected 10923-16383"
   echo "c2 10.0.0.4:6379@16379 ${STUB_MYSELF_REPLICA:+myself,}slave c1 0 0 3 connected"
@@ -216,7 +217,7 @@ EOF
       MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS \
       STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS \
       PURGE_INTERVAL_SECONDS STUB_SERVER_IGNORE_TERM PITR_STOP_TIMEOUT_SECONDS \
-      STUB_CHECK_AOF_RC STUB_MYSELF_REPLICA STUB_LIST_RC
+      STUB_CHECK_AOF_RC STUB_MYSELF_REPLICA STUB_LIST_RC STUB_TOTAL_SIZE STUB_CLUSTER_NODES_ERR
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -500,6 +501,17 @@ EOF
       The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
+    It "leaves the status alone when the archives cannot be listed"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      export STUB_LIST_RC=1
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: save_backup_status: failed to list the archives, retrying next round"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
     It "retries a failed upload of the live AOF on the next round"
       prepare_rewritten_aof
       echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
@@ -550,6 +562,16 @@ SET a 1"
       The output should include "Truncate aof: $DATA_DIR/appendonlydir/appendonly.aof.manifest to 1500"
       The contents of file "$STUB_CHECK_AOF_ARGS" should equal "--truncate-to-timestamp 1500 $DATA_DIR/appendonlydir/appendonly.aof.manifest"
       The output should include "Restore complete."
+    End
+
+    It "fails rather than restore an archive without an AOF manifest uncut"
+      prepare_remote_dir
+      rm "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.manifest"
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore
+      The status should be failure
+      The output should include "ERROR: No AOF manifest under $DATA_DIR to truncate"
+      The output should not include "Restore complete."
     End
 
     It "fails rather than restore an AOF redis-check-aof cannot read uncut"
@@ -682,6 +704,15 @@ SET a 1"
       The status should be success
       The output should include "save_cluster_backup_status: failed to list the shards"
       The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 1990 a1"
+    End
+
+    It "leaves the status alone when the cluster's shards cannot be read"
+      prepare_sharded_backup
+      export STUB_CLUSTER_NODES_ERR=1
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: save_cluster_backup_status: cannot read the cluster's shards"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
     End
 
     It "counts a failed primary that still owns slots as a shard"

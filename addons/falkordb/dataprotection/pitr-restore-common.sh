@@ -9,8 +9,11 @@ function truncate_aof() {
   local dir=${1:-$DATA_DIR}
   local manifest=$(find "$dir" -type f -name "*.manifest" | head -n 1)
   local restore_time=$(date -d "$DP_RESTORE_TIME" +%s)
+  # pitr-backup.sh archives the manifest with every seq; without it the AOF
+  # cannot be cut, and restored uncut it would ignore the restore time.
   if [ -z "$manifest" ]; then
-    return
+    DP_error_log "No AOF manifest under $dir to truncate"
+    exit 1
   fi
   # redis-check-aof parses the RESP framing, so only a #TS: annotation between
   # commands is a cut point: a value can hold any bytes, a "\n#TS:<t>" or a NUL

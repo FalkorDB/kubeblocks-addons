@@ -263,8 +263,14 @@ function save_backup_status() {
   if [[ -z ${total_size} || ${total_size} -eq 0 || ${total_size} == ${global_old_size} ]]; then
     return
   fi
+  local archives
+  if ! archives=$(DP_pitr_list_archives); then
+    # leave the status, and global_old_size, for the next round to retry
+    DP_error_log "save_backup_status: failed to list the archives, retrying next round"
+    return
+  fi
   global_old_size=${total_size}
-  local start_time=$(DP_pitr_list_archives | awk -F '.' '{print $1}' | sort -n | head -n 1)
+  local start_time=$(awk -F '.' '{print $1}' <<<"${archives}" | sort -n | head -n 1)
   if [ -z "$start_time" ]; then
     start_time=$(date +%s)
     DP_log "save_backup_status: empty start_time from backup repo, use current time"
@@ -341,6 +347,12 @@ function save_cluster_backup_status() {
   now=$(date +%s)
   shard_ids=" $(cluster_shard_ids | tr '\n' ' ')"
   shards=$(printf '%s' "${shard_ids}" | wc -w | tr -d ' ')
+  if [ "${shards}" -eq 0 ]; then
+    # A cluster always has a primary that owns slots: CLUSTER NODES failed or
+    # answered with an error. Leave the status as it is rather than withdraw it.
+    DP_error_log "save_cluster_backup_status: cannot read the cluster's shards, retrying next round"
+    return
+  fi
   if ! targets=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed list -d /); then
     DP_error_log "save_cluster_backup_status: failed to list the shards under ${root}"
     return
