@@ -339,13 +339,24 @@ spec:
               fi
 
               # And no late key, from any shard. -c follows each key to its owner.
-              survivors="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
+              # Any reply but 0 or 1 (an error, CLUSTERDOWN, no reply) fails the
+              # step: counting only 1s would pass without proving anything.
+              if ! survivors="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
                 sh -c 'i=0; n=0
                   while [ "$i" -lt 100 ]; do
-                    [ "$(REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" redis-cli -c EXISTS "e2e-shpitr-late:$i" | tr -d "\r")" = "1" ] && n=$((n + 1))
+                    r="$(REDISCLI_AUTH="$REDIS_DEFAULT_PASSWORD" redis-cli -c EXISTS "e2e-shpitr-late:$i" | tr -d "\r")"
+                    case "$r" in
+                    0) ;;
+                    1) n=$((n + 1)) ;;
+                    *) echo "EXISTS e2e-shpitr-late:$i replied [$r]" >&2; exit 1 ;;
+                    esac
                     i=$((i + 1))
                   done
-                  echo "$n"' | tr -d '\r')"
+                  echo "$n"')"; then
+                echo "could not check every late key on the restored cluster" >&2
+                exit 1
+              fi
+              survivors="$(printf '%s' "$survivors" | tr -d '\r')"
               if [ "$survivors" != "0" ]; then
                 echo "$survivors of 100 late keys survived a restore to $(cat "$(fdb_state_dir)/restore-time")" >&2
                 echo "some shard was replayed past the recovery target" >&2
