@@ -121,7 +121,7 @@ dbctlImage:
   registry: docker.io
   repository: falkordb/kubeblocks-dbctl
   pullPolicy: IfNotPresent
-  tag: v1.1.0
+  tag: v1.2.0
 
 busyboxImage:
   ## Third-party image; see the note on `apeDtsImage.registry`.
