@@ -50,6 +50,11 @@ spec:
               fdb_retry "replicated data on $candidate" \
                 fdb_verify_keys "$NAMESPACE" "$candidate" e2e-switchover 20
 
+              # A client keeps writing through the Service across the
+              # switchover, so a later step can tell whether a write it was
+              # told had succeeded got lost, and how long writes stopped.
+              fdb_start_writer "$NAMESPACE" fdb-switch falkordb
+
     - name: switch over to the recorded candidate
       try:
         - script:
@@ -115,6 +120,22 @@ spec:
               # clients keep writing to the demoted pod and get READONLY.
               fdb_retry "the primary service to follow the switchover to $candidate" \
                 fdb_assert_service_primary "$NAMESPACE" fdb-switch falkordb "$candidate"
+
+    - name: no acknowledged write was lost and writes stopped only briefly
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The old primary refuses writes for at most down-after-milliseconds
+              # (5 s) while it hands over; then the role probe (every 3 s) moves
+              # the label and the Service follows. Anything it acknowledged has to
+              # be on the new primary.
+              fdb_check_writer "$NAMESPACE" fdb-switch falkordb 15
+      catch:
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-switch
+            tail: 200
 
     - name: replica-priority was restored on every pod
       try:

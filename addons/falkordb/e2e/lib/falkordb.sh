@@ -176,6 +176,25 @@ fdb_sentinel_master_count() {
   echo "$reply" | grep -c '^name$' || true
 }
 
+# fdb_assert_sentinel_knows_replicas <namespace> <pod> <master> <count>
+# Fails unless the sentinel knows at least <count> replicas of the master. It
+# learns of them from the master's INFO, so one that cannot talk to the master
+# (over TLS, one that cannot verify its certificate) knows none, and can never
+# fail it over.
+fdb_assert_sentinel_knows_replicas() {
+  local namespace="$1" pod="$2" master="$3" want="$4" reply known
+  reply="$(fdb_sentinel_cli "$namespace" "$pod" SENTINEL replicas "$master" 2>&1 | tr -d '\r')" || {
+    fdb_fail "$pod could not be asked for the replicas of $master: $reply"
+    return 1
+  }
+  known="$(echo "$reply" | grep -c '^name$' || true)"
+  if [ "$known" -lt "$want" ]; then
+    fdb_fail "$pod knows $known replica(s) of $master, expected at least $want"
+    return 1
+  fi
+  fdb_log "$pod knows $known replica(s) of $master"
+}
+
 # fdb_sentinel_master_addr <namespace> <pod> <master>
 # Prints `<host> <port>` of the master the sentinel monitors under that name, and
 # fails when it does not monitor it or cannot answer. Anything but exactly a host
@@ -952,6 +971,184 @@ fdb_assert_external_hostname() {
       return 1
       ;;
   esac
+}
+
+# fdb_start_writer <namespace> <cluster> <component> [tls]
+# Starts the fdb-writer pod, which keeps writing through the component's
+# read-write Service the way an application does until fdb_check_writer stops
+# it: one write per new connection, and a stream over one long-lived connection.
+# It logs every write the server acknowledged (lib/writer.sh). Pass tls=true for
+# a TLS cluster. The password comes from the Secret the servers read theirs from.
+fdb_start_writer() {
+  local namespace="$1" cluster="$2" component="$3" tls="${4:-false}"
+  local svc port pod image secret key run
+  svc="$(fdb_primary_service "$namespace" "$cluster" "$component")" || return 1
+  # A writer left from an earlier step would be reused by the apply below, and
+  # its keys would answer for this run's, so it goes first and each run writes
+  # to keys of its own.
+  kubectl delete pod -n "$namespace" fdb-writer --ignore-not-found --wait=true --timeout=2m >/dev/null
+  run="$(date +%s)"
+  echo "$run" > "$(fdb_state_dir)/writer-run"
+  port="$(kubectl get svc -n "$namespace" "$svc" -o jsonpath='{.spec.ports[0].port}')"
+  pod="$(fdb_pods "$namespace" "$cluster" "$component" | head -1)"
+  image="$(kubectl get pod -n "$namespace" "$pod" -o jsonpath="{.spec.containers[?(@.name==\"$FDB_CONTAINER\")].image}")"
+  secret="$(kubectl get pod -n "$namespace" "$pod" -o jsonpath="{.spec.containers[?(@.name==\"$FDB_CONTAINER\")].env[?(@.name==\"REDIS_DEFAULT_PASSWORD\")].valueFrom.secretKeyRef.name}")"
+  key="$(kubectl get pod -n "$namespace" "$pod" -o jsonpath="{.spec.containers[?(@.name==\"$FDB_CONTAINER\")].env[?(@.name==\"REDIS_DEFAULT_PASSWORD\")].valueFrom.secretKeyRef.key}")"
+  kubectl create configmap fdb-writer -n "$namespace" --from-file=writer.sh="$E2E_LIB_DIR/writer.sh" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  cat <<WRITER_POD | kubectl apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fdb-writer
+  namespace: $namespace
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: $image
+      command: [bash, /writer/writer.sh]
+      env:
+        - name: REDISCLI_AUTH
+          valueFrom:
+            secretKeyRef:
+              name: $secret
+              key: $key
+        - name: HOST
+          value: $svc
+        - name: PORT
+          value: "$port"
+        - name: TLS
+          value: "$tls"
+        - name: RUN
+          value: "$run"
+      volumeMounts:
+        - name: writer
+          mountPath: /writer
+  volumes:
+    - name: writer
+      configMap:
+        name: fdb-writer
+WRITER_POD
+  kubectl wait --for=condition=Ready pod/fdb-writer -n "$namespace" --timeout=5m >/dev/null
+  fdb_retry "the writer to get writes acknowledged through $svc" \
+    fdb_writer_acked_at_least "$namespace" new 20
+  fdb_retry "the writer's long-lived connection to get writes acknowledged" \
+    fdb_writer_acked_at_least "$namespace" persist 20
+  fdb_log "fdb-writer is writing through service $svc"
+}
+
+# fdb_writer_acked_at_least <namespace> <new|persist> <count>
+fdb_writer_acked_at_least() {
+  local acked
+  acked="$(kubectl exec -n "$1" fdb-writer -- sh -c "wc -l < /tmp/$2.acked" | tr -d ' ')"
+  [ "${acked:-0}" -ge "$3" ]
+}
+
+# fdb_check_writer <namespace> <cluster> <component> <max_gap_seconds>
+# Stops fdb-writer and fails when a write it had acknowledged is missing from
+# the primary, on either connection, or when new connections went without an
+# acknowledged write for longer than max_gap_seconds: that is how long the
+# instance could not take writes, the downtime an HA setup should keep short.
+fdb_check_writer() {
+  local namespace="$1" cluster="$2" component="$3" max_gap="$4"
+  local state primary stream acked missing errors gap_ms run failed=0
+  state="$(fdb_state_dir)"
+  run="$(cat "$state/writer-run")"
+  kubectl exec -n "$namespace" fdb-writer -- touch /tmp/stop
+  sleep 2
+  primary="$(fdb_primary "$namespace" "$cluster" "$component")" || return 1
+  for stream in new persist; do
+    kubectl exec -n "$namespace" fdb-writer -- cat "/tmp/$stream.acked" > "$state/$stream.acked"
+    kubectl exec -n "$namespace" fdb-writer -- cat "/tmp/$stream.err" > "$state/$stream.err"
+    fdb_cli "$namespace" "$primary" LRANGE "e2e:writer:$run:$stream" 0 -1 | tr -d '\r' | sort > "$state/$stream.present"
+    cut -d' ' -f2 "$state/$stream.acked" | sort > "$state/$stream.acked.values"
+    acked="$(wc -l < "$state/$stream.acked.values" | tr -d ' ')"
+    missing="$(comm -23 "$state/$stream.acked.values" "$state/$stream.present" | wc -l | tr -d ' ')"
+    errors="$(wc -l < "$state/$stream.err" | tr -d ' ')"
+    gap_ms="$(awk 'NR > 1 && $1 - prev > gap { gap = $1 - prev } { prev = $1 } END { print gap + 0 }' "$state/$stream.acked")"
+    fdb_log "writer $stream connections: $acked acknowledged, $missing of them missing on $primary, $errors errors, longest gap between acknowledged writes ${gap_ms}ms"
+    if [ "$errors" -gt 0 ]; then
+      cut -d' ' -f3- "$state/$stream.err" | sort | uniq -c | sed 's/^/[e2e]   /'
+    fi
+    if [ "$missing" -gt 0 ]; then
+      fdb_fail "$missing writes acknowledged on $stream connections are not on the primary $primary"
+      failed=1
+    fi
+    if [ "$stream" = new ] && [ "$gap_ms" -gt $((max_gap * 1000)) ]; then
+      fdb_fail "new connections went ${gap_ms}ms without an acknowledged write, more than ${max_gap}s"
+      failed=1
+    fi
+  done
+  kubectl delete pod -n "$namespace" fdb-writer --wait=true --timeout=2m >/dev/null
+  kubectl delete configmap -n "$namespace" fdb-writer >/dev/null
+  return $failed
+}
+
+# fdb_assert_primary_label_follows_sentinel <namespace> <cluster> <component>
+# Fails unless the pod labelled primary is the one the sentinels name as the
+# master. The read-write Service selects on the label, so a label that follows
+# a pod's own view instead (the role probe falling back to INFO replication)
+# sends clients to a pod Sentinel no longer treats as the primary.
+fdb_assert_primary_label_follows_sentinel() {
+  local namespace="$1" cluster="$2" component="$3" labelled sent addr host
+  labelled="$(fdb_primary "$namespace" "$cluster" "$component")" || return 1
+  for sent in $(fdb_pods "$namespace" "$cluster" "$component-sent"); do
+    addr="$(fdb_sentinel_master_addr "$namespace" "$sent" "$cluster-$component")" || return 1
+    host="${addr% *}"
+    case "$host" in
+      "$labelled" | "$labelled".*) ;;
+      *)
+        fdb_fail "$labelled is labelled primary but sentinel $sent names $host as the master"
+        return 1
+        ;;
+    esac
+  done
+  fdb_log "the primary label is on $labelled, the master every sentinel names"
+}
+
+# fdb_crash_server <namespace> <pod>
+# Kills redis-server in the pod with SIGKILL, as a crash or an OOM kill does, and
+# waits for the kubelet to restart the container in place and for it to be Ready
+# again. Unlike fdb_kill_pod, the pod and its emptyDirs survive.
+fdb_crash_server() {
+  local namespace="$1" pod="$2" restarts
+  restarts="$(kubectl get pod -n "$namespace" "$pod" \
+    -o jsonpath="{.status.containerStatuses[?(@.name==\"$FDB_CONTAINER\")].restartCount}")"
+  fdb_log "killing redis-server in $pod with SIGKILL (restarts so far: $restarts)"
+  kubectl exec -n "$namespace" "$pod" -c "$FDB_CONTAINER" -- sh -c \
+    'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = redis-server ] && kill -9 "${p#/proc/}"; done; true'
+  fdb_retry "$pod's container to be restarted" \
+    fdb_container_restarted_since "$namespace" "$pod" "$restarts"
+  kubectl wait --for=condition=Ready pod -n "$namespace" "$pod" --timeout=5m >/dev/null
+  fdb_log "$pod's container restarted in place and is Ready"
+}
+
+# fdb_assert_restarts_settled <namespace> <pod>
+# Fails when the container restarts again within 30 s, or is not Ready at the
+# end: a container that came back once and then crash-loops looks Ready between
+# its restarts.
+fdb_assert_restarts_settled() {
+  local namespace="$1" pod="$2" before after
+  before="$(kubectl get pod -n "$namespace" "$pod" \
+    -o jsonpath="{.status.containerStatuses[?(@.name==\"$FDB_CONTAINER\")].restartCount}")"
+  sleep 30
+  after="$(kubectl get pod -n "$namespace" "$pod" \
+    -o jsonpath="{.status.containerStatuses[?(@.name==\"$FDB_CONTAINER\")].restartCount}")"
+  if [ "$after" != "$before" ]; then
+    fdb_fail "$pod's container restarted again ($before -> $after restarts) instead of staying up"
+    return 1
+  fi
+  kubectl wait --for=condition=Ready pod -n "$namespace" "$pod" --timeout=10s >/dev/null
+  fdb_log "$pod's container stayed up ($after restarts)"
+}
+
+# fdb_container_restarted_since <namespace> <pod> <restart count>
+fdb_container_restarted_since() {
+  local now
+  now="$(kubectl get pod -n "$1" "$2" \
+    -o jsonpath="{.status.containerStatuses[?(@.name==\"$FDB_CONTAINER\")].restartCount}")"
+  [ "${now:-0}" -gt "$3" ]
 }
 
 # fdb_kill_pod <namespace> <pod>

@@ -1,0 +1,67 @@
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-tlsfo
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  topology: replication
+  componentSpecs:
+    - name: falkordb
+      disableExporter: true
+      replicas: 2
+      # Encrypts client, replication and sentinel traffic.
+      tls: true
+      # Both components take their certificates from one Secret, so they share
+      # one CA. With the KubeBlocks issuer each component gets a self-signed CA
+      # of its own, the sentinels cannot verify the servers they monitor, never
+      # learn of a replica and cannot fail over at all. The secret is generated
+      # by the first step of the test, because the namespace is only known at
+      # run time.
+      issuer:
+        name: UserProvided
+        secretRef:
+          name: fdb-tlsfo-tls
+          ca: ca.crt
+          cert: tls.crt
+          key: tls.key
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 512Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+    - name: falkordb-sent
+      replicas: 3
+      tls: true
+      issuer:
+        name: UserProvided
+        secretRef:
+          name: fdb-tlsfo-tls
+          ca: ca.crt
+          cert: tls.crt
+          key: tls.key
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 256Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
