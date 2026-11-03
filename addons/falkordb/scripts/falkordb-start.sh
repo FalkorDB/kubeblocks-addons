@@ -186,8 +186,10 @@ build_replicaof_config() {
   init_or_get_primary_from_redis_sentinel
   # Sentinel still names this pod while it fails it over after it went away:
   # starting as master then makes a second primary next to the replica Sentinel
-  # promotes. Wait for the failover, then ask again.
-  if check_current_pod_is_primary && wait_while_sentinel_fails_over_current_pod; then
+  # promotes. Wait for the failover, then ask again. Ask again even when there
+  # was nothing to wait for: the failover may have ended since the first answer.
+  if check_current_pod_is_primary; then
+    wait_while_sentinel_fails_over_current_pod || true
     init_or_get_primary_from_redis_sentinel
   fi
   if check_current_pod_is_primary; then

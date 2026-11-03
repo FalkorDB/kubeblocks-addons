@@ -1253,10 +1253,30 @@ Describe "FalkorDB Start Bash Script Tests"
       The contents of file "$redis_real_conf" should include "replicaof other-pod 6379"
     End
 
-    It "starts as primary when no sentinel is failing it over"
+    It "asks again even when no sentinel was failing it over, as the failover may have ended since"
       wait_while_sentinel_fails_over_current_pod() { return 1; }
       When call build_replicaof_config
+      The contents of file "$redis_real_conf" should include "replicaof other-pod 6379"
+    End
+
+    It "starts as primary when sentinel still names it after asking again"
+      wait_while_sentinel_fails_over_current_pod() { return 1; }
+      init_or_get_primary_from_redis_sentinel() { primary="this-pod"; primary_port=6379; }
+      When call build_replicaof_config
       The contents of file "$redis_real_conf" should not include "replicaof"
+    End
+
+    It "does not ask again when sentinel names another pod"
+      wait_while_sentinel_fails_over_current_pod() { echo "waited"; return 0; }
+      init_or_get_primary_from_redis_sentinel() {
+        resolve_calls=$((resolve_calls + 1))
+        primary="other-pod"
+        primary_port=6379
+      }
+      check_calls() { build_replicaof_config; echo "calls=$resolve_calls"; }
+      When call check_calls
+      The stdout should eq "calls=1"
+      The contents of file "$redis_real_conf" should include "replicaof other-pod 6379"
     End
   End
 

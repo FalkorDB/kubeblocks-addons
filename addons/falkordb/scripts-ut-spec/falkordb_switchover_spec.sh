@@ -293,24 +293,70 @@ master_host:redis-master"
     After 'cleanup'
 
     Context "replicas_caught_up()"
-      It "succeeds when every online replica has the primary's offset"
-        redis_config_get() { printf 'role:master\r\nslave0:ip=redis2,port=6379,state=online,offset=500,lag=0\r\nslave1:ip=redis3,port=6379,state=wait_bgsave,offset=0,lag=0\r\nmaster_repl_offset:500\r\n'; }
-        When call replicas_caught_up "redis1"
+      # REDIS_POD_FQDN_LIST is redis1,redis2,redis3; redis1 is the primary.
+      # replica_info holds each replica's INFO replication, "" for unreachable.
+      redis_config_get() {
+        case "$1" in
+          redis1) printf 'role:master\r\nmaster_repl_offset:500\r\n' ;;
+          redis2) [ -n "$redis2_info" ] || return 1; printf '%b' "$redis2_info" ;;
+          redis3) [ -n "$redis3_info" ] || return 1; printf '%b' "$redis3_info" ;;
+        esac
+      }
+      caught='role:slave\r\nmaster_link_status:up\r\nslave_repl_offset:500\r\n'
+
+      It "succeeds when every replica has applied the primary's offset"
+        redis2_info="$caught"; redis3_info="$caught"
+        When call replicas_caught_up "redis1" ""
         The status should be success
       End
 
-      It "fails while a replica is behind"
-        redis_config_get() { printf 'role:master\r\nslave0:ip=redis2,port=6379,state=online,offset=480,lag=0\r\nmaster_repl_offset:500\r\n'; }
-        When call replicas_caught_up "redis1"
+      It "fails while a replica still syncs, though the primary would not list it as online"
+        redis2_info="$caught"; redis3_info='role:slave\r\nmaster_link_status:down\r\nslave_repl_offset:0\r\n'
+        When call replicas_caught_up "redis1" ""
         The status should be failure
-        The stderr should include "at offset 480 of 500"
+        The stderr should include "replica redis3 is at offset 0 of 500 (link down)"
       End
 
-      It "fails when no replica is online"
-        redis_config_get() { printf 'role:master\r\nconnected_slaves:0\r\nmaster_repl_offset:500\r\n'; }
-        When call replicas_caught_up "redis1"
+      It "fails while a replica is behind"
+        redis2_info='role:slave\r\nmaster_link_status:up\r\nslave_repl_offset:480\r\n'; redis3_info="$caught"
+        When call replicas_caught_up "redis1" ""
         The status should be failure
-        The stderr should include "has no replica online"
+        The stderr should include "replica redis2 is at offset 480 of 500"
+      End
+
+      It "skips a replica that cannot be reached"
+        redis2_info="$caught"; redis3_info=""
+        When call replicas_caught_up "redis1" ""
+        The status should be success
+        The stdout should include "replica redis3 cannot be reached, skipping it"
+      End
+
+      It "fails when the candidate cannot be reached"
+        redis2_info="$caught"; redis3_info=""
+        When call replicas_caught_up "redis1" "redis3"
+        The status should be failure
+        The stderr should include "the candidate redis3 cannot be reached"
+      End
+
+      It "succeeds with a caught-up candidate"
+        redis2_info="$caught"; redis3_info="$caught"
+        When call replicas_caught_up "redis1" "redis3"
+        The status should be success
+      End
+
+      It "fails when no replica can be reached"
+        redis2_info=""; redis3_info=""
+        When call replicas_caught_up "redis1" ""
+        The status should be failure
+        The stdout should include "skipping it"
+        The stderr should include "redis1 has no replica that caught up"
+      End
+
+      It "fails when another pod runs as a master"
+        redis2_info="$caught"; redis3_info='role:master\r\nmaster_repl_offset:900\r\n'
+        When call replicas_caught_up "redis1" ""
+        The status should be failure
+        The stderr should include "redis3 is not a replica (role: master)"
       End
     End
 
@@ -338,11 +384,60 @@ master_host:redis-master"
         The stdout should include "new=redis2:6379"
       End
 
-      It "fails when sentinel keeps the initial primary"
+      It "returns 2 when the failover ended without switching"
         get_sentinel_master_addrs() { echo "redis1 6379"; }
+        sentinel_may_be_failing_over() { return 1; }
         When call wait_for_sentinel_to_switch_master "redis1 6379"
+        The status should eq 2
+        The stderr should include "sentinel is no longer failing over and still reports redis1 6379"
+      End
+
+      It "returns 1 when the failover is still running after the last attempt"
+        new_primary_max_attempts=3
+        get_sentinel_master_addrs() { echo "redis1 6379"; }
+        sentinel_may_be_failing_over() { return 0; }
+        When call wait_for_sentinel_to_switch_master "redis1 6379"
+        The status should eq 1
+        The stderr should include "still failing over from redis1 6379 after 3 attempts"
+        new_primary_max_attempts=75
+      End
+
+      It "takes a switch that happens just as the failover ends"
+        # the first look finds no switch; by the second, sentinel has switched
+        looks_file="./sentinel-looks"
+        echo 0 > "$looks_file"
+        get_sentinel_master_addrs() {
+          local looks=$(( $(cat "$looks_file") + 1 )); echo "$looks" > "$looks_file"
+          if [ "$looks" -ge 2 ]; then echo "redis2 6379"; else echo "redis1 6379"; fi
+        }
+        check_redis_role() { echo "primary"; }
+        sentinel_may_be_failing_over() { return 1; }
+        check_new_primary() {
+          wait_for_sentinel_to_switch_master "redis1 6379" && echo "new=$new_primary_host:$new_primary_port"
+          rm -f "$looks_file"
+        }
+        When call check_new_primary
+        The stdout should include "new=redis2:6379"
+      End
+    End
+
+    Context "sentinel_may_be_failing_over()"
+      It "is true while a sentinel marks the failover in progress"
+        redis_config_get() { if [ "$1" = "sentinel2" ]; then printf '%s\n' name redis flags "master,failover_in_progress"; else printf '%s\n' name redis flags master; fi; }
+        When call sentinel_may_be_failing_over
+        The status should be success
+      End
+
+      It "is true when a sentinel cannot be asked"
+        redis_config_get() { [ "$1" = "sentinel1" ] && printf '%s\n' name redis flags master; }
+        When call sentinel_may_be_failing_over
+        The status should be success
+      End
+
+      It "is false when every sentinel answers without a failover"
+        redis_config_get() { printf '%s\n' name redis flags master; }
+        When call sentinel_may_be_failing_over
         The status should be failure
-        The stderr should include "no sentinel reports a primary other than redis1 6379"
       End
     End
 
@@ -379,14 +474,45 @@ master_host:redis-master"
         The stderr should include "did not catch up"
       End
 
-      It "unpauses without demoting when sentinel does not switch"
+      It "unpauses without demoting when the failover ends without switching"
         failover_started=""
         execute_sentinel_failover() { return 0; }
+        sentinel_may_be_failing_over() { return 1; }
         When call failover_with_writes_paused "redis1"
         The status should be failure
         The stdout should include "cmd redis1: CLIENT UNPAUSE"
         The stdout should not include "REPLICAOF"
-        The stderr should include "no sentinel reports a primary other than redis1 6379"
+        The stderr should include "sentinel is no longer failing over and still reports redis1 6379"
+      End
+
+      It "keeps writes paused when it cannot tell whether sentinel will switch"
+        failover_started=""
+        execute_sentinel_failover() { return 0; }
+        wait_for_sentinel_to_switch_master() { return 1; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should not include "CLIENT UNPAUSE"
+        The stdout should not include "REPLICAOF"
+        The stderr should include "cannot tell whether sentinel fails redis1 over; its writes stay paused"
+      End
+
+      It "does not switch over while the sentinels disagree on the primary"
+        failover_started=""
+        get_sentinel_master_addrs() { printf '%s\n' "redis1 6379" "redis3 6379" "redis1 6379"; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should not include "CLIENT PAUSE"
+        The stderr should include "the sentinels disagree on the primary (redis1 6379,redis3 6379)"
+      End
+
+      It "checks the candidate has caught up"
+        failover_started=""
+        KB_SWITCHOVER_CANDIDATE_FQDN="redis3"
+        replicas_caught_up() { echo "caught-up check for candidate [$2]"; }
+        When call failover_with_writes_paused "redis1"
+        The status should be success
+        The stdout should include "caught-up check for candidate [redis3]"
+        unset KB_SWITCHOVER_CANDIDATE_FQDN
       End
 
       It "unpauses when the failover cannot be started"
