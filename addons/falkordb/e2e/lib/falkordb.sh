@@ -1052,7 +1052,7 @@ fdb_writer_acked_at_least() {
 # instance could not take writes, the downtime an HA setup should keep short.
 fdb_check_writer() {
   local namespace="$1" cluster="$2" component="$3" max_gap="$4"
-  local state primary stream acked missing errors gap_ms run failed=0
+  local state primary stream acked missing errors gap_ms run stopped_at failed=0
   state="$(fdb_state_dir)"
   run="$(cat "$state/writer-run")"
   kubectl exec -n "$namespace" fdb-writer -- touch /tmp/stop
@@ -1060,6 +1060,7 @@ fdb_check_writer() {
   # once both streams have finished.
   fdb_retry "the writer to finish its last writes" \
     kubectl exec -n "$namespace" fdb-writer -- test -f /tmp/done
+  stopped_at="$(kubectl exec -n "$namespace" fdb-writer -- cat /tmp/stopped_at)"
   primary="$(fdb_primary "$namespace" "$cluster" "$component")" || return 1
   for stream in new persist; do
     kubectl exec -n "$namespace" fdb-writer -- cat "/tmp/$stream.acked" > "$state/$stream.acked"
@@ -1069,7 +1070,9 @@ fdb_check_writer() {
     acked="$(wc -l < "$state/$stream.acked.values" | tr -d ' ')"
     missing="$(comm -23 "$state/$stream.acked.values" "$state/$stream.present" | wc -l | tr -d ' ')"
     errors="$(wc -l < "$state/$stream.err" | tr -d ' ')"
-    gap_ms="$(awk 'NR > 1 && $1 - prev > gap { gap = $1 - prev } { prev = $1 } END { print gap + 0 }' "$state/$stream.acked")"
+    # the gap after the last acknowledged write, up to the stop, counts too
+    gap_ms="$(awk -v stopped_at="$stopped_at" 'NR > 1 && $1 - prev > gap { gap = $1 - prev } { prev = $1 }
+      END { if (stopped_at - prev > gap) gap = stopped_at - prev; print gap + 0 }' "$state/$stream.acked")"
     fdb_log "writer $stream connections: $acked acknowledged, $missing of them missing on $primary, $errors errors, longest gap between acknowledged writes ${gap_ms}ms"
     if [ "$errors" -gt 0 ]; then
       cut -d' ' -f3- "$state/$stream.err" | sort | uniq -c | sed 's/^/[e2e]   /'

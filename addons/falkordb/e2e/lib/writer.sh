@@ -82,6 +82,9 @@ persistent_connection() {
 new_connections &
 persistent_connection &
 until [ -f stop ]; do sleep 0.5; done
+# when the writers were told to stop: writes that never came back after a
+# failover leave a gap up to here
+now_ms > stopped_at
 wait
 # both streams have logged their last write; fdb_check_writer waits for this
 touch done
