@@ -625,10 +625,11 @@ SET a 1"
       The status should be success
       The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
       The path "$STUB_REMOTE/fdb-aof/shard-a/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
-      # the archive starts at its base, and the round that started at 2000 covers up to 1999
-      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1999"
+      # the archive starts at its base; the round that started at 2000 covers up to 1999,
+      # less the 3s the server may hold back its AOF write
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996"
       The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
-      The result of function backup_info should include '{"shard":"shard-a","start":"T1000","end":"T1999"}'
+      The result of function backup_info should include '{"shard":"shard-a","start":"T1000","end":"T1996"}'
       The result of function backup_info should include '{"shard":"shard-b","start":"T900","end":"T1800"}'
       The result of function backup_info should include '{"shard":"shard-c","start":"T1200","end":"T1950"}'
     End

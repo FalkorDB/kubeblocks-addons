@@ -228,8 +228,10 @@ function update_aof_file() {
   fi
   global_aof_pushed_at=${round_start}
   global_aof_pushed_prefix=${backup_files_prefix}
-  # the #TS: stamps have one second resolution, so the second the round started in may still be taking writes
-  global_archived_until=$((round_start - 1))
+  # the #TS: stamps have one second resolution, so the second the round started in may still be taking writes.
+  # With appendfsync everysec the server holds back its AOF write for up to 2s while an fsync is running, so
+  # commands stamped in those seconds may not be in the file yet: claim only up to AOF_WRITE_DELAY_SECONDS before.
+  global_archived_until=$((round_start - 1 - AOF_WRITE_DELAY_SECONDS))
 }
 
 function purge_expired_files() {
@@ -270,6 +272,7 @@ function save_backup_status() {
 # reports their intersection, so the status is the same whichever writes last.
 ARCHIVE_RANGE_FILE="kb-archive-range"
 CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
+AOF_WRITE_DELAY_SECONDS=${AOF_WRITE_DELAY_SECONDS:-3}
 global_cluster_status_time=0
 
 function publish_archive_range() {
