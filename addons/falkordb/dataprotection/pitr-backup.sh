@@ -9,6 +9,8 @@ fi
 global_last_purge_time=$(date +%s)
 # when the last round that uploaded the live AOF started; see update_aof_file
 global_aof_pushed_at=0
+# the archive (${base_file_ctime}.${seq}) global_aof_pushed_at was for
+global_aof_pushed_prefix=""
 global_acl_last_modify_time=0
 global_old_size=0
 # every write stamped up to this time is in the backup repo
@@ -185,9 +187,15 @@ function update_aof_file() {
 
   # create a directory for backup files we are tracking, and after a aof rewrite, we will archive them in to a tar.zst file
   # global_aof_pushed_at only advances after a successful round, so a failed push is retried on the next round.
+  # A new archive is uploaded whole: a rewrite that started before the last round and finished after it
+  # leaves a base, and an idle incr, older than global_aof_pushed_at.
+  local pushed_at=${global_aof_pushed_at}
+  if [ "${backup_files_prefix}" != "${global_aof_pushed_prefix}" ]; then
+    pushed_at=0
+  fi
   # Times have one second resolution, and a write in the same second as the last upload but after it leaves the
   # modify time equal to it, so a file is uploaded again until its time is older than the last round's start.
-  if [ $(get_base_file_ctime "$base_file") -ge ${global_aof_pushed_at} ]; then
+  if [ $(get_base_file_ctime "$base_file") -ge ${pushed_at} ]; then
     if ! datasafed push "${base_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${base_file}")" ||
       ! datasafed push "${backup_manifest}" "${backup_files_prefix}.dir/${backup_manifest}" ||
       ! datasafed push "${DATA_DIR}/users.acl" "${backup_files_prefix}.dir/users.acl"; then
@@ -199,7 +207,7 @@ function update_aof_file() {
 
   # keep updating the latest aof file
   local aof_modify_time=$(stat -c %Y "${incr_file}")
-  if [ "${aof_modify_time}" -ge "${global_aof_pushed_at}" ]; then
+  if [ "${aof_modify_time}" -ge "${pushed_at}" ]; then
     if ! datasafed push "${incr_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${incr_file}")"; then
       DP_error_log "update_aof_file: failed to upload $incr_file, retrying next round"
       return 1
@@ -219,6 +227,7 @@ function update_aof_file() {
     DP_log "Update file: $acl_file"
   fi
   global_aof_pushed_at=${round_start}
+  global_aof_pushed_prefix=${backup_files_prefix}
   # the #TS: stamps have one second resolution, so the second the round started in may still be taking writes
   global_archived_until=$((round_start - 1))
 }
@@ -273,10 +282,11 @@ function publish_archive_range() {
   fi
 }
 
-# The number of shards: primaries that own slots.
+# The number of shards: primaries that own slots. A failed primary that still
+# owns slots is a shard whose archive is needed too.
 function cluster_shard_count() {
   ${connect_url} CLUSTER NODES 2>/dev/null |
-    awk '$3 ~ /(^|,)master(,|$)/ && $3 !~ /(^|,)fail(,|$)/ && NF > 8' | grep -c .
+    awk '$3 ~ /(^|,)master(,|$)/ && NF > 8' | grep -c .
 }
 
 function save_cluster_backup_status() {

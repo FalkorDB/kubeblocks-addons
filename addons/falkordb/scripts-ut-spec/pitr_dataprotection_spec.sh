@@ -90,13 +90,14 @@ case "$*" in
 *"CONFIG GET aof-use-rdb-preamble"*) printf 'aof-use-rdb-preamble\nyes\n' ;;
 *"CONFIG GET aof-timestamp-enabled"*) printf 'aof-timestamp-enabled\nyes\n' ;;
 *"CONFIG GET aof-disable-auto-gc"*) printf 'aof-disable-auto-gc\nyes\n' ;;
-# three primaries own slots; the replica and the failed primary do not count
+# three primaries own slots; the replica and the failed-over primary do not count.
+# STUB_FAILED_PRIMARY_SLOTS gives the failed primary slots, which it has not handed over yet.
 *"CLUSTER NODES"*)
   echo "a1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460"
   echo "b1 10.0.0.2:6379@16379 master - 0 0 2 connected 5461-10922"
   echo "c1 10.0.0.3:6379@16379 master - 0 0 3 connected 10923-16383"
   echo "c2 10.0.0.4:6379@16379 slave c1 0 0 3 connected"
-  echo "d1 10.0.0.5:6379@16379 master,fail - 0 0 4 disconnected 0-10"
+  echo "d1 10.0.0.5:6379@16379 master,fail - 0 0 4 disconnected ${STUB_FAILED_PRIMARY_SLOTS:-}"
   ;;
 *" PING"*) echo "${STUB_PING:-PONG}" ;;
 # the stub redis-server recorded where it would save; the "RDB" is the AOF it replayed
@@ -146,6 +147,8 @@ EOF
     cat > "$stub_dir/sleep" <<'EOF'
 #!/bin/sh
 echo round >> "$STUB_SLEEP_LOG"
+# STUB_ON_SLEEP runs between rounds, e.g. to rewrite the AOF
+[ -z "$STUB_ON_SLEEP" ] || sh -c "$STUB_ON_SLEEP"
 [ "$(wc -l < "$STUB_SLEEP_LOG")" -ge "${STUB_ROUNDS:-1}" ] && kill -TERM "$PPID"
 exit 0
 EOF
@@ -186,7 +189,8 @@ EOF
     : > "$STUB_SERVER_STATE"
     unset REDIS_CLI_TLS_CMD DP_TTL_SECONDS DP_RESTORE_KEY_PATTERNS DP_RESTORE_TIME \
       STUB_PUSH_RC STUB_PULL_RC STUB_RM_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS \
-      MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS
+      MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS \
+      STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -446,6 +450,26 @@ EOF
       The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
+    It "uploads a new seq whole even when its files are older than the last upload round"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      # A rewrite that started before round 1 (now is 2000) and finished after it:
+      # its base (ctime 1000) and idle incr (mtime 1500) are older than round 1.
+      export STUB_ON_SLEEP='
+        d="$DATA_DIR/appendonlydir"
+        echo base-2 > "$d/appendonly.aof.2.base.rdb"
+        echo incr-2 > "$d/appendonly.aof.2.incr.aof"
+        echo "file appendonly.aof.2.incr.aof seq 2 type i" > "$d/appendonly.aof.manifest"'
+      export STUB_ROUNDS=2
+      When run run_backup
+      The status should be success
+      The output should include "Archived files"
+      The path "$STUB_REMOTE/1000.1.tar.zst" should be exist
+      The path "$STUB_REMOTE/1000.2.dir/appendonlydir/appendonly.aof.2.base.rdb" should be exist
+      The path "$STUB_REMOTE/1000.2.dir/appendonlydir/appendonly.aof.2.incr.aof" should be exist
+      The path "$STUB_REMOTE/1000.2.dir/users.acl" should be exist
+    End
+
     It "retries a failed upload of the live AOF on the next round"
       prepare_rewritten_aof
       echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
@@ -619,6 +643,15 @@ SET a 1"
       The output should include "ignoring shard-d, whose archive stopped at 1500: the cluster has 3 shards"
       The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
       The result of function backup_info should not include '"shard":"shard-d"'
+    End
+
+    It "counts a failed primary that still owns slots as a shard"
+      prepare_sharded_backup
+      export STUB_FAILED_PRIMARY_SLOTS=0-10
+      When run run_backup
+      The status should be success
+      The output should include "3 of 4 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
     End
 
     It "withdraws the window while a shard has archived nothing"

@@ -170,6 +170,12 @@ spec:
                 echo "e2e-shpitr-graph holds $items Item nodes after the late write, expected 15" >&2
                 exit 1
               fi
+
+              # The restore waits for the archive to cover this, so every shard
+              # has shipped its late writes and only the cut can keep them out.
+              sleep 1
+              kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
+                date -u +%Y-%m-%dT%H:%M:%SZ | tr -d '\r' > "$state/late-done"
         - script:
             env:
               - name: FDB_CONTAINER
@@ -197,17 +203,20 @@ spec:
             selector: app.kubernetes.io/instance=fdb-shpitr
             tail: 100
 
-    - name: the window catches up past the recovery target
+    - name: the window catches up past the late writes
       try:
         - script:
             content: |
               . "$E2E_LIB_DIR/falkordb.sh"
 
               target="$(cat "$(fdb_state_dir)/restore-time")"
+              late_done="$(cat "$(fdb_state_dir)/late-done")"
 
               # timeRange.end is the earliest of the shards' archived ends, so
-              # this also waits for the slowest shard.
-              fdb_retry "the archive to cover $target on every shard" bash -c '
+              # this also waits for the slowest shard. Waiting past the late
+              # writes, not just the target, means every shard's archive holds
+              # them: a restore that ignored restoreTime would bring them back.
+              fdb_retry "the archive to cover $late_done on every shard" bash -c '
                 name=$(kubectl get backup -n "'"$NAMESPACE"'" \
                   -l dataprotection.kubeblocks.io/backup-type=Continuous \
                   -o jsonpath="{.items[0].metadata.name}")
@@ -217,8 +226,8 @@ spec:
                   -o jsonpath="{.status.timeRange.end}")
                 [ -n "$end" ] || { echo "no timeRange.end yet" >&2; exit 1; }
                 # RFC3339 in UTC sorts lexicographically.
-                if [ "$end" \< "'"$target"'" ]; then
-                  echo "the shards only share up to $end, target is '"$target"'" >&2
+                if [ "$end" \< "'"$late_done"'" ]; then
+                  echo "the shards only share up to $end, the late writes finished at '"$late_done"'" >&2
                   exit 1
                 fi
                 if [ "'"$target"'" \< "$start" ]; then
