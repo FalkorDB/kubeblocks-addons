@@ -20,8 +20,10 @@ test || __() {
 }
 
 switchover_script="/scripts/falkordb-switchover.sh"
-# leaves the server about 10 s of the default 30 s grace period to shut down
-hand_over_timeout_seconds=20
+# The preStop's whole budget within the default 30 s grace period: the role
+# check (5 s), the hand-over and ACL SAVE (5 s) take 25 s at most, which leaves
+# the server 5 s to shut down after it.
+hand_over_timeout_seconds=15
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts

@@ -198,7 +198,10 @@ Describe "FalkorDB Pre-Stop Script Tests"
 
   Describe "current_pod_is_master()"
     It "gives up on a server that does not answer"
-      timeout() { echo "timeout $1"; return 124; }
+      # The server would say it is the primary, but too late: the probe passes
+      # only if it really goes through timeout.
+      redis-cli() { printf 'role:master\r\n'; }
+      timeout() { [ "$1" = 5 ] || return 1; return 124; }
       When call current_pod_is_master
       The status should be failure
     End
