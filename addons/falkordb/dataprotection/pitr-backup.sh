@@ -258,6 +258,12 @@ function purge_expired_files() {
 }
 
 function save_backup_status() {
+  # The end is the last time a round uploaded everything (global_archived_until),
+  # not now: a round that failed part way, a new seq's .dir missing its base or
+  # manifest say, must not put its times in the window.
+  if [ "${global_archived_until}" -le 0 ]; then
+    return
+  fi
   # if no size changes, return
   local total_size=$(datasafed stat / | grep TotalSize | awk '{print $2}')
   if [[ -z ${total_size} || ${total_size} -eq 0 || ${total_size} == ${global_old_size} ]]; then
@@ -275,7 +281,7 @@ function save_backup_status() {
     start_time=$(date +%s)
     DP_log "save_backup_status: empty start_time from backup repo, use current time"
   fi
-  DP_save_backup_status_info "${total_size}" "${start_time}" "$(date +%s)"
+  DP_save_backup_status_info "${total_size}" "${start_time}" "${global_archived_until}"
 }
 
 # A sharded cluster is backed up by one archiver per shard, each a target of the

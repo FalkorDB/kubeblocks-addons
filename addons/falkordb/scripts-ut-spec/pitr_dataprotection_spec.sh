@@ -501,6 +501,28 @@ EOF
       The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
+    It "reports the window up to what the last complete round archived"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      When run run_backup
+      The status should be success
+      The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      # the round started at 2000: up to 1999, less the AOF write delay
+      The contents of file "$DP_BACKUP_INFO_FILE" should include '"timeRange":{"start":"T1000","end":"T1996"}'
+    End
+
+    It "reports no window while no round has archived everything"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      export STUB_PUSH_FAIL_ONCE="appendonly.aof.1.base.rdb"
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: update_aof_file: failed to upload"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
     It "leaves the status alone when the archives cannot be listed"
       prepare_rewritten_aof
       echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
