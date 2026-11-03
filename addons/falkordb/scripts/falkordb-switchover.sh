@@ -664,8 +664,15 @@ recover_redis_priorities() {
 
 switchover_with_candidate() {
   # check the role of candidate before switchover
-  local candidate_role
+  local candidate_role current_master
   candidate_role=$(check_redis_role "$KB_SWITCHOVER_CANDIDATE_FQDN" "$redis_service_port")
+  # KubeBlocks can run the action a second time for the same OpsRequest, before
+  # the role labels catch up with the first run; that run has already succeeded.
+  if [[ "$candidate_role" == "primary" ]] && current_master=$(check_redis_kernel_status) &&
+    [[ "$current_master" == "$KB_SWITCHOVER_CANDIDATE_FQDN"* ]]; then
+    echo "$KB_SWITCHOVER_CANDIDATE_FQDN is already the only primary, nothing to do"
+    return 0
+  fi
   if [[ "$candidate_role" != "secondary" ]]; then
     echo "Error: Candidate node $KB_SWITCHOVER_CANDIDATE_FQDN is not in secondary role" >&2
     return 1
@@ -718,6 +725,13 @@ switchover_without_candidate() {
   # check redis kernel role before switchover
   local initial_master
   initial_master=$(check_redis_kernel_status) || return 1
+
+  # A second run of the action for the same OpsRequest would move the primary
+  # back; once it has left the pod KubeBlocks asked to switch over, we are done.
+  if ! is_empty "$KB_SWITCHOVER_CURRENT_NAME" && [[ "${initial_master%%.*}" != "$KB_SWITCHOVER_CURRENT_NAME" ]]; then
+    echo "$KB_SWITCHOVER_CURRENT_NAME is no longer the primary ($initial_master is), nothing to do"
+    return 0
+  fi
 
   # do switchover
   failover_with_writes_paused "$initial_master" || return 1

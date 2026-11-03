@@ -286,6 +286,7 @@ master_host:redis-master"
       unset SENTINEL_POD_FQDN_LIST
       unset REDIS_POD_FQDN_LIST
       unset KB_SWITCHOVER_CANDIDATE_FQDN
+      unset KB_SWITCHOVER_CURRENT_NAME
       unset REDIS_COMPONENT_NAME
       unset SERVICE_PORT
       unset KB_SWITCHOVER_ROLE
@@ -719,6 +720,39 @@ master_host:redis-master"
         The stderr should include "not in secondary role"
         The stdout should equal ""
       End
+
+      # KubeBlocks may run the action again for an OpsRequest it has already run.
+      It "succeeds without failing over again when the candidate is already the only primary"
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        set_redis_priorities() { echo "set_redis_priorities called"; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be success
+        The stdout should include "redis2 is already the only primary, nothing to do"
+        The stdout should not include "called"
+        The stderr should equal ""
+      End
+
+      It "still fails when the candidate is a primary but not the only one"
+        check_redis_role() {
+          if [ "$1" = "redis3" ]; then
+            echo "secondary"
+          else
+            echo "primary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be failure
+        The stderr should include "not in secondary role"
+        The stdout should not include "called"
+      End
     End
 
     Context "switchover_without_candidate()"
@@ -754,6 +788,26 @@ master_host:redis-master"
         When call switchover_without_candidate
         The status should be failure
         The stdout should equal ""
+      End
+
+      # KubeBlocks may run the action again for an OpsRequest it has already run.
+      It "does not fail over again once the primary has left the pod being switched over"
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        check_redis_kernel_status() { echo "redis2.redis-headless.default.svc.cluster.local"; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stdout should include "redis1 is no longer the primary (redis2.redis-headless.default.svc.cluster.local is), nothing to do"
+        The stdout should not include "called"
+      End
+
+      It "fails over when the pod being switched over is still the primary"
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        check_redis_kernel_status() { echo "redis1.redis-headless.default.svc.cluster.local"; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused $1"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stdout should include "failover_with_writes_paused redis1.redis-headless.default.svc.cluster.local"
       End
     End
 
