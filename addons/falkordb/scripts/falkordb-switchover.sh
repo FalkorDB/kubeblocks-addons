@@ -292,11 +292,15 @@ get_sentinel_master_addrs() {
 # whole replication stream, which stops growing while writes are paused, and the
 # candidate, when there is one, is among them. Each replica is asked itself: the
 # primary lists only the replicas that are online, so a replica still syncing
-# would go unchecked, though Sentinel might promote it.
+# would go unchecked, though Sentinel might promote it. The write pause is
+# renewed before each query: with every query allowed its timeout, a scan of
+# many replicas could outlast the pause, and the offset read at its start would
+# then miss the writes taken since.
 replicas_caught_up() {
   local primary_fqdn="$1" candidate_fqdn="$2"
   local info master_offset pod_fqdn role link offset caught_up=0 candidate_caught_up=false
   local -a redis_pod_fqdn_list
+  renew_write_pause
   info=$(redis_config_get "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "INFO replication") || return 1
   info=${info//$'\r'/}
   master_offset=$(echo "$info" | sed -n 's/^master_repl_offset:\([0-9]*\).*/\1/p')
@@ -307,6 +311,7 @@ replicas_caught_up() {
   IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
   for pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
     [ "$pod_fqdn" = "$primary_fqdn" ] && continue
+    renew_write_pause
     if ! info=$(redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "INFO replication" 2>/dev/null); then
       if ! is_empty "$candidate_fqdn" && [[ "$pod_fqdn" = "$candidate_fqdn"* ]]; then
         echo "the candidate $pod_fqdn cannot be reached" >&2

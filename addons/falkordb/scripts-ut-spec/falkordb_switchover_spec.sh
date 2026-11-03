@@ -366,6 +366,19 @@ master_host:redis-master"
         The stderr should include "redis1 has no replica that caught up"
       End
 
+      It "renews the write pause before every query"
+        redis2_info=""; redis3_info="$caught"
+        renew_write_pause() { echo "renew"; }
+        # one renewal before the primary's query and one before each replica's
+        When call replicas_caught_up "redis1" ""
+        The status should be success
+        The line 1 of stdout should eq "renew"
+        The line 2 of stdout should eq "renew"
+        The line 3 of stdout should eq "replica redis2 cannot be reached, skipping it"
+        The line 4 of stdout should eq "renew"
+        The lines of stdout should eq 4
+      End
+
       It "fails when another pod runs as a master"
         redis2_info="$caught"; redis3_info='role:master\r\nmaster_repl_offset:900\r\n'
         When call replicas_caught_up "redis1" ""
