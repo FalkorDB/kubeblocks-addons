@@ -1155,13 +1155,12 @@ Describe "FalkorDB Start Bash Script Tests"
       export SENTINEL_POD_FQDN_LIST="sentinel-0,sentinel-1"
       sentinel_failover_wait_ms=6000
       flags_calls_file="./sentinel-flags-calls"
-      echo 0 > "$flags_calls_file"
     }
     cleanup_sentinel_env() {
       unset SENTINEL_COMPONENT_NAME SENTINEL_POD_FQDN_LIST
       sentinel_failover_wait_ms=""
       sentinel_failover_wait_delay_ms=1000
-      rm -f "$flags_calls_file"
+      rm -f "$flags_calls_file".*
     }
     Before 'setup'
     After 'cleanup_sentinel_env'
@@ -1170,6 +1169,15 @@ Describe "FalkorDB Start Bash Script Tests"
     fake_now_ms=1000000000
     now_ms() { echo "$fake_now_ms"; }
     sleep_when_ut_mode_false() { local ms="${1/./}"; fake_now_ms=$((fake_now_ms + 10#$ms)); }
+    # Prints which round this is for the sentinel: each round asks every
+    # sentinel once, in the background, so a stub counts its calls in a file
+    # of its own.
+    round_of() {
+      local file="$flags_calls_file.$1" calls
+      calls=$(( $(cat "$file" 2>/dev/null || echo 0) + 1 ))
+      echo "$calls" > "$file"
+      echo "$calls"
+    }
 
     It "does not wait when no sentinel is failing the pod over"
       get_sentinel_primary_flags() { echo "master"; }
@@ -1185,12 +1193,10 @@ Describe "FalkorDB Start Bash Script Tests"
     End
 
     It "waits while one sentinel is failing the pod over, then returns 0"
-      # the second sentinel runs the failover, which ends after two rounds; the
-      # stub runs in a command substitution, so it counts its calls in a file
+      # the second sentinel runs the failover, which ends after two rounds
       get_sentinel_primary_flags() {
-        local calls=$(( $(cat "$flags_calls_file") + 1 ))
-        echo "$calls" > "$flags_calls_file"
-        if [ "$1" = "sentinel-1" ] && [ "$calls" -le 4 ]; then echo "master,o_down,failover_in_progress"; else echo "master"; fi
+        local round; round=$(round_of "$1")
+        if [ "$1" = "sentinel-1" ] && [ "$round" -le 2 ]; then echo "master,o_down,failover_in_progress"; else echo "master"; fi
       }
       When call wait_while_sentinel_fails_over_current_pod
       The status should be success
@@ -1200,9 +1206,8 @@ Describe "FalkorDB Start Bash Script Tests"
 
     It "waits while a sentinel cannot be asked, as it may be running the failover"
       get_sentinel_primary_flags() {
-        local calls=$(( $(cat "$flags_calls_file") + 1 ))
-        echo "$calls" > "$flags_calls_file"
-        if [ "$1" = "sentinel-1" ] && [ "$calls" -le 2 ]; then return 1; fi
+        local round; round=$(round_of "$1")
+        if [ "$1" = "sentinel-1" ] && [ "$round" -le 1 ]; then return 1; fi
         echo "master"
       }
       When call wait_while_sentinel_fails_over_current_pod
@@ -1214,7 +1219,7 @@ Describe "FalkorDB Start Bash Script Tests"
       get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
       When run wait_while_sentinel_fails_over_current_pod
       The status should be failure
-      The stdout should include "Error: sentinel sentinel-0 (master,failover_in_progress) is still failing over this pod after 6000 ms"
+      The stdout should include "(master,failover_in_progress) is still failing over this pod after 6000 ms"
     End
 
     It "goes on after the last attempt when a sentinel is only unreachable"
@@ -1226,10 +1231,9 @@ Describe "FalkorDB Start Bash Script Tests"
 
     It "waits for a failover another sentinel runs even when the first cannot be asked"
       get_sentinel_primary_flags() {
-        local calls=$(( $(cat "$flags_calls_file") + 1 ))
-        echo "$calls" > "$flags_calls_file"
+        local round; round=$(round_of "$1")
         [ "$1" = "sentinel-0" ] && return 1
-        if [ "$calls" -le 2 ]; then echo "master,failover_in_progress"; else echo "master"; fi
+        if [ "$round" -le 1 ]; then echo "master,failover_in_progress"; else echo "master"; fi
       }
       When call wait_while_sentinel_fails_over_current_pod
       # the failover ends; sentinel-0 stays unreachable, which does not stop the start
@@ -1238,13 +1242,37 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should include "sentinel sentinel-0 still cannot be asked after 6000 ms"
     End
 
+    It "asks every sentinel at once, so one that never answers does not hold up the others"
+      # sentinel-0 answers only once sentinel-1 has been asked while it is still
+      # waiting; asked one after the other, it would time out first
+      asked_file="$flags_calls_file.asked-sentinel-1"
+      get_sentinel_primary_flags() {
+        if [ "$1" = "sentinel-1" ]; then
+          touch "$asked_file"
+          echo "master,failover_in_progress"
+          return 0
+        fi
+        local tries=0
+        while [ ! -e "$asked_file" ] && [ "$tries" -lt 50 ]; do sleep 0.05; tries=$((tries + 1)); done
+        [ -e "$asked_file" ] || return 1
+        echo "concurrent" > "$flags_calls_file.concurrent"
+        return 1
+      }
+      concurrent() {
+        ( wait_while_sentinel_fails_over_current_pod ) | grep -m1 "is failing over this pod"
+        cat "$flags_calls_file.concurrent" 2>/dev/null
+      }
+      When call concurrent
+      The line 1 of stdout should include "sentinel sentinel-1 (master,failover_in_progress) is failing over this pod"
+      The line 2 of stdout should eq "concurrent"
+    End
+
     It "keeps a reported failover in mind while that sentinel cannot be asked again"
       # sentinel-1 reports a failover, then stops answering; sentinel-0 never sees one
       get_sentinel_primary_flags() {
-        local calls=$(( $(cat "$flags_calls_file") + 1 ))
-        echo "$calls" > "$flags_calls_file"
+        local round; round=$(round_of "$1")
         if [ "$1" = "sentinel-0" ]; then echo "master"; return 0; fi
-        [ "$calls" -le 2 ] || return 1
+        [ "$round" -le 1 ] || return 1
         echo "master,failover_in_progress"
       }
       When run wait_while_sentinel_fails_over_current_pod
@@ -1254,9 +1282,8 @@ Describe "FalkorDB Start Bash Script Tests"
 
     It "forgets a failover once that sentinel says it is over"
       get_sentinel_primary_flags() {
-        local calls=$(( $(cat "$flags_calls_file") + 1 ))
-        echo "$calls" > "$flags_calls_file"
-        if [ "$1" = "sentinel-1" ] && [ "$calls" -le 2 ]; then echo "master,failover_in_progress"; else echo "master"; fi
+        local round; round=$(round_of "$1")
+        if [ "$1" = "sentinel-1" ] && [ "$round" -le 1 ]; then echo "master,failover_in_progress"; else echo "master"; fi
       }
       When call wait_while_sentinel_fails_over_current_pod
       The status should be success
@@ -1264,9 +1291,9 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should not include "Error"
     End
 
-    It "gives each sentinel query no more than the time left"
-      # a 3 s budget polled every 2 s: the first query gets 3 s, the second the
-      # 1 s left, and none is asked once it is up
+    It "gives each sentinel query no more than the time left, nor than the query timeout"
+      # a 3 s budget polled every 2 s: the first round's queries get the 2 s
+      # query timeout, the second's the 1 s left, and none is asked once it is up
       sentinel_failover_wait_ms=3000
       sentinel_failover_wait_delay_ms=2000
       timeouts_file="./sentinel-query-timeouts"
@@ -1274,13 +1301,15 @@ Describe "FalkorDB Start Bash Script Tests"
       get_sentinel_primary_flags() { echo "$1 $2" >> "$timeouts_file"; echo "master,failover_in_progress"; }
       query_timeouts() {
         ( wait_while_sentinel_fails_over_current_pod ) >/dev/null
-        cat "$timeouts_file"
+        sort "$timeouts_file"
         rm -f "$timeouts_file"
       }
       When call query_timeouts
-      The line 1 of stdout should eq "sentinel-0 3.000"
-      The line 2 of stdout should eq "sentinel-0 1.000"
-      The lines of stdout should eq 2
+      The line 1 of stdout should eq "sentinel-0 1.000"
+      The line 2 of stdout should eq "sentinel-0 2.000"
+      The line 3 of stdout should eq "sentinel-1 1.000"
+      The line 4 of stdout should eq "sentinel-1 2.000"
+      The lines of stdout should eq 4
     End
 
     It "waits no longer than the down-after-milliseconds sentinel has"
@@ -1292,11 +1321,11 @@ Describe "FalkorDB Start Bash Script Tests"
       polled() {
         ( wait_while_sentinel_fails_over_current_pod ) >/dev/null
         echo "exit $?"
-        cat "$query_times"
+        sort -n "$query_times" | uniq
         rm -f "$query_times"
       }
       When call polled
-      # queried at 0 and 1000 ms; the 2000 ms deadline comes before a third
+      # asked at 0 and 1000 ms; the 2000 ms deadline comes before a third round
       The line 1 of stdout should eq "exit 1"
       The line 2 of stdout should eq "0"
       The line 3 of stdout should eq "1000"

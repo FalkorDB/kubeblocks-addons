@@ -38,6 +38,9 @@ retry_delay_second=2
 default_down_after_ms=5000
 sentinel_failover_wait_ms=""
 sentinel_failover_wait_delay_ms=1000
+# Each round asks every sentinel at once, each for at most this long, so one
+# that never answers holds a round up no longer than this.
+sentinel_query_timeout_ms=2000
 service_port=${SERVICE_PORT:-6379}
 redis_server_process_name="redis-server"
 redis_server_launcher_pid=""
@@ -251,9 +254,11 @@ ms_to_seconds() {
 # that cannot be asked may be the one running the failover, so it is waited for
 # too. A sentinel that only sees the pod down is not: when every pod restarts at
 # once that would hand a replica, perhaps behind this pod, the time to be
-# promoted. The wait never goes past sentinel's down-after-milliseconds: slow
-# sentinels count against it, each query gets at most the time left, and none
-# is asked once it is up. A failover a sentinel reported stays in mind until a
+# promoted. The wait never goes past sentinel's down-after-milliseconds: each
+# round asks every sentinel at once, so one that never answers cannot use up
+# the time to ask the others, each query gets at most the time left (and
+# sentinel_query_timeout_ms), and none is asked once it is up. A failover a
+# sentinel reported stays in mind until a
 # later answer from that sentinel says it is over: one that cannot be asked
 # again has not said so. A failover still unresolved at the end exits the start,
 # since this pod could otherwise start as a master next to the replica being
@@ -265,6 +270,9 @@ wait_while_sentinel_fails_over_current_pod() {
     return 1
   fi
   local sentinel_pod_fqdn reply flags down_after waited=1 failing_over="" unreachable="" remaining
+  local replies i query_pid
+  local -a sentinels=() query_pids=()
+  read -r -a sentinels <<< "$(split "$SENTINEL_POD_FQDN_LIST" "," | tr '\n' ' ')"
   # the flags each sentinel last reported a failover in progress with
   local -A failover_seen=()
   local started budget_ms="$sentinel_failover_wait_ms" budget_known=true deadline
@@ -276,17 +284,25 @@ wait_while_sentinel_fails_over_current_pod() {
   deadline=$((started + budget_ms))
   while true; do
     unreachable=""
-    for sentinel_pod_fqdn in $(split "$SENTINEL_POD_FQDN_LIST" ","); do
-      remaining=$((deadline - $(now_ms)))
-      if [ "$remaining" -le 0 ]; then
+    remaining=$((deadline - $(now_ms)))
+    [ "$remaining" -gt "$sentinel_query_timeout_ms" ] && remaining=$sentinel_query_timeout_ms
+    replies=""
+    if [ "$remaining" -gt 0 ]; then
+      replies=$(mktemp -d)
+      query_pids=()
+      for i in "${!sentinels[@]}"; do
+        get_sentinel_primary_flags "${sentinels[$i]}" "$(ms_to_seconds "$remaining")" > "$replies/$i" 2>/dev/null &
+        query_pids[$i]=$!
+      done
+    fi
+    for i in "${!sentinels[@]}"; do
+      sentinel_pod_fqdn="${sentinels[$i]}"
+      query_pid="${query_pids[$i]:-}"
+      if is_empty "$replies" || ! wait "$query_pid"; then
         unreachable="${unreachable:+$unreachable }$sentinel_pod_fqdn"
         continue
       fi
-      [ "$remaining" -gt 5000 ] && remaining=5000
-      if ! reply=$(get_sentinel_primary_flags "$sentinel_pod_fqdn" "$(ms_to_seconds "$remaining")"); then
-        unreachable="${unreachable:+$unreachable }$sentinel_pod_fqdn"
-        continue
-      fi
+      reply=$(cat "$replies/$i")
       read -r flags down_after <<< "$reply"
       if [ "$budget_known" != true ] && [[ "$down_after" =~ ^[0-9]+$ ]] && [ "$down_after" -gt 0 ]; then
         budget_ms=$down_after
@@ -295,12 +311,11 @@ wait_while_sentinel_fails_over_current_pod() {
       fi
       if [[ ",$flags," == *,failover_in_progress,* ]]; then
         failover_seen[$sentinel_pod_fqdn]="$flags"
-        # one failover is reason enough to wait; the others are asked next round
-        break
       else
         unset "failover_seen[$sentinel_pod_fqdn]"
       fi
     done
+    is_empty "$replies" || rm -rf "$replies"
     failing_over=""
     for sentinel_pod_fqdn in "${!failover_seen[@]}"; do
       failing_over="${failing_over:+$failing_over, }$sentinel_pod_fqdn (${failover_seen[$sentinel_pod_fqdn]})"
@@ -755,7 +770,10 @@ start_redis_server() {
   fi
   redis_server_launcher_pid=$!
   # wait returns early when a trapped signal arrives; wait again until the
-  # server has exited, then once more for its status.
+  # server has exited, then once more for its status. Until the server can be
+  # found the loop polls instead: a signal that came just before a blocking
+  # wait would be kept and never passed on. Once it can be found, the trap
+  # passes a signal straight on.
   while kill -0 "$redis_server_launcher_pid" 2>/dev/null; do
     if ! is_empty "$pending_server_signal"; then
       if forward_signal_to_redis_server "$pending_server_signal"; then
@@ -764,6 +782,10 @@ start_redis_server() {
         sleep 0.1
         continue
       fi
+    fi
+    if is_empty "$(redis_server_pids)"; then
+      sleep 0.1
+      continue
     fi
     wait "$redis_server_launcher_pid" || true
   done
@@ -784,13 +806,13 @@ handle_shutdown_signal() {
   fi
 }
 
-# Sends the signal to the server started by start_redis_server: the launcher
+# Prints the pid of the server started by start_redis_server: the launcher
 # itself when it exec'd the server, or its child when `script` runs it on a pty.
-# The image has no ps or pkill, so the process is found in /proc. Returns 1
-# when there is no such server (yet).
-forward_signal_to_redis_server() {
-  local signal="$1" proc pid stat ppid found=1
-  is_empty "$redis_server_launcher_pid" && return 1
+# The image has no ps or pkill, so the process is found in /proc. Prints
+# nothing when there is no such server (yet).
+redis_server_pids() {
+  local proc pid stat ppid
+  is_empty "$redis_server_launcher_pid" && return 0
   for proc in "$proc_root"/[0-9]*; do
     [ "$(cat "$proc/comm" 2>/dev/null)" = "$redis_server_process_name" ] || continue
     read -r stat < "$proc/stat" 2>/dev/null || continue
@@ -799,9 +821,18 @@ forward_signal_to_redis_server() {
     read -r _ ppid _ <<< "$stat"
     pid=${proc##*/}
     if [ "$pid" = "$redis_server_launcher_pid" ] || [ "$ppid" = "$redis_server_launcher_pid" ]; then
-      echo "forwarding SIG$signal to falkordb server (pid $pid)"
-      kill -"$signal" "$pid" && found=0
+      echo "$pid"
     fi
+  done
+}
+
+# Sends the signal to the server started by start_redis_server. Returns 1 when
+# there is no such server (yet).
+forward_signal_to_redis_server() {
+  local signal="$1" pid found=1
+  for pid in $(redis_server_pids); do
+    echo "forwarding SIG$signal to falkordb server (pid $pid)"
+    kill -"$signal" "$pid" && found=0
   done
   return $found
 }

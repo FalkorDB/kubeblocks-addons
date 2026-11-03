@@ -1064,7 +1064,10 @@ start_redis_server() {
   fi
   redis_server_launcher_pid=$!
   # wait returns early when a trapped signal arrives; wait again until the
-  # server has exited, then once more for its status.
+  # server has exited, then once more for its status. Until the server can be
+  # found the loop polls instead: a signal that came just before a blocking
+  # wait would be kept and never passed on. Once it can be found, the trap
+  # passes a signal straight on.
   while kill -0 "$redis_server_launcher_pid" 2>/dev/null; do
     if ! is_empty "$pending_server_signal"; then
       if forward_signal_to_redis_server "$pending_server_signal"; then
@@ -1073,6 +1076,10 @@ start_redis_server() {
         sleep 0.1
         continue
       fi
+    fi
+    if is_empty "$(redis_server_pids)"; then
+      sleep 0.1
+      continue
     fi
     wait "$redis_server_launcher_pid" || true
   done
@@ -1093,13 +1100,13 @@ handle_shutdown_signal() {
   fi
 }
 
-# Sends the signal to the server started by start_redis_server: the launcher
+# Prints the pid of the server started by start_redis_server: the launcher
 # itself when it exec'd the server, or its child when `script` runs it on a pty.
-# The image has no ps or pkill, so the process is found in /proc. Returns 1
-# when there is no such server (yet).
-forward_signal_to_redis_server() {
-  local signal="$1" proc pid stat ppid found=1
-  is_empty "$redis_server_launcher_pid" && return 1
+# The image has no ps or pkill, so the process is found in /proc. Prints
+# nothing when there is no such server (yet).
+redis_server_pids() {
+  local proc pid stat ppid
+  is_empty "$redis_server_launcher_pid" && return 0
   for proc in "$proc_root"/[0-9]*; do
     [ "$(cat "$proc/comm" 2>/dev/null)" = "$redis_server_process_name" ] || continue
     read -r stat < "$proc/stat" 2>/dev/null || continue
@@ -1108,9 +1115,18 @@ forward_signal_to_redis_server() {
     read -r _ ppid _ <<< "$stat"
     pid=${proc##*/}
     if [ "$pid" = "$redis_server_launcher_pid" ] || [ "$ppid" = "$redis_server_launcher_pid" ]; then
-      echo "forwarding SIG$signal to falkordb server (pid $pid)"
-      kill -"$signal" "$pid" && found=0
+      echo "$pid"
     fi
+  done
+}
+
+# Sends the signal to the server started by start_redis_server. Returns 1 when
+# there is no such server (yet).
+forward_signal_to_redis_server() {
+  local signal="$1" pid found=1
+  for pid in $(redis_server_pids); do
+    echo "forwarding SIG$signal to falkordb server (pid $pid)"
+    kill -"$signal" "$pid" && found=0
   done
   return $found
 }
