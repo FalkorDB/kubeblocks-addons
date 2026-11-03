@@ -427,22 +427,31 @@ master_host:redis-master"
       End
 
       It "takes a switch that happens just as the failover ends"
-        # the first look finds no switch; by the second, sentinel has switched
-        looks_file="./sentinel-looks"
-        echo 0 > "$looks_file"
-        # the first look asks both sentinels; the second look's answers have switched
-        get_sentinel_master_addr() {
-          local looks=$(( $(cat "$looks_file") + 1 )); echo "$looks" > "$looks_file"
-          if [ "$looks" -ge 3 ]; then echo "redis2 6379"; else echo "redis1 6379"; fi
-        }
+        # no sentinel has switched at the first look; by the second, after the
+        # failover has ended, they have
+        switched=""
+        get_sentinel_master_addr() { if [ -n "$switched" ]; then echo "redis2 6379"; else echo "redis1 6379"; fi; }
         check_redis_role() { echo "primary"; }
-        sentinel_may_be_failing_over() { return 1; }
+        sentinel_may_be_failing_over() { switched=true; return 1; }
         check_new_primary() {
           wait_for_sentinel_to_switch_master "redis1 6379" && echo "new=$new_primary_host:$new_primary_port"
-          rm -f "$looks_file"
         }
         When call check_new_primary
         The stdout should include "new=redis2:6379"
+      End
+
+      It "does not wait for a slow sentinel when another has switched"
+        # sentinel1 takes 3 s to answer, sentinel2 answers at once
+        get_sentinel_master_addr() {
+          if [ "$1" = sentinel1 ]; then sleep 3; echo "redis1 6379"; else echo "redis2 6379"; fi
+        }
+        check_redis_role() { echo "primary"; }
+        timed() {
+          local started=$SECONDS
+          sentinel_reports_new_primary "redis1 6379" >/dev/null && echo "switched to $new_primary_host after $((SECONDS - started))s"
+        }
+        When call timed
+        The stdout should eq "switched to redis2 after 0s"
       End
     End
 

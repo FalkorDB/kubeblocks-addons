@@ -253,15 +253,20 @@ ms_to_seconds() {
 # once that would hand a replica, perhaps behind this pod, the time to be
 # promoted. The wait never goes past sentinel's down-after-milliseconds: slow
 # sentinels count against it, each query gets at most the time left, and none
-# is asked once it is up. A failover still running at the end exits the start,
+# is asked once it is up. A failover a sentinel reported stays in mind until a
+# later answer from that sentinel says it is over: one that cannot be asked
+# again has not said so. A failover still unresolved at the end exits the start,
 # since this pod could otherwise start as a master next to the replica being
 # promoted; the container is restarted and asks again. A sentinel that is only
-# unreachable at the end does not, or it could keep the pod from starting.
+# unreachable, having reported no failover, does not, or it could keep the pod
+# from starting.
 wait_while_sentinel_fails_over_current_pod() {
   if is_empty "$SENTINEL_COMPONENT_NAME" || is_empty "$SENTINEL_POD_FQDN_LIST"; then
     return 1
   fi
   local sentinel_pod_fqdn reply flags down_after waited=1 failing_over="" unreachable="" remaining
+  # the flags each sentinel last reported a failover in progress with
+  local -A failover_seen=()
   local started budget_ms="$sentinel_failover_wait_ms" budget_known=true deadline
   started=$(now_ms)
   if is_empty "$budget_ms"; then
@@ -270,7 +275,6 @@ wait_while_sentinel_fails_over_current_pod() {
   fi
   deadline=$((started + budget_ms))
   while true; do
-    failing_over=""
     unreachable=""
     for sentinel_pod_fqdn in $(split "$SENTINEL_POD_FQDN_LIST" ","); do
       remaining=$((deadline - $(now_ms)))
@@ -290,9 +294,16 @@ wait_while_sentinel_fails_over_current_pod() {
         budget_known=true
       fi
       if [[ ",$flags," == *,failover_in_progress,* ]]; then
-        failing_over="$sentinel_pod_fqdn ($flags)"
+        failover_seen[$sentinel_pod_fqdn]="$flags"
+        # one failover is reason enough to wait; the others are asked next round
         break
+      else
+        unset "failover_seen[$sentinel_pod_fqdn]"
       fi
+    done
+    failing_over=""
+    for sentinel_pod_fqdn in "${!failover_seen[@]}"; do
+      failing_over="${failing_over:+$failing_over, }$sentinel_pod_fqdn (${failover_seen[$sentinel_pod_fqdn]})"
     done
     if is_empty "$failing_over" && is_empty "$unreachable"; then
       return $waited

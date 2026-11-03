@@ -409,29 +409,47 @@ replicas_caught_up() {
 # Returns 0 and sets new_primary_host and new_primary_port when a sentinel
 # reports a primary other than initial_addr that runs as a master. A lagging
 # sentinel may still name an earlier primary that is a replica now, and the old
-# primary must not be made a replica of one.
+# primary must not be made a replica of one. The sentinels are asked all at
+# once and each answer is looked at as it comes, so a slow sentinel does not
+# hold up one that has already switched.
 sentinel_reports_new_primary() {
-  local initial_addr="$1" addr sentinel_pod_fqdn
+  local initial_addr="$1" addr answers index pending
   local master_name="${CUSTOM_SENTINEL_MASTER_NAME:-$REDIS_COMPONENT_NAME}"
-  local -a sentinel_pod_fqdn_list
+  local -a sentinel_pod_fqdn_list query_pids seen
   new_primary_host=""
   new_primary_port=""
-  # Each answer is looked at as it comes: a slow sentinel asked first must not
-  # hold up the one that has already switched.
   IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
-  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
-    addr=$(get_sentinel_master_addr "$sentinel_pod_fqdn" "$master_name")
-    if ! is_empty "$addr" && [ "$addr" != "$initial_addr" ]; then
-      read -r new_primary_host new_primary_port <<< "$addr"
-      if [ "$(check_redis_role "$new_primary_host" "$new_primary_port" 2>/dev/null)" = "primary" ]; then
-        echo "sentinel switched the primary from $initial_addr to $addr"
-        return 0
-      fi
-      echo "a sentinel reports $addr as the primary, but it does not run as one (yet)"
-      new_primary_host=""
-      new_primary_port=""
-    fi
+  answers=$(mktemp -d) || return 1
+  for index in "${!sentinel_pod_fqdn_list[@]}"; do
+    # an answer appears whole: it is written aside and then renamed
+    { get_sentinel_master_addr "${sentinel_pod_fqdn_list[$index]}" "$master_name" > "$answers/$index.part"
+      mv "$answers/$index.part" "$answers/$index"; } &
+    query_pids+=($!)
   done
+  pending=${#sentinel_pod_fqdn_list[@]}
+  while [ "$pending" -gt 0 ]; do
+    for index in "${!sentinel_pod_fqdn_list[@]}"; do
+      [ -n "${seen[$index]:-}" ] || [ ! -f "$answers/$index" ] && continue
+      seen[$index]=1
+      pending=$((pending - 1))
+      addr=$(cat "$answers/$index")
+      if ! is_empty "$addr" && [ "$addr" != "$initial_addr" ]; then
+        read -r new_primary_host new_primary_port <<< "$addr"
+        if [ "$(check_redis_role "$new_primary_host" "$new_primary_port" 2>/dev/null)" = "primary" ]; then
+          echo "sentinel switched the primary from $initial_addr to $addr"
+          kill "${query_pids[@]}" 2>/dev/null || true
+          rm -rf "$answers"
+          return 0
+        fi
+        echo "a sentinel reports $addr as the primary, but it does not run as one (yet)"
+        new_primary_host=""
+        new_primary_port=""
+      fi
+    done
+    [ "$pending" -gt 0 ] && sleep 0.05
+  done
+  wait "${query_pids[@]}" 2>/dev/null || true
+  rm -rf "$answers"
   return 1
 }
 

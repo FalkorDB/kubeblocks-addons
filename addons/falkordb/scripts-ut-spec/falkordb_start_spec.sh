@@ -1238,6 +1238,32 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should include "sentinel sentinel-0 still cannot be asked after 6000 ms"
     End
 
+    It "keeps a reported failover in mind while that sentinel cannot be asked again"
+      # sentinel-1 reports a failover, then stops answering; sentinel-0 never sees one
+      get_sentinel_primary_flags() {
+        local calls=$(( $(cat "$flags_calls_file") + 1 ))
+        echo "$calls" > "$flags_calls_file"
+        if [ "$1" = "sentinel-0" ]; then echo "master"; return 0; fi
+        [ "$calls" -le 2 ] || return 1
+        echo "master,failover_in_progress"
+      }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "Error: sentinel sentinel-1 (master,failover_in_progress) is still failing over this pod after 6000 ms"
+    End
+
+    It "forgets a failover once that sentinel says it is over"
+      get_sentinel_primary_flags() {
+        local calls=$(( $(cat "$flags_calls_file") + 1 ))
+        echo "$calls" > "$flags_calls_file"
+        if [ "$1" = "sentinel-1" ] && [ "$calls" -le 2 ]; then echo "master,failover_in_progress"; else echo "master"; fi
+      }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be success
+      The stdout should include "sentinel sentinel-1 (master,failover_in_progress) is failing over this pod"
+      The stdout should not include "Error"
+    End
+
     It "gives each sentinel query no more than the time left"
       # a 3 s budget polled every 2 s: the first query gets 3 s, the second the
       # 1 s left, and none is asked once it is up
