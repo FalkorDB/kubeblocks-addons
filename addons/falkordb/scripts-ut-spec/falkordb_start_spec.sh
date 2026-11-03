@@ -1259,7 +1259,9 @@ Describe "FalkorDB Start Bash Script Tests"
         return 1
       }
       concurrent() {
-        ( wait_while_sentinel_fails_over_current_pod ) | grep -m1 "is failing over this pod"
+        local out
+        out=$( ( wait_while_sentinel_fails_over_current_pod ) )
+        echo "$out" | grep -m1 "is failing over this pod"
         cat "$flags_calls_file.concurrent" 2>/dev/null
       }
       When call concurrent
@@ -1550,11 +1552,13 @@ Describe "FalkorDB Start Bash Script Tests"
     End
 
     It "keeps a signal that comes before the server runs and passes it on once it does"
-      # the first lookup finds no server yet; the stub counts its calls in a file
-      # because the trap and the wait loop run it in the same shell but the test
-      # reads the count afterwards
+      # the trap's lookup finds no server yet, so it keeps the signal; the loop
+      # then finds the server and passes it on. The stub counts its calls in a
+      # file because the test reads the count afterwards
       forward_calls_file="./forward-calls"
       echo 0 > "$forward_calls_file"
+      # stand in for the /proc lookup, which needs Linux
+      redis_server_pids() { echo "$redis_server_launcher_pid"; }
       forward_signal_to_redis_server() {
         local calls=$(( $(cat "$forward_calls_file") + 1 ))
         echo "$calls" > "$forward_calls_file"

@@ -1065,10 +1065,14 @@ start_redis_server() {
   redis_server_launcher_pid=$!
   # wait returns early when a trapped signal arrives; wait again until the
   # server has exited, then once more for its status. Until the server can be
-  # found the loop polls instead: a signal that came just before a blocking
-  # wait would be kept and never passed on. Once it can be found, the trap
-  # passes a signal straight on.
+  # found the loop polls instead, as the trap can only keep a signal then. Once
+  # it can be found, a kept signal is passed on, and the trap passes any later
+  # one straight on, so none is left kept while the loop blocks in wait.
   while kill -0 "$redis_server_launcher_pid" 2>/dev/null; do
+    if is_empty "$(redis_server_pids)"; then
+      sleep 0.1
+      continue
+    fi
     if ! is_empty "$pending_server_signal"; then
       if forward_signal_to_redis_server "$pending_server_signal"; then
         pending_server_signal=""
@@ -1076,10 +1080,6 @@ start_redis_server() {
         sleep 0.1
         continue
       fi
-    fi
-    if is_empty "$(redis_server_pids)"; then
-      sleep 0.1
-      continue
     fi
     wait "$redis_server_launcher_pid" || true
   done
