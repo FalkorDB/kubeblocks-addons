@@ -1146,17 +1146,19 @@ Describe "FalkorDB Start Bash Script Tests"
     setup() {
       export SENTINEL_COMPONENT_NAME="falkordb-sent"
       export SENTINEL_POD_FQDN_LIST="sentinel-0,sentinel-1"
-      sentinel_failover_wait_max_attempts=3
+      sentinel_failover_wait_seconds=6
       flags_calls_file="./sentinel-flags-calls"
       echo 0 > "$flags_calls_file"
     }
     cleanup_sentinel_env() {
       unset SENTINEL_COMPONENT_NAME SENTINEL_POD_FQDN_LIST
-      sentinel_failover_wait_max_attempts=15
+      sentinel_failover_wait_seconds=30
       rm -f "$flags_calls_file"
     }
     Before 'setup'
     After 'cleanup_sentinel_env'
+    # sleeping moves the clock the wait measures its deadline with
+    sleep_when_ut_mode_false() { SECONDS=$((SECONDS + $1)); }
 
     It "does not wait when no sentinel is failing the pod over"
       get_sentinel_primary_flags() { echo "master"; }
@@ -1223,6 +1225,23 @@ Describe "FalkorDB Start Bash Script Tests"
       The status should be success
       The stdout should include "sentinel sentinel-1 (master,failover_in_progress) is failing over this pod"
       The stdout should include "sentinel sentinel-0 still cannot be asked after 6s"
+    End
+
+    It "gives each sentinel query no more than the time left"
+      # a 3 s budget: the first queries get 3 s, the last round 1 s
+      sentinel_failover_wait_seconds=3
+      timeouts_file="./sentinel-query-timeouts"
+      : > "$timeouts_file"
+      get_sentinel_primary_flags() { echo "$1 $2" >> "$timeouts_file"; echo "master,failover_in_progress"; }
+      query_timeouts() {
+        ( wait_while_sentinel_fails_over_current_pod ) >/dev/null
+        cat "$timeouts_file"
+        rm -f "$timeouts_file"
+      }
+      When call query_timeouts
+      The line 1 of stdout should eq "sentinel-0 3"
+      The line 2 of stdout should eq "sentinel-0 1"
+      The lines of stdout should eq 3
     End
 
     It "does not wait without sentinel"

@@ -229,7 +229,16 @@ master_host:redis-master"
         # renewals print nothing, so the commands are logged to a file
         cmd_log="./failover-cmds"
         execute_sub_command() { echo "$1: $4" >> "$cmd_log"; [[ "$4" != "SENTINEL FAILOVER"* ]] || [ "$1" = "sentinel2" ]; }
-        call_func_with_retry() { shift 2; "$@"; }
+        # retries like the common library's, without the delay: sentinel1 fails
+        # all three attempts, sentinel2 takes the first
+        call_func_with_retry() {
+          local max_retries="$1" retries=0
+          shift 2
+          until "$@"; do
+            retries=$((retries + 1))
+            [ "$retries" -lt "$max_retries" ] || return 1
+          done
+        }
         logged_commands() {
           : > "$cmd_log"
           paused_primary="redis1"
@@ -242,7 +251,12 @@ master_host:redis-master"
         The line 1 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
         The line 2 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
         The line 3 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
-        The line 4 of stdout should eq "sentinel2: SENTINEL FAILOVER redis"
+        The line 4 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
+        The line 5 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
+        The line 6 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
+        The line 7 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
+        The line 8 of stdout should eq "sentinel2: SENTINEL FAILOVER redis"
+        The lines of stdout should eq 8
       End
 
       It "should fail when all sentinels fail"

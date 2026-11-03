@@ -31,7 +31,7 @@ redis_data_dir="/data"
 retry_times=3
 retry_delay_second=2
 # how long the start waits for a sentinel failing this pod over (see build_replicaof_config)
-sentinel_failover_wait_max_attempts=15
+sentinel_failover_wait_seconds=30
 sentinel_failover_wait_delay_second=2
 service_port=${SERVICE_PORT:-6379}
 redis_server_process_name="redis-server"
@@ -204,14 +204,14 @@ build_replicaof_config() {
 # sentinel cannot be asked or its reply cannot be read: redis-cli exits 0 on an
 # error reply, so only the reply tells an answer from a failure.
 get_sentinel_primary_flags() {
-  local sentinel_pod_fqdn="$1"
+  local sentinel_pod_fqdn="$1" query_timeout="${2:-5}"
   local output
   sentinel_service_port=${SENTINEL_SERVICE_PORT:-26379}
   unset_xtrace_when_ut_mode_false
   if is_empty "$SENTINEL_PASSWORD"; then
-    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_pod_fqdn" -p "$sentinel_service_port" sentinel master "$REDIS_COMPONENT_NAME" 2>/dev/null)
+    output=$(timeout "$query_timeout" redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_pod_fqdn" -p "$sentinel_service_port" sentinel master "$REDIS_COMPONENT_NAME" 2>/dev/null)
   else
-    output=$(timeout 5 redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_pod_fqdn" -p "$sentinel_service_port" -a "$SENTINEL_PASSWORD" --no-auth-warning sentinel master "$REDIS_COMPONENT_NAME" 2>/dev/null)
+    output=$(timeout "$query_timeout" redis-cli $REDIS_CLI_TLS_CMD -h "$sentinel_pod_fqdn" -p "$sentinel_service_port" -a "$SENTINEL_PASSWORD" --no-auth-warning sentinel master "$REDIS_COMPONENT_NAME" 2>/dev/null)
   fi
   set_xtrace_when_ut_mode_false
   # the reply is a list of alternating field names and values
@@ -229,7 +229,8 @@ get_sentinel_primary_flags() {
 # that cannot be asked may be the one running the failover, so it is waited for
 # too. A sentinel that only sees the pod down is not: when every pod restarts at
 # once that would hand a replica, perhaps behind this pod, the time to be
-# promoted. The wait is bounded. A failover still running at the end exits the
+# promoted. The wait is bounded by a deadline that slow sentinels count against:
+# each query gets at most the time left. A failover still running at the end exits the
 # start, since this pod could otherwise start as a master next to the replica
 # being promoted; the container is restarted and asks again. A sentinel that is
 # only unreachable at the end does not, or it could keep the pod from starting.
@@ -237,12 +238,15 @@ wait_while_sentinel_fails_over_current_pod() {
   if is_empty "$SENTINEL_COMPONENT_NAME" || is_empty "$SENTINEL_POD_FQDN_LIST"; then
     return 1
   fi
-  local attempt sentinel_pod_fqdn flags waited=1 failing_over="" unreachable=""
-  for ((attempt = 0; attempt < sentinel_failover_wait_max_attempts; attempt++)); do
+  local sentinel_pod_fqdn flags waited=1 failing_over="" unreachable="" remaining
+  local deadline=$((SECONDS + sentinel_failover_wait_seconds))
+  while true; do
     failing_over=""
     unreachable=""
     for sentinel_pod_fqdn in $(split "$SENTINEL_POD_FQDN_LIST" ","); do
-      if ! flags=$(get_sentinel_primary_flags "$sentinel_pod_fqdn"); then
+      # every sentinel is asked in the last round too, for a second at least
+      remaining=$((deadline - SECONDS))
+      if ! flags=$(get_sentinel_primary_flags "$sentinel_pod_fqdn" "$(( remaining < 1 ? 1 : (remaining < 5 ? remaining : 5) ))"); then
         unreachable="${unreachable:+$unreachable }$sentinel_pod_fqdn"
         continue
       fi
@@ -260,14 +264,17 @@ wait_while_sentinel_fails_over_current_pod() {
     else
       echo "sentinel $unreachable cannot be asked and may be failing over this pod, its primary; waiting before starting."
     fi
-    sleep_when_ut_mode_false "$sentinel_failover_wait_delay_second"
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+      break
+    fi
+    sleep_when_ut_mode_false "$(( remaining < sentinel_failover_wait_delay_second ? remaining : sentinel_failover_wait_delay_second ))"
   done
-  local waited_seconds=$((sentinel_failover_wait_max_attempts * sentinel_failover_wait_delay_second))
   if ! is_empty "$failing_over"; then
-    echo "Error: sentinel $failing_over is still failing over this pod after ${waited_seconds}s; refusing to start while it may promote another pod. Exiting."
+    echo "Error: sentinel $failing_over is still failing over this pod after ${sentinel_failover_wait_seconds}s; refusing to start while it may promote another pod. Exiting."
     exit 1
   fi
-  echo "sentinel $unreachable still cannot be asked after ${waited_seconds}s; asking the others for the primary again."
+  echo "sentinel $unreachable still cannot be asked after ${sentinel_failover_wait_seconds}s; asking the others for the primary again."
   return 0
 }
 
