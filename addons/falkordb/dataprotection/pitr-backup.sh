@@ -7,9 +7,12 @@ if [ -z ${DP_DB_PASSWORD} ]; then
   connect_url="redis-cli $REDIS_CLI_TLS_CMD -h ${DP_DB_HOST} -p ${DP_DB_PORT}"
 fi
 global_last_purge_time=$(date +%s)
-global_aof_last_modify_time=0
+# when the last round that uploaded the live AOF started; see update_aof_file
+global_aof_pushed_at=0
 global_acl_last_modify_time=0
 global_old_size=0
+# every write stamped up to this time is in the backup repo
+global_archived_until=0
 
 AOF_DIR=$(${connect_url} CONFIG GET appenddirname | awk 'NR==2')
 APPEND_FILE_NAME=$(${connect_url} CONFIG GET appendfilename | awk 'NR==2')
@@ -167,6 +170,9 @@ function update_aof_file() {
   local base_file=$(aof_base_file "$global_backup_seq")
   local backup_files_prefix=$(get_backup_files_prefix $base_file)
   local backup_manifest
+  # taken before anything is read: every write stamped before this second is
+  # in the files this round uploads.
+  local round_start=$(date +%s)
 
   if [ ! -f "$incr_file" ] || [ ! -f "$base_file" ]; then
     DP_log "update_aof_file: $incr_file or $base_file do not exist"
@@ -178,8 +184,10 @@ function update_aof_file() {
   fi
 
   # create a directory for backup files we are tracking, and after a aof rewrite, we will archive them in to a tar.zst file
-  # the modify times below only advance after a successful push, so a failed push is retried on the next round.
-  if [ $(get_base_file_ctime "$base_file") -gt ${global_aof_last_modify_time} ]; then
+  # global_aof_pushed_at only advances after a successful round, so a failed push is retried on the next round.
+  # Times have one second resolution, and a write in the same second as the last upload but after it leaves the
+  # modify time equal to it, so a file is uploaded again until its time is older than the last round's start.
+  if [ $(get_base_file_ctime "$base_file") -ge ${global_aof_pushed_at} ]; then
     if ! datasafed push "${base_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${base_file}")" ||
       ! datasafed push "${backup_manifest}" "${backup_files_prefix}.dir/${backup_manifest}" ||
       ! datasafed push "${DATA_DIR}/users.acl" "${backup_files_prefix}.dir/users.acl"; then
@@ -191,12 +199,11 @@ function update_aof_file() {
 
   # keep updating the latest aof file
   local aof_modify_time=$(stat -c %Y "${incr_file}")
-  if [ "${aof_modify_time}" -gt "${global_aof_last_modify_time}" ]; then
+  if [ "${aof_modify_time}" -ge "${global_aof_pushed_at}" ]; then
     if ! datasafed push "${incr_file}" "${backup_files_prefix}.dir/${AOF_DIR}/$(basename "${incr_file}")"; then
       DP_error_log "update_aof_file: failed to upload $incr_file, retrying next round"
       return 1
     fi
-    global_aof_last_modify_time=${aof_modify_time}
     DP_log "Update file: $incr_file"
   fi
 
@@ -211,6 +218,9 @@ function update_aof_file() {
     global_acl_last_modify_time=${acl_modify_time}
     DP_log "Update file: $acl_file"
   fi
+  global_aof_pushed_at=${round_start}
+  # the #TS: stamps have one second resolution, so the second the round started in may still be taking writes
+  global_archived_until=$((round_start - 1))
 }
 
 function purge_expired_files() {
@@ -219,8 +229,11 @@ function purge_expired_files() {
   if [ ! -z "${info}" ]; then
     global_last_purge_time=${current_unix}
     DP_log "Cleanup expired aof files: ${info}"
-    local total_size=$(datasafed stat / | grep TotalSize | awk '{print $2}')
-    DP_save_backup_status_info "${total_size}"
+    # a sharded backup reports the size of every shard, in save_cluster_backup_status
+    if [ "${MODE}" != "cluster" ]; then
+      local total_size=$(datasafed stat / | grep TotalSize | awk '{print $2}')
+      DP_save_backup_status_info "${total_size}"
+    fi
   fi
 }
 
@@ -231,12 +244,76 @@ function save_backup_status() {
     return
   fi
   global_old_size=${total_size}
-  local start_time=$(datasafed list / | awk -F '.' '{print $1}' | sort | head -n 1)
+  local start_time=$(DP_pitr_list_archives | awk -F '.' '{print $1}' | sort -n | head -n 1)
   if [ -z "$start_time" ]; then
     start_time=$(date +%s)
     DP_log "save_backup_status: empty start_time from backup repo, use current time"
   fi
   DP_save_backup_status_info "${total_size}" "${start_time}" "$(date +%s)"
+}
+
+# A sharded cluster is backed up by one archiver per shard, each a target of the
+# same Backup, archiving its shard to ${DP_BACKUP_BASE_PATH}, a directory named
+# after the target under the Backup's path. They all patch the one
+# status.timeRange, and a restore to time T replays every shard to T, so the
+# Backup can only offer the times every shard covers. Each archiver publishes the
+# range its own shard covers to ${ARCHIVE_RANGE_FILE}, reads every shard's, and
+# reports their intersection, so the status is the same whichever writes last.
+ARCHIVE_RANGE_FILE="kb-archive-range"
+CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
+global_cluster_status_time=0
+
+function publish_archive_range() {
+  local start=$(DP_pitr_list_archives | awk -F '.' '{print $1}' | sort -n | head -n 1)
+  if [ -z "$start" ] || [ "${global_archived_until}" -le 0 ]; then
+    return
+  fi
+  if ! echo "${start} ${global_archived_until}" | datasafed push - "${ARCHIVE_RANGE_FILE}"; then
+    DP_error_log "publish_archive_range: failed to upload ${ARCHIVE_RANGE_FILE}, retrying next round"
+  fi
+}
+
+# The number of shards: primaries that own slots.
+function cluster_shard_count() {
+  ${connect_url} CLUSTER NODES 2>/dev/null |
+    awk '$3 ~ /(^|,)master(,|$)/ && $3 !~ /(^|,)fail(,|$)/ && NF > 8' | grep -c .
+}
+
+function save_cluster_backup_status() {
+  local root
+  root=$(dirname "${DP_BACKUP_BASE_PATH}")
+  local shards targets target range start end
+  local ranges=0 cluster_start=0 cluster_end=0 extras=""
+  shards=$(cluster_shard_count)
+  if ! targets=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed list -d /); then
+    DP_error_log "save_cluster_backup_status: failed to list the shards under ${root}"
+    return
+  fi
+  for target in ${targets}; do
+    target=${target%/}
+    # a shard that has archived nothing yet has no range
+    range=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed pull "${target}/${ARCHIVE_RANGE_FILE}" - 2>/dev/null) || continue
+    read -r start end <<<"${range}"
+    if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ ]]; then
+      continue
+    fi
+    ranges=$((ranges + 1))
+    [ "${start}" -gt "${cluster_start}" ] && cluster_start=${start}
+    { [ "${cluster_end}" -eq 0 ] || [ "${end}" -lt "${cluster_end}" ]; } && cluster_end=${end}
+    extras="${extras:+${extras},}{\"shard\":\"${target}\",\"start\":\"$(date -u -d @"${start}" +%Y-%m-%dT%H:%M:%SZ)\",\"end\":\"$(date -u -d @"${end}" +%Y-%m-%dT%H:%M:%SZ)\"}"
+  done
+  local total_size
+  total_size=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed stat / | grep TotalSize | awk '{print $2}')
+  if [ -z "${shards}" ] || [ "${shards}" -eq 0 ] || [ "${ranges}" -lt "${shards}" ] ||
+    [ "${cluster_start}" -gt "${cluster_end}" ]; then
+    # Some shard covers no time yet, or the shards share none, so no time can
+    # be restored. The sidecar merge-patches the status, so the null is what
+    # takes an earlier window off the Backup.
+    DP_log "save_cluster_backup_status: ${ranges} of ${shards} shards have archived, and they share no time yet"
+    echo "{\"totalSize\":\"${total_size}\",\"extras\":[${extras}],\"timeRange\":null}" >"${DP_BACKUP_INFO_FILE}"
+    return
+  fi
+  DP_save_backup_status_info "${total_size}" "${cluster_start}" "${cluster_end}" "" "${extras}"
 }
 
 function check_conf() {
@@ -279,7 +356,16 @@ while true; do
 
   purge_expired_files
 
-  save_backup_status
+  if [ "${MODE}" == "cluster" ]; then
+    now=$(date +%s)
+    if [ $((now - global_cluster_status_time)) -ge "${CLUSTER_STATUS_INTERVAL_SECONDS}" ]; then
+      global_cluster_status_time=${now}
+      publish_archive_range
+      save_cluster_backup_status
+    fi
+  else
+    save_backup_status
+  fi
 
   sleep "${LOG_ARCHIVE_SECONDS}"
 done

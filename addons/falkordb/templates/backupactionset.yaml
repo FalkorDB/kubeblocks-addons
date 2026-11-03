@@ -146,6 +146,7 @@ spec:
         #!/bin/bash
         {{- .Files.Get "dataprotection/common-scripts.sh" | nindent 8 }}
         {{- .Files.Get "dataprotection/switch-data-dir.sh" | nindent 8 }}
+        {{- .Files.Get "dataprotection/pitr-restore-common.sh" | nindent 8 }}
         {{- .Files.Get "dataprotection/pitr-restore.sh" | nindent 8 }}
     postReady:
     - job:

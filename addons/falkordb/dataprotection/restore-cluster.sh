@@ -2,7 +2,16 @@
 set -e
 export PATH="$PATH:$DP_DATASAFED_BIN_PATH"
 export DATASAFED_BACKEND_BASE_PATH="$DP_BACKUP_BASE_PATH"
-datasafed pull -d zstd-fastest "${DP_BACKUP_NAME}.rdb.zst" ${DATA_DIR}/kb-dp-dump.rdb
+if [ "${RESTORE_FROM_PREPARED_RDB:-}" = "true" ]; then
+  # A point-in-time restore: pitr-restore-cluster-data.sh has rebuilt the
+  # shard's data at the restore time in this file.
+  if [ ! -f "${DATA_DIR}/kb-dp-dump.rdb" ]; then
+    echo "ERROR: ${DATA_DIR}/kb-dp-dump.rdb is missing; the shard's data was not rebuilt" >&2
+    exit 1
+  fi
+else
+  datasafed pull -d zstd-fastest "${DP_BACKUP_NAME}.rdb.zst" ${DATA_DIR}/kb-dp-dump.rdb
+fi
 # With TLS on, the server sets `port 0` and only listens on the TLS port, so a
 # redis:// sinker is refused on every node. REDIS_CLI_TLS_CMD is what tells
 # the other data-protection jobs to speak TLS; ape-dts takes it as the URL

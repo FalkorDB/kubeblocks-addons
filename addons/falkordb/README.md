@@ -17,7 +17,7 @@ FalkorDB is an open source (SSPL licensed) in-memory graph database based on Red
 | Feature     | Method | Description |
 |-------------|--------|------------|
 | Full Backup | datafile  | uses `redis-cli BGSAVE` command to backup data |
-| Continuous Backup | aof | continuously perform incremental backups by archiving Append-Only Files (AOF) |
+| Continuous Backup | aof | continuously perform incremental backups by archiving Append-Only Files (AOF), for replication and sharded clusters |
 
 ### Versions
 
@@ -720,6 +720,29 @@ spec:
     enabled: false   # set to `true` to schedule base backup using volume snapshot periodically
     retentionPeriod: 7d
 ```
+
+#### Continuous Backup of a Sharded Cluster
+
+Sharded clusters (`topology: cluster`) offer the `aof` method too. `aof-timestamp-enabled` is already `yes` in their configuration, so the only step is to enable the `aof` method in the sharding's `BackupSchedule`.
+
+The continuous `Backup` runs one archiver per shard, each a target of the same `Backup`, following its shard's current primary across failovers. Each shard's archive covers its own time range, and the `Backup` reports:
+
+- `status.timeRange`: the time every shard covers (the latest start and the earliest end). This is the window a restore can ask for. While any shard has archived nothing yet, or the shards share no time, there is no `timeRange`.
+- `status.extras`: each shard's own range, as `{"shard": "<target>", "start": "...", "end": "..."}`.
+
+To restore a sharded cluster to a point in time, name the continuous `Backup` and a `restoreTime` inside `status.timeRange`, keyed by the sharding name:
+
+```yaml
+metadata:
+  annotations:
+    kubeblocks.io/restore-from-backup: '{"shard":{"name":"<continuous backup>","namespace":"demo","volumeRestorePolicy":"Parallel","restoreTime":"2026-11-03T10:15:00Z"}}'
+```
+
+Every shard of the new cluster replays one source shard's archive, cut at the same `restoreTime`, and writes the result through the new cluster, so each key lands on the shard that owns its slot in the new cluster. The new cluster should have as many shards as the source.
+
+> [!NOTE]
+> The shards agree on the restore time to the precision of the AOF timestamps (one second) and of the clocks of the nodes the shards run on.
+> Writes made within the second of `restoreTime` are kept, and a write that touched several shards (for example a client writing keys of different slots one after another) can come back on one shard and not another if it spans that second.
 
 #### Backup using Cluster API
 

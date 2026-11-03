@@ -79,3 +79,11 @@ function DP_purge_expired_files() {
     echo ${file}
   done
 }
+
+# List the aof archives at the root of the backup repo, named
+# ${base_file_ctime}.${seq}.dir/ or ${base_file_ctime}.${seq}.tar.zst, and
+# nothing else the repo holds next to them (such as the archive range file of
+# a sharded backup).
+function DP_pitr_list_archives() {
+  datasafed list / | awk '/^[0-9]+\.[0-9]+\./'
+}
