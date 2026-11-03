@@ -1964,6 +1964,37 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The stdout should include "[falkordb] shutting down"
       The stdout should include "falkordb server exited with status 0"
     End
+
+    It "keeps a signal that comes before the server runs and passes it on once it does"
+      # the first lookup finds no server yet; the stub counts its calls in a file
+      # because the trap and the wait loop run it in the same shell but the test
+      # reads the count afterwards
+      forward_calls_file="./forward-calls"
+      echo 0 > "$forward_calls_file"
+      forward_signal_to_redis_server() {
+        local calls=$(( $(cat "$forward_calls_file") + 1 ))
+        echo "$calls" > "$forward_calls_file"
+        [ "$calls" -ge 2 ] || return 1
+        kill -"$1" "$redis_server_launcher_pid"
+      }
+      build_redis_server_start_cmd() {
+        echo "sh -c 'trap \"echo shutting down; exit 0\" TERM; echo ready; while :; do sleep 0.1; done'"
+      }
+      send_term_when_ready() {
+        start_redis_server &
+        local starter=$!
+        sleep 1
+        kill -TERM "$starter"
+        wait "$starter"
+        local status=$?
+        rm -f "$forward_calls_file"
+        return $status
+      }
+      When call send_term_when_ready
+      The status should be success
+      The stdout should include "falkordb server is not running yet, passing SIGTERM on once it is"
+      The stdout should include "[falkordb] shutting down"
+    End
   End
 
   Describe "forward_signal_to_redis_server()"
@@ -1999,6 +2030,19 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       When call forward_signal_to_redis_server TERM
       The stdout should include "kill -TERM 102"
       The stdout should not include "kill -TERM 101"
+    End
+
+    It "fails when the launcher started no server"
+      redis_server_launcher_pid="999"
+      When call forward_signal_to_redis_server TERM
+      The status should be failure
+      The stdout should eq ""
+    End
+
+    It "fails before the server is launched"
+      redis_server_launcher_pid=""
+      When call forward_signal_to_redis_server TERM
+      The status should be failure
     End
   End
 End

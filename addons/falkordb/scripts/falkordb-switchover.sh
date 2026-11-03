@@ -22,13 +22,15 @@ test || __() {
 
 declare -A ORIGINAL_PRIORITIES
 redis_service_port=${SERVICE_PORT:-6379}
-# How long writes on the old primary stay paused at most (see
-# failover_with_writes_paused); it covers the waits below with room to spare.
+# How long writes on the old primary stay paused (see failover_with_writes_paused)
+# from the last time the pause was renewed. Every step of the failover renews it,
+# so it only runs out when this script dies or cannot reach the old primary.
 write_pause_ms=30000
 replica_catch_up_max_attempts=10
 new_primary_max_attempts=15
 new_primary_host=""
 new_primary_port=""
+paused_primary=""
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -242,6 +244,7 @@ execute_sentinel_failover() {
   IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
   unset_xtrace_when_ut_mode_false
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+    renew_write_pause
     if call_func_with_retry 3 5 execute_sub_command "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL FAILOVER $master_name"; then
       echo "Sentinel failover started with $sentinel_pod_fqdn"
       success=true
@@ -311,6 +314,7 @@ wait_for_sentinel_to_switch_master() {
         return 0
       fi
     done <<< "$(get_sentinel_master_addrs)"
+    renew_write_pause
     sleep_when_ut_mode_false 1
   done
   echo "Error: no sentinel reports a primary other than $initial_addr" >&2
@@ -339,13 +343,15 @@ failover_with_writes_paused() {
     echo "Error: failed to pause writes on $old_primary" >&2
     return 1
   fi
-  echo "writes paused on $old_primary for up to $write_pause_ms ms"
+  paused_primary="$old_primary"
+  echo "writes paused on $old_primary for up to $write_pause_ms ms at a time"
 
   for ((attempt = 0; attempt < replica_catch_up_max_attempts; attempt++)); do
     if replicas_caught_up "$old_primary"; then
       caught_up=true
       break
     fi
+    renew_write_pause
     sleep_when_ut_mode_false 1
   done
   if [ "$caught_up" != true ]; then
@@ -365,17 +371,36 @@ failover_with_writes_paused() {
     return 1
   fi
 
-  if call_func_with_retry 3 1 execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "REPLICAOF $new_primary_host $new_primary_port"; then
-    echo "$old_primary is now a replica of $new_primary_host:$new_primary_port"
-  else
-    echo "Warning: failed to make $old_primary a replica of $new_primary_host:$new_primary_port, leaving it to sentinel" >&2
+  call_func_with_retry 3 1 execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "REPLICAOF $new_primary_host $new_primary_port" || true
+  # Unpausing a primary that is still a master would let it acknowledge writes
+  # the new primary never gets, so whatever REPLICAOF answered, it is only
+  # unpaused once it reports itself a replica. Otherwise the pause is left to
+  # run out, and Sentinel demotes it after that.
+  if [ "$(check_redis_role "$old_primary" "$redis_service_port" 2>/dev/null)" != "secondary" ]; then
+    paused_primary=""
+    echo "Error: $old_primary is not a replica of $new_primary_host:$new_primary_port yet; its writes stay paused for up to $write_pause_ms ms, then sentinel demotes it" >&2
+    return 1
   fi
+  echo "$old_primary is now a replica of $new_primary_host:$new_primary_port"
   unpause_writes "$old_primary"
   return 0
 }
 
+# Pauses writes on the old primary for another write_pause_ms, so the pause
+# outlasts every step of the failover however long the steps take.
+renew_write_pause() {
+  is_empty "$paused_primary" && return 0
+  if ! execute_sub_command "$paused_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT PAUSE $write_pause_ms WRITE" >/dev/null; then
+    echo "Warning: failed to renew the write pause on $paused_primary" >&2
+  fi
+  return 0
+}
+
+# A failed unpause does not fail the switchover: it only keeps writers waiting
+# until the pause runs out, and loses none of their writes.
 unpause_writes() {
   local primary_fqdn="$1"
+  paused_primary=""
   if call_func_with_retry 3 1 execute_sub_command "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT UNPAUSE"; then
     echo "writes unpaused on $primary_fqdn"
   else

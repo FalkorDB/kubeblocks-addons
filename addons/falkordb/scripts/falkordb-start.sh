@@ -36,6 +36,7 @@ sentinel_failover_wait_delay_second=2
 service_port=${SERVICE_PORT:-6379}
 redis_server_process_name="redis-server"
 redis_server_launcher_pid=""
+pending_server_signal=""
 proc_root="/proc"
 
 load_common_library() {
@@ -197,7 +198,9 @@ build_replicaof_config() {
 }
 
 # Prints the flags (such as "master,s_down,o_down") the sentinel holds for the
-# primary it monitors, and nothing when it cannot be asked or monitors none.
+# primary it monitors, and nothing when it monitors none. Returns 1 when the
+# sentinel cannot be asked or its reply cannot be read: redis-cli exits 0 on an
+# error reply, so only the reply tells an answer from a failure.
 get_sentinel_primary_flags() {
   local sentinel_pod_fqdn="$1"
   local output
@@ -210,14 +213,23 @@ get_sentinel_primary_flags() {
   fi
   set_xtrace_when_ut_mode_false
   # the reply is a list of alternating field names and values
-  echo "$output" | sed -n '/^flags$/{n;p;q;}'
+  local flags
+  flags=$(echo "$output" | sed -n '/^flags$/{n;p;q;}')
+  if ! is_empty "$flags"; then
+    echo "$flags"
+    return 0
+  fi
+  [[ "$output" == *"No such master"* ]]
 }
 
 # Returns 0 after waiting while any sentinel is failing over its primary, this
-# pod, and 1 straight away when none is. A sentinel that only sees the pod down
-# is not waited for: when every pod restarts at once that would hand a replica,
-# perhaps behind this pod, the time to be promoted. A failover that has started
-# goes on even if the pod comes back, so it is waited for, though not forever.
+# pod, and 1 straight away when every sentinel answers that none is. A sentinel
+# that cannot be asked may be the one running the failover, so it is waited for
+# too. A sentinel that only sees the pod down is not: when every pod restarts at
+# once that would hand a replica, perhaps behind this pod, the time to be
+# promoted. A failover that has started goes on even if the pod comes back, so
+# it is waited for, though not forever: a sentinel that stays unreachable would
+# otherwise keep the pod from ever starting.
 wait_while_sentinel_fails_over_current_pod() {
   if is_empty "$SENTINEL_COMPONENT_NAME" || is_empty "$SENTINEL_POD_FQDN_LIST"; then
     return 1
@@ -226,7 +238,10 @@ wait_while_sentinel_fails_over_current_pod() {
   for ((attempt = 0; attempt < sentinel_failover_wait_max_attempts; attempt++)); do
     local failing_over=""
     for sentinel_pod_fqdn in $(split "$SENTINEL_POD_FQDN_LIST" ","); do
-      flags=$(get_sentinel_primary_flags "$sentinel_pod_fqdn")
+      if ! flags=$(get_sentinel_primary_flags "$sentinel_pod_fqdn"); then
+        failing_over="$sentinel_pod_fqdn (cannot be asked, so may be)"
+        break
+      fi
       if [[ ",$flags," == *,failover_in_progress,* ]]; then
         failing_over="$sentinel_pod_fqdn ($flags)"
         break
@@ -654,17 +669,28 @@ start_redis_server() {
   # it shuts down cleanly (and fast) instead of being killed at the end of the
   # grace period. `script` would kill it, so it is signalled directly, and the
   # command is exec'd so the server is the child of `script`, not of a shell.
+  # The traps go in first: a signal that comes before the server is running is
+  # kept and passed on once it is.
+  pending_server_signal=""
+  trap 'handle_shutdown_signal TERM' TERM
+  trap 'handle_shutdown_signal INT' INT
   if command -v script >/dev/null 2>&1; then
     script -q -f -e -c "exec $exec_cmd" /dev/null >&3 2>&1 &
   else
     eval "exec $exec_cmd" >&3 2>&1 &
   fi
   redis_server_launcher_pid=$!
-  trap 'forward_signal_to_redis_server TERM' TERM
-  trap 'forward_signal_to_redis_server INT' INT
   # wait returns early when a trapped signal arrives; wait again until the
   # server has exited, then once more for its status.
   while kill -0 "$redis_server_launcher_pid" 2>/dev/null; do
+    if ! is_empty "$pending_server_signal"; then
+      if forward_signal_to_redis_server "$pending_server_signal"; then
+        pending_server_signal=""
+      else
+        sleep 0.1
+        continue
+      fi
+    fi
     wait "$redis_server_launcher_pid" || true
   done
   wait "$redis_server_launcher_pid" || server_status=$?
@@ -677,11 +703,20 @@ start_redis_server() {
   return "$server_status"
 }
 
+handle_shutdown_signal() {
+  if ! forward_signal_to_redis_server "$1"; then
+    echo "falkordb server is not running yet, passing SIG$1 on once it is"
+    pending_server_signal="$1"
+  fi
+}
+
 # Sends the signal to the server started by start_redis_server: the launcher
 # itself when it exec'd the server, or its child when `script` runs it on a pty.
-# The image has no ps or pkill, so the process is found in /proc.
+# The image has no ps or pkill, so the process is found in /proc. Returns 1
+# when there is no such server (yet).
 forward_signal_to_redis_server() {
-  local signal="$1" proc pid stat ppid
+  local signal="$1" proc pid stat ppid found=1
+  is_empty "$redis_server_launcher_pid" && return 1
   for proc in "$proc_root"/[0-9]*; do
     [ "$(cat "$proc/comm" 2>/dev/null)" = "$redis_server_process_name" ] || continue
     read -r stat < "$proc/stat" 2>/dev/null || continue
@@ -691,9 +726,10 @@ forward_signal_to_redis_server() {
     pid=${proc##*/}
     if [ "$pid" = "$redis_server_launcher_pid" ] || [ "$ppid" = "$redis_server_launcher_pid" ]; then
       echo "forwarding SIG$signal to falkordb server (pid $pid)"
-      kill -"$signal" "$pid" || true
+      kill -"$signal" "$pid" && found=0
     fi
   done
+  return $found
 }
 
 # TODO: if instanceTemplate is specified, the pod service could not be parsed from the pod ordinal.

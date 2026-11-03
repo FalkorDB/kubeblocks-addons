@@ -33,6 +33,7 @@ check_ready_times=30
 retry_delay_second=2
 redis_server_process_name="redis-server"
 redis_server_launcher_pid=""
+pending_server_signal=""
 proc_root="/proc"
 # how long the start script waits for known peers to come up after a full restart
 rejoin_peer_max_attempts=12
@@ -1051,17 +1052,28 @@ start_redis_server() {
   # it shuts down cleanly (and fast) instead of being killed at the end of the
   # grace period. `script` would kill it, so it is signalled directly, and the
   # command is exec'd so the server is the child of `script`, not of a shell.
+  # The traps go in first: a signal that comes before the server is running is
+  # kept and passed on once it is.
+  pending_server_signal=""
+  trap 'handle_shutdown_signal TERM' TERM
+  trap 'handle_shutdown_signal INT' INT
   if command -v script >/dev/null 2>&1; then
     script -q -f -e -c "exec $exec_cmd" /dev/null >&3 2>&1 &
   else
     eval "exec $exec_cmd" >&3 2>&1 &
   fi
   redis_server_launcher_pid=$!
-  trap 'forward_signal_to_redis_server TERM' TERM
-  trap 'forward_signal_to_redis_server INT' INT
   # wait returns early when a trapped signal arrives; wait again until the
   # server has exited, then once more for its status.
   while kill -0 "$redis_server_launcher_pid" 2>/dev/null; do
+    if ! is_empty "$pending_server_signal"; then
+      if forward_signal_to_redis_server "$pending_server_signal"; then
+        pending_server_signal=""
+      else
+        sleep 0.1
+        continue
+      fi
+    fi
     wait "$redis_server_launcher_pid" || true
   done
   wait "$redis_server_launcher_pid" || server_status=$?
@@ -1074,11 +1086,20 @@ start_redis_server() {
   return "$server_status"
 }
 
+handle_shutdown_signal() {
+  if ! forward_signal_to_redis_server "$1"; then
+    echo "falkordb server is not running yet, passing SIG$1 on once it is"
+    pending_server_signal="$1"
+  fi
+}
+
 # Sends the signal to the server started by start_redis_server: the launcher
 # itself when it exec'd the server, or its child when `script` runs it on a pty.
-# The image has no ps or pkill, so the process is found in /proc.
+# The image has no ps or pkill, so the process is found in /proc. Returns 1
+# when there is no such server (yet).
 forward_signal_to_redis_server() {
-  local signal="$1" proc pid stat ppid
+  local signal="$1" proc pid stat ppid found=1
+  is_empty "$redis_server_launcher_pid" && return 1
   for proc in "$proc_root"/[0-9]*; do
     [ "$(cat "$proc/comm" 2>/dev/null)" = "$redis_server_process_name" ] || continue
     read -r stat < "$proc/stat" 2>/dev/null || continue
@@ -1088,9 +1109,10 @@ forward_signal_to_redis_server() {
     pid=${proc##*/}
     if [ "$pid" = "$redis_server_launcher_pid" ] || [ "$ppid" = "$redis_server_launcher_pid" ]; then
       echo "forwarding SIG$signal to falkordb server (pid $pid)"
-      kill -"$signal" "$pid" || true
+      kill -"$signal" "$pid" && found=0
     fi
   done
+  return $found
 }
 
 # build redis cluster configuration redis.conf

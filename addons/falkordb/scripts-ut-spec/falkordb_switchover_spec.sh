@@ -319,6 +319,7 @@ master_host:redis-master"
       }
       execute_sentinel_failover() { failover_started=true; echo "failover"; return 0; }
       replicas_caught_up() { return 0; }
+      check_redis_role() { echo "secondary"; }
 
       It "pauses writes, fails over, demotes the old primary and only then unpauses"
         failover_started=""
@@ -367,6 +368,45 @@ master_host:redis-master"
         The status should be failure
         The stdout should not include "failover"
         The stderr should include "failed to pause writes on redis1"
+      End
+
+      It "keeps writes paused and fails when the old primary is still a master"
+        failover_started=""
+        check_redis_role() { echo "primary"; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should include "cmd redis1: REPLICAOF redis2 6379"
+        The stdout should not include "CLIENT UNPAUSE"
+        The stderr should include "redis1 is not a replica of redis2:6379 yet"
+      End
+
+      It "trusts the role rather than the REPLICAOF reply"
+        failover_started=""
+        # REPLICAOF answers "OK Already connected to specified master" when Sentinel got there first
+        execute_sub_command() { echo "cmd $1: $4"; [[ "$4" != REPLICAOF* ]]; }
+        When call failover_with_writes_paused "redis1"
+        The status should be success
+        The stdout should include "cmd redis1: CLIENT UNPAUSE"
+      End
+
+      It "renews the pause at every step it waits on"
+        failover_started=""
+        cmd_log="./switchover-cmds"
+        : > "$cmd_log"
+        # renewals print nothing, so the commands are counted in a file
+        execute_sub_command() { echo "$4" >> "$cmd_log"; return 0; }
+        attempts=0
+        replicas_caught_up() { attempts=$((attempts + 1)); [ "$attempts" -ge 3 ]; }
+        execute_sentinel_failover() { renew_write_pause; failover_started=true; return 0; }
+        count_pauses() {
+          failover_with_writes_paused "redis1" >/dev/null || return 1
+          grep -c "CLIENT PAUSE 30000 WRITE" "$cmd_log"
+          rm -f "$cmd_log"
+        }
+        When call count_pauses
+        The status should be success
+        # once to start, twice while the replicas catch up, once before the failover
+        The stdout should eq 4
       End
 
       It "fails when no sentinel knows the primary"
