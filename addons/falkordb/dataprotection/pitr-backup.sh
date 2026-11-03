@@ -278,30 +278,35 @@ function save_backup_status() {
 # Backup can only offer the times every shard covers. Each archiver publishes the
 # range its own shard covers to ${ARCHIVE_RANGE_FILE}, reads every shard's, and
 # reports their intersection, so the status is the same whichever writes last.
+#
+# The file holds "<start> <end> <published at>", and "0 0 <published at>" while
+# the shard has no archive. Every archiver rewrites its own each status round, so
+# a file not rewritten for RANGE_STALE_SECONDS is from an archiver that stopped:
+# a shard removed by a scale-in (its directory stays in the Backup), or a live
+# shard whose archiver is down. Neither counts; for the live shard that leaves
+# fewer ranges than shards, and the window is withdrawn.
 ARCHIVE_RANGE_FILE="kb-archive-range"
 CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
+RANGE_STALE_SECONDS=${RANGE_STALE_SECONDS:-300}
 AOF_WRITE_DELAY_SECONDS=${AOF_WRITE_DELAY_SECONDS:-3}
 global_cluster_status_time=0
 
 function publish_archive_range() {
-  local archives start
+  local archives start end
   if ! archives=$(DP_pitr_list_archives); then
     return
   fi
   start=$(awk -F '.' '{print $1}' <<<"${archives}" | sort -n | head -n 1)
+  end=${global_archived_until}
   if [ -z "$start" ]; then
-    # Retention has removed every archive of this shard. A range left behind
-    # would keep the shard counted and the window offered with nothing to restore.
-    if datasafed list / | grep -Fxq "${ARCHIVE_RANGE_FILE}" &&
-      ! datasafed rm "${ARCHIVE_RANGE_FILE}"; then
-      DP_error_log "publish_archive_range: failed to remove ${ARCHIVE_RANGE_FILE} of a shard with no archives, retrying next round"
-    fi
+    # Nothing archived yet, or retention has removed every archive: this shard
+    # covers no time, which withdraws the window until it does.
+    start=0 end=0
+  elif [ "${end}" -le 0 ]; then
+    # restarted, and no round has completed yet: leave the last range as it is
     return
   fi
-  if [ "${global_archived_until}" -le 0 ]; then
-    return
-  fi
-  if ! echo "${start} ${global_archived_until}" | datasafed push - "${ARCHIVE_RANGE_FILE}"; then
+  if ! echo "${start} ${end} $(date +%s)" | datasafed push - "${ARCHIVE_RANGE_FILE}"; then
     DP_error_log "publish_archive_range: failed to upload ${ARCHIVE_RANGE_FILE}, retrying next round"
   fi
 }
@@ -316,8 +321,9 @@ function cluster_shard_count() {
 function save_cluster_backup_status() {
   local root
   root=$(dirname "${DP_BACKUP_BASE_PATH}")
-  local shards targets target range start end
-  local found="" ranges=0 cluster_start=0 cluster_end=0 extras=""
+  local shards targets target range start end published now
+  local ranges=0 cluster_start=0 cluster_end=0 extras=""
+  now=$(date +%s)
   shards=$(cluster_shard_count)
   if ! targets=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed list -d /); then
     DP_error_log "save_cluster_backup_status: failed to list the shards under ${root}"
@@ -325,30 +331,22 @@ function save_cluster_backup_status() {
   fi
   for target in ${targets}; do
     target=${target%/}
-    # a shard that has archived nothing yet has no range
     range=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed pull "${target}/${ARCHIVE_RANGE_FILE}" - 2>/dev/null) || continue
-    read -r start end <<<"${range}"
-    if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ ]]; then
+    read -r start end published <<<"${range}"
+    if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ && "${published}" =~ ^[0-9]+$ ]]; then
       continue
     fi
-    found="${found}${end} ${start} ${target}"$'\n'
-  done
-  # The directory of a shard removed by a scale-in stays in the repo, its end
-  # stopped when its archiver did. Disabling and enabling the aof method does not
-  # drop it, as the Backup keeps its name and path. So with more ranges than the
-  # cluster has shards, the extra ones are taken to be removed shards: they are
-  # the ranges whose end is oldest, as every live shard's end keeps advancing.
-  while read -r end start target; do
-    [ -n "${target}" ] || continue
-    if [ -n "${shards}" ] && [ "${shards}" -gt 0 ] && [ "${ranges}" -ge "${shards}" ]; then
-      DP_log "save_cluster_backup_status: ignoring ${target}, whose archive stopped at ${end}: the cluster has ${shards} shards"
+    if [ $((now - published)) -gt "${RANGE_STALE_SECONDS}" ]; then
+      DP_log "save_cluster_backup_status: ignoring ${target}, whose archiver last published at ${published}"
       continue
     fi
+    # a live shard with no archive covers no time, and is not counted
+    [ "${end}" -eq 0 ] && continue
     ranges=$((ranges + 1))
     [ "${start}" -gt "${cluster_start}" ] && cluster_start=${start}
     { [ "${cluster_end}" -eq 0 ] || [ "${end}" -lt "${cluster_end}" ]; } && cluster_end=${end}
     extras="${extras:+${extras},}{\"shard\":\"${target}\",\"start\":\"$(date -u -d @"${start}" +%Y-%m-%dT%H:%M:%SZ)\",\"end\":\"$(date -u -d @"${end}" +%Y-%m-%dT%H:%M:%SZ)\"}"
-  done <<<"$(printf '%s' "${found}" | sort -k1,1nr -k3,3)"
+  done
   local total_size
   total_size=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed stat / | grep TotalSize | awk '{print $2}')
   if [ -z "${shards}" ] || [ "${shards}" -eq 0 ] || [ "${ranges}" -lt "${shards}" ] ||

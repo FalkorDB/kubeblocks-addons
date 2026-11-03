@@ -252,8 +252,9 @@ EOF
     rm -rf "$STUB_REMOTE/1000.1.dir"
     echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
     mkdir -p "$STUB_REMOTE/fdb-aof/shard-b" "$STUB_REMOTE/fdb-aof/shard-c"
-    echo "900 1800" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
-    echo "1200 1950" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+    # <start> <end> <published at>; now is 2000
+    echo "900 1800 1990" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
+    echo "1200 1950 1990" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
   }
 
   backup_info() {
@@ -647,21 +648,21 @@ SET a 1"
       The path "$STUB_REMOTE/fdb-aof/shard-a/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
       # the archive starts at its base; the round that started at 2000 covers up to 1999,
       # less the 3s the server may hold back its AOF write
-      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 2000"
       The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
       The result of function backup_info should include '{"shard":"shard-a","start":"T1000","end":"T1996"}'
       The result of function backup_info should include '{"shard":"shard-b","start":"T900","end":"T1800"}'
       The result of function backup_info should include '{"shard":"shard-c","start":"T1200","end":"T1950"}'
     End
 
-    It "ignores the stopped range of a shard removed by a scale-in"
+    It "ignores the range of a shard removed by a scale-in"
       prepare_sharded_backup
-      # a fourth shard, gone from the cluster, whose archiver stopped at 1500
+      # a fourth shard, gone from the cluster, whose archiver last published at 1000
       mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
-      echo "800 1500" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      echo "800 1500 1000" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
       When run run_backup
       The status should be success
-      The output should include "ignoring shard-d, whose archive stopped at 1500: the cluster has 3 shards"
+      The output should include "ignoring shard-d, whose archiver last published at 1000"
       The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
       The result of function backup_info should not include '"shard":"shard-d"'
     End
@@ -675,32 +676,53 @@ SET a 1"
       The result of function backup_info should include '"timeRange":null'
     End
 
-    It "removes its range once retention has removed every archive"
+    It "reports no coverage once retention has removed every archive"
       prepare_sharded_backup
       # nothing left to archive or restore: no live AOF, no archive in the repo
       rm "$DATA_DIR"/appendonlydir/appendonly.aof.1.*
       mkdir -p "$STUB_REMOTE/fdb-aof/shard-a"
-      echo "1000 1999" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
+      echo "1000 1996 1990" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
       When run run_backup
       The status should be success
       The output should include "update_aof_file:"
-      The path "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should not be exist
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "0 0 2000"
       The output should include "2 of 3 shards have archived"
       The result of function backup_info should include '"timeRange":null'
     End
 
     It "withdraws the window while a shard has archived nothing"
       prepare_sharded_backup
-      rm "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      echo "0 0 1990" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
       When run run_backup
       The status should be success
       The output should include "2 of 3 shards have archived"
       The result of function backup_info should include '"timeRange":null'
     End
 
+    It "does not let a removed shard's range stand in for a live shard with none"
+      prepare_sharded_backup
+      rm "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
+      echo "800 1900 1000" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "ignoring shard-d"
+      The output should include "2 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "withdraws the window when a live shard's archiver stops publishing"
+      prepare_sharded_backup
+      echo "1200 1950 1500" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "ignoring shard-c, whose archiver last published at 1500"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
     It "withdraws the window when the shards share no time"
       prepare_sharded_backup
-      echo "1900 1950" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      echo "1900 1950 1990" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
       When run run_backup
       The status should be success
       The output should include "they share no time yet"
