@@ -382,7 +382,8 @@ master_host:redis-master"
 
     Context "wait_for_sentinel_to_switch_master()"
       It "returns the first primary that differs from the initial one"
-        get_sentinel_master_addrs() { printf '%s\n' "redis1 6379" "redis2 6379"; }
+        # sentinel1 still names the old primary, sentinel2 has switched
+        get_sentinel_master_addr() { if [ "$1" = sentinel2 ]; then echo "redis2 6379"; else echo "redis1 6379"; fi; }
         check_redis_role() { echo "primary"; }
         check_new_primary() {
           wait_for_sentinel_to_switch_master "redis1 6379" && echo "new=$new_primary_host:$new_primary_port"
@@ -393,7 +394,8 @@ master_host:redis-master"
       End
 
       It "skips a primary a lagging sentinel names that is a replica now"
-        get_sentinel_master_addrs() { printf '%s\n' "redis1 6379" "redis3 6379" "redis2 6379"; }
+        # sentinel1 lags and names an earlier primary, sentinel2 the new one
+        get_sentinel_master_addr() { if [ "$1" = sentinel2 ]; then echo "redis2 6379"; else echo "redis3 6379"; fi; }
         check_redis_role() { if [ "$1" = "redis2" ]; then echo "primary"; else echo "secondary"; fi; }
         check_new_primary() {
           wait_for_sentinel_to_switch_master "redis1 6379" && echo "new=$new_primary_host:$new_primary_port"
@@ -405,7 +407,7 @@ master_host:redis-master"
       End
 
       It "returns 2 when the failover ended without switching"
-        get_sentinel_master_addrs() { echo "redis1 6379"; }
+        get_sentinel_master_addr() { echo "redis1 6379"; }
         sentinel_may_be_failing_over() { return 1; }
         When call wait_for_sentinel_to_switch_master "redis1 6379"
         The status should eq 2
@@ -413,7 +415,7 @@ master_host:redis-master"
       End
 
       It "returns 1 when the failover is still running at the deadline"
-        get_sentinel_master_addrs() { echo "redis1 6379"; }
+        get_sentinel_master_addr() { echo "redis1 6379"; }
         sentinel_may_be_failing_over() { return 0; }
         check_deadline() {
           local until_ms=$((fake_now_ms + 500)) rc=0
@@ -428,9 +430,10 @@ master_host:redis-master"
         # the first look finds no switch; by the second, sentinel has switched
         looks_file="./sentinel-looks"
         echo 0 > "$looks_file"
-        get_sentinel_master_addrs() {
+        # the first look asks both sentinels; the second look's answers have switched
+        get_sentinel_master_addr() {
           local looks=$(( $(cat "$looks_file") + 1 )); echo "$looks" > "$looks_file"
-          if [ "$looks" -ge 2 ]; then echo "redis2 6379"; else echo "redis1 6379"; fi
+          if [ "$looks" -ge 3 ]; then echo "redis2 6379"; else echo "redis1 6379"; fi
         }
         check_redis_role() { echo "primary"; }
         sentinel_may_be_failing_over() { return 1; }
@@ -467,7 +470,7 @@ master_host:redis-master"
       # records every command sent to a pod, in order
       execute_sub_command() { echo "cmd $1: $4"; return 0; }
       call_func_with_retry() { shift 2; "$@"; }
-      get_sentinel_master_addrs() {
+      get_sentinel_master_addr() {
         if [ -n "$failover_started" ]; then echo "redis2 6379"; else echo "redis1 6379"; fi
       }
       execute_sentinel_failover() { failover_started=true; echo "failover"; return 0; }
@@ -520,21 +523,44 @@ master_host:redis-master"
         The stderr should include "still failing over from redis1 6379 after another 75s"
       End
 
-      It "demotes the old primary as soon as the switch shows after the pause"
+      It "watches past the pause only once it has run out, then demotes at once"
         failover_started=""
         waits_file="./switch-waits"
-        echo 0 > "$waits_file"
-        # the first wait, under the pause, ends without a switch; the next sees it
+        : > "$waits_file"
+        # Each wait logs its deadline and the time it starts. The first, under
+        # the pause, runs to its deadline without a switch; the second sees it.
         wait_for_sentinel_to_switch_master() {
-          local waits=$(( $(cat "$waits_file") + 1 )); echo "$waits" > "$waits_file"
-          [ "$waits" -ge 2 ] || return 1
+          echo "$2 $fake_now_ms" >> "$waits_file"
+          if [ "$(wc -l < "$waits_file")" -eq 1 ]; then
+            fake_now_ms=$2
+            return 1
+          fi
           new_primary_host=redis2; new_primary_port=6379
         }
-        handed_over() { failover_with_writes_paused "redis1"; local rc=$?; rm -f "$waits_file"; return $rc; }
+        handed_over() {
+          local started=$fake_now_ms rc=0
+          failover_with_writes_paused "redis1" >/dev/null 2>&1 || rc=$?
+          echo "rc=$rc"
+          while read -r until at; do echo "until +$((until - started)) at +$((at - started))"; done < "$waits_file"
+          rm -f "$waits_file"
+        }
         When call handed_over
-        The status should be success
-        The stderr should include "takes writes again until it is demoted"
-        The stdout should include "redis1 is now a replica of redis2:6379"
+        The line 1 of stdout should eq "rc=0"
+        # under the pause, until it ends 5000 ms after it began
+        The line 2 of stdout should eq "until +5000 at +0"
+        # then without it, from the pause's end, for failover_watch_seconds
+        The line 3 of stdout should eq "until +80000 at +5000"
+      End
+
+      It "does not fail over when the replica scan outlasts the pause"
+        failover_started=""
+        # the scan passes, but only after the pause has run out
+        replicas_caught_up() { fake_now_ms=$((fake_now_ms + 6000)); return 0; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should not include "failover"
+        The stdout should include "cmd redis1: CLIENT UNPAUSE"
+        The stderr should include "did not catch up within 5000 ms"
       End
 
       It "pauses writes for the down-after-milliseconds sentinel has"
@@ -548,7 +574,7 @@ master_host:redis-master"
 
       It "does not switch over while the sentinels disagree on the primary"
         failover_started=""
-        get_sentinel_master_addrs() { printf '%s\n' "redis1 6379" "redis3 6379" "redis1 6379"; }
+        get_sentinel_master_addr() { if [ "$1" = sentinel2 ]; then echo "redis3 6379"; else echo "redis1 6379"; fi; }
         When call failover_with_writes_paused "redis1"
         The status should be failure
         The stdout should not include "CLIENT PAUSE"
@@ -637,7 +663,7 @@ master_host:redis-master"
       End
 
       It "fails when no sentinel knows the primary"
-        get_sentinel_master_addrs() { :; }
+        get_sentinel_master_addr() { :; }
         When call failover_with_writes_paused "redis1"
         The status should be failure
         The stdout should not include "CLIENT PAUSE"

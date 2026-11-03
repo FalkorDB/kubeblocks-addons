@@ -239,9 +239,14 @@ redis_config_get() {
   return 0
 }
 
+# EPOCHREALTIME needs bash 5; date is the fallback for older ones.
 now_ms() {
-  local now="${EPOCHREALTIME/[.,]/}"
-  echo $((now / 1000))
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    local now="${EPOCHREALTIME/[.,]/}"
+    echo $((now / 1000))
+  else
+    date +%s%3N
+  fi
 }
 
 # Prints the timeout for the next redis-cli call: redis_cli_timeout_seconds, or
@@ -293,19 +298,27 @@ execute_sentinel_failover() {
   return 0
 }
 
+# Prints the primary address ("host port") one sentinel reports, and nothing
+# when it cannot be asked or reports none.
+get_sentinel_master_addr() {
+  local sentinel_pod_fqdn="$1" master_name="$2" output
+  local -a addr
+  output=$(redis_config_get "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL get-master-addr-by-name $master_name" 2>/dev/null) || return 0
+  read -r -d '' -a addr <<< "$output" || true
+  if [ "${#addr[@]}" -eq 2 ]; then
+    echo "${addr[0]} ${addr[1]}"
+  fi
+}
+
 # Prints the primary address ("host port") each reachable sentinel reports, one
 # line per sentinel.
 get_sentinel_master_addrs() {
   local master_name="${CUSTOM_SENTINEL_MASTER_NAME:-$REDIS_COMPONENT_NAME}"
-  local sentinel_pod_fqdn output
-  local -a sentinel_pod_fqdn_list addr
+  local sentinel_pod_fqdn
+  local -a sentinel_pod_fqdn_list
   IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
-    output=$(redis_config_get "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL get-master-addr-by-name $master_name" 2>/dev/null) || continue
-    read -r -d '' -a addr <<< "$output" || true
-    if [ "${#addr[@]}" -eq 2 ]; then
-      echo "${addr[0]} ${addr[1]}"
-    fi
+    get_sentinel_master_addr "$sentinel_pod_fqdn" "$master_name"
   done
 }
 
@@ -398,10 +411,16 @@ replicas_caught_up() {
 # sentinel may still name an earlier primary that is a replica now, and the old
 # primary must not be made a replica of one.
 sentinel_reports_new_primary() {
-  local initial_addr="$1" addr
+  local initial_addr="$1" addr sentinel_pod_fqdn
+  local master_name="${CUSTOM_SENTINEL_MASTER_NAME:-$REDIS_COMPONENT_NAME}"
+  local -a sentinel_pod_fqdn_list
   new_primary_host=""
   new_primary_port=""
-  while read -r addr; do
+  # Each answer is looked at as it comes: a slow sentinel asked first must not
+  # hold up the one that has already switched.
+  IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
+  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+    addr=$(get_sentinel_master_addr "$sentinel_pod_fqdn" "$master_name")
     if ! is_empty "$addr" && [ "$addr" != "$initial_addr" ]; then
       read -r new_primary_host new_primary_port <<< "$addr"
       if [ "$(check_redis_role "$new_primary_host" "$new_primary_port" 2>/dev/null)" = "primary" ]; then
@@ -412,7 +431,7 @@ sentinel_reports_new_primary() {
       new_primary_host=""
       new_primary_port=""
     fi
-  done <<< "$(get_sentinel_master_addrs)"
+  done
   return 1
 }
 
@@ -504,7 +523,9 @@ failover_with_writes_paused() {
     fi
     sleep_when_ut_mode_false 0.1
   done
-  if [ "$caught_up" != true ]; then
+  # The scan itself may outlast the pause, and the offset it compared with
+  # then misses the writes taken since, so the pause must still be running.
+  if [ "$caught_up" != true ] || ! fence_time_left; then
     echo "Error: the replicas of $old_primary did not catch up within $write_pause_ms ms, not switching over" >&2
     unpause_writes "$old_primary"
     return 1

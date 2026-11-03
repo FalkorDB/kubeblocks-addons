@@ -34,10 +34,10 @@ retry_delay_second=2
 # for no longer than sentinel's node-down timeout, down-after-milliseconds: past
 # that, an HA setup is in downtime. It is read from sentinel's replies, and this,
 # the value the addon registers, is used until one comes. Setting
-# sentinel_failover_wait_seconds overrides it.
+# sentinel_failover_wait_ms overrides it.
 default_down_after_ms=5000
-sentinel_failover_wait_seconds=""
-sentinel_failover_wait_delay_second=1
+sentinel_failover_wait_ms=""
+sentinel_failover_wait_delay_ms=1000
 service_port=${SERVICE_PORT:-6379}
 redis_server_process_name="redis-server"
 redis_server_launcher_pid=""
@@ -232,42 +232,61 @@ get_sentinel_primary_flags() {
   [[ "$output" == *"No such master"* ]]
 }
 
+# EPOCHREALTIME needs bash 5; date is the fallback for older ones.
+now_ms() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    local now="${EPOCHREALTIME/[.,]/}"
+    echo $((now / 1000))
+  else
+    date +%s%3N
+  fi
+}
+
+ms_to_seconds() {
+  printf '%d.%03d\n' $(($1 / 1000)) $(($1 % 1000))
+}
+
 # Returns 0 after waiting while any sentinel is failing over its primary, this
 # pod, and 1 straight away when every sentinel answers that none is. A sentinel
 # that cannot be asked may be the one running the failover, so it is waited for
 # too. A sentinel that only sees the pod down is not: when every pod restarts at
 # once that would hand a replica, perhaps behind this pod, the time to be
-# promoted. The wait is bounded by sentinel's down-after-milliseconds, which
-# slow sentinels count against: each query gets at most the time left. A
-# failover still running at the end exits the
-# start, since this pod could otherwise start as a master next to the replica
-# being promoted; the container is restarted and asks again. A sentinel that is
-# only unreachable at the end does not, or it could keep the pod from starting.
+# promoted. The wait never goes past sentinel's down-after-milliseconds: slow
+# sentinels count against it, each query gets at most the time left, and none
+# is asked once it is up. A failover still running at the end exits the start,
+# since this pod could otherwise start as a master next to the replica being
+# promoted; the container is restarted and asks again. A sentinel that is only
+# unreachable at the end does not, or it could keep the pod from starting.
 wait_while_sentinel_fails_over_current_pod() {
   if is_empty "$SENTINEL_COMPONENT_NAME" || is_empty "$SENTINEL_POD_FQDN_LIST"; then
     return 1
   fi
   local sentinel_pod_fqdn reply flags down_after waited=1 failing_over="" unreachable="" remaining
-  local started=$SECONDS budget_seconds="$sentinel_failover_wait_seconds" budget_known=true
-  if is_empty "$budget_seconds"; then
-    budget_seconds=$(( (default_down_after_ms + 999) / 1000 ))
+  local started budget_ms="$sentinel_failover_wait_ms" budget_known=true deadline
+  started=$(now_ms)
+  if is_empty "$budget_ms"; then
+    budget_ms=$default_down_after_ms
     budget_known=false
   fi
-  local deadline=$((started + budget_seconds))
+  deadline=$((started + budget_ms))
   while true; do
     failing_over=""
     unreachable=""
     for sentinel_pod_fqdn in $(split "$SENTINEL_POD_FQDN_LIST" ","); do
-      # every sentinel is asked in the last round too, for a second at least
-      remaining=$((deadline - SECONDS))
-      if ! reply=$(get_sentinel_primary_flags "$sentinel_pod_fqdn" "$(( remaining < 1 ? 1 : (remaining < 5 ? remaining : 5) ))"); then
+      remaining=$((deadline - $(now_ms)))
+      if [ "$remaining" -le 0 ]; then
+        unreachable="${unreachable:+$unreachable }$sentinel_pod_fqdn"
+        continue
+      fi
+      [ "$remaining" -gt 5000 ] && remaining=5000
+      if ! reply=$(get_sentinel_primary_flags "$sentinel_pod_fqdn" "$(ms_to_seconds "$remaining")"); then
         unreachable="${unreachable:+$unreachable }$sentinel_pod_fqdn"
         continue
       fi
       read -r flags down_after <<< "$reply"
       if [ "$budget_known" != true ] && [[ "$down_after" =~ ^[0-9]+$ ]] && [ "$down_after" -gt 0 ]; then
-        budget_seconds=$(( (down_after + 999) / 1000 ))
-        deadline=$((started + budget_seconds))
+        budget_ms=$down_after
+        deadline=$((started + budget_ms))
         budget_known=true
       fi
       if [[ ",$flags," == *,failover_in_progress,* ]]; then
@@ -284,17 +303,21 @@ wait_while_sentinel_fails_over_current_pod() {
     else
       echo "sentinel $unreachable cannot be asked and may be failing over this pod, its primary; waiting before starting."
     fi
-    remaining=$((deadline - SECONDS))
+    remaining=$((deadline - $(now_ms)))
     if [ "$remaining" -le 0 ]; then
       break
     fi
-    sleep_when_ut_mode_false "$(( remaining < sentinel_failover_wait_delay_second ? remaining : sentinel_failover_wait_delay_second ))"
+    [ "$remaining" -gt "$sentinel_failover_wait_delay_ms" ] && remaining=$sentinel_failover_wait_delay_ms
+    sleep_when_ut_mode_false "$(ms_to_seconds "$remaining")"
+    if [ "$(now_ms)" -ge "$deadline" ]; then
+      break
+    fi
   done
   if ! is_empty "$failing_over"; then
-    echo "Error: sentinel $failing_over is still failing over this pod after ${budget_seconds}s, its down-after-milliseconds; refusing to start while it may promote another pod. Exiting."
+    echo "Error: sentinel $failing_over is still failing over this pod after ${budget_ms} ms, its down-after-milliseconds; refusing to start while it may promote another pod. Exiting."
     exit 1
   fi
-  echo "sentinel $unreachable still cannot be asked after ${budget_seconds}s; asking the others for the primary again."
+  echo "sentinel $unreachable still cannot be asked after ${budget_ms} ms; asking the others for the primary again."
   return 0
 }
 
