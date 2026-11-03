@@ -545,10 +545,32 @@ master_host:redis-master"
       It "unpauses when the failover cannot be started"
         failover_started=""
         execute_sentinel_failover() { return 1; }
+        sentinel_may_be_failing_over() { return 1; }
         When call failover_with_writes_paused "redis1"
         The status should be failure
         The stdout should include "cmd redis1: CLIENT UNPAUSE"
         The stdout should not include "REPLICAOF"
+        The stderr should include "sentinel is no longer failing over and still reports redis1 6379"
+      End
+
+      It "hands over when the failover request timed out but sentinel switched"
+        failover_started=""
+        # the sentinel took the request, but the reply did not come in time
+        execute_sentinel_failover() { failover_started=true; return 1; }
+        When call failover_with_writes_paused "redis1"
+        The status should be success
+        The stdout should include "the failover request failed, but sentinel switched the primary all the same"
+        The output should match pattern "*REPLICAOF redis2 6379*cmd redis1: CLIENT UNPAUSE*"
+      End
+
+      It "keeps writes paused when the request failed and a sentinel may be failing over"
+        failover_started=""
+        execute_sentinel_failover() { return 1; }
+        wait_for_sentinel_to_switch_master() { return 1; }
+        When call failover_with_writes_paused "redis1"
+        The status should be failure
+        The stdout should not include "CLIENT UNPAUSE"
+        The stderr should include "its writes stay paused"
       End
 
       It "does not fail over when writes cannot be paused"

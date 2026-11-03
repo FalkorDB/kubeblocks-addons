@@ -460,10 +460,11 @@ failover_with_writes_paused() {
     return 1
   fi
 
-  if ! execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME"; then
-    unpause_writes "$old_primary"
-    return 1
-  fi
+  # A request that timed out, or failed after a sentinel took it, may still have
+  # started the failover, so its outcome is read from the sentinels either way:
+  # writes resume only once no sentinel is failing over and none has switched.
+  local failover_rc=0
+  execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME" || failover_rc=$?
   wait_for_sentinel_to_switch_master "$initial_addr" || switch_rc=$?
   if [ $switch_rc -eq 2 ]; then
     unpause_writes "$old_primary"
@@ -475,6 +476,9 @@ failover_with_writes_paused() {
     paused_primary=""
     echo "Error: cannot tell whether sentinel fails $old_primary over; its writes stay paused for up to $write_pause_ms ms" >&2
     return 1
+  fi
+  if [ $failover_rc -ne 0 ]; then
+    echo "the failover request failed, but sentinel switched the primary all the same"
   fi
 
   call_func_with_retry 3 1 execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "REPLICAOF $new_primary_host $new_primary_port" || true
