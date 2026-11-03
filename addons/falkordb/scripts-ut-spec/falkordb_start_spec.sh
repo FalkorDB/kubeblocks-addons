@@ -1117,6 +1117,13 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should eq "master,failover_in_progress"
     End
 
+    It "adds the sentinel's down-after-milliseconds when the reply has it"
+      timeout() { shift; "$@"; }
+      redis-cli() { printf '%s\r\n' name mymaster flags master down-after-milliseconds 5000 num-slaves 1; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The stdout should eq "master 5000"
+    End
+
     It "prints nothing when the sentinel monitors no primary"
       timeout() { shift; "$@"; }
       # redis-cli exits 0 on an error reply
@@ -1152,7 +1159,8 @@ Describe "FalkorDB Start Bash Script Tests"
     }
     cleanup_sentinel_env() {
       unset SENTINEL_COMPONENT_NAME SENTINEL_POD_FQDN_LIST
-      sentinel_failover_wait_seconds=30
+      sentinel_failover_wait_seconds=""
+      sentinel_failover_wait_delay_second=1
       rm -f "$flags_calls_file"
     }
     Before 'setup'
@@ -1228,8 +1236,9 @@ Describe "FalkorDB Start Bash Script Tests"
     End
 
     It "gives each sentinel query no more than the time left"
-      # a 3 s budget: the first queries get 3 s, the last round 1 s
+      # a 3 s budget polled every 2 s: the first query gets 3 s, the later ones 1 s
       sentinel_failover_wait_seconds=3
+      sentinel_failover_wait_delay_second=2
       timeouts_file="./sentinel-query-timeouts"
       : > "$timeouts_file"
       get_sentinel_primary_flags() { echo "$1 $2" >> "$timeouts_file"; echo "master,failover_in_progress"; }
@@ -1243,6 +1252,22 @@ Describe "FalkorDB Start Bash Script Tests"
       The line 2 of stdout should eq "sentinel-0 1"
       The line 3 of stdout should eq "sentinel-0 1"
       The lines of stdout should eq 3
+    End
+
+    It "waits no longer than the down-after-milliseconds sentinel has"
+      sentinel_failover_wait_seconds=""
+      get_sentinel_primary_flags() { echo "master,failover_in_progress 2000"; }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "still failing over this pod after 2s, its down-after-milliseconds"
+    End
+
+    It "waits the registered 5 s until a sentinel says otherwise"
+      sentinel_failover_wait_seconds=""
+      get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "still failing over this pod after 5s"
     End
 
     It "does not wait without sentinel"

@@ -23,19 +23,20 @@ test || __() {
 
 declare -A ORIGINAL_PRIORITIES
 redis_service_port=${SERVICE_PORT:-6379}
-# How long writes on the old primary stay paused (see failover_with_writes_paused)
-# from the last time the pause was renewed. Every step of the failover renews it,
-# so it only runs out when this script dies or cannot reach the old primary.
-write_pause_ms=30000
-replica_catch_up_max_attempts=10
-# a failover that has started is waited for as long as sentinel may take
-# (failover-timeout, 60 s) and a little longer
-new_primary_max_attempts=75
+# Writes on the old primary stay paused for no longer than sentinel's node-down
+# timeout, down-after-milliseconds: in an HA setup a longer pause is downtime.
+# It is read from sentinel, and this, the value the addon registers, is used
+# when it cannot be.
+default_down_after_ms=5000
+write_pause_ms=""
+# when the pause ends (in ms since the epoch), while writes are paused
+fence_deadline_ms=""
+# how long a failover that has not switched by the end of the pause is still
+# watched: sentinel's failover-timeout (60 s) and a little more
+failover_watch_seconds=75
 new_primary_host=""
 new_primary_port=""
-paused_primary=""
-# bounds every redis-cli call, so an unreachable pod cannot hold up the failover
-# for longer than the write pause
+# bounds every redis-cli call; while writes are paused, the time left caps it
 redis_cli_timeout_seconds=5
 
 load_common_library() {
@@ -75,9 +76,9 @@ check_redis_role() {
   unset_xtrace_when_ut_mode_false
   local role_info
   if [[ -z "$REDIS_DEFAULT_PASSWORD" ]]; then
-    role_info=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" info replication)
+    role_info=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" info replication)
   else
-    role_info=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$REDIS_DEFAULT_PASSWORD" info replication)
+    role_info=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$REDIS_DEFAULT_PASSWORD" info replication)
   fi
   status=$?
   set_xtrace_when_ut_mode_false
@@ -169,9 +170,9 @@ check_connectivity() {
   local result
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    result=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" PING)
+    result=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" PING)
   else
-    result=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" PING)
+    result=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" PING)
   fi
   set_xtrace_when_ut_mode_false
   if [[ "$result" == "PONG" ]]; then
@@ -192,9 +193,9 @@ execute_sub_command() {
   local output
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
+    output=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
   else
-    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
+    output=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
   fi
   local status=$?
   set_xtrace_when_ut_mode_false
@@ -217,9 +218,9 @@ redis_config_get() {
   local output
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
+    output=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
   else
-    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
+    output=$(timeout "$(redis_cli_timeout)" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
   fi
   local status=$?
   set_xtrace_when_ut_mode_false
@@ -238,6 +239,33 @@ redis_config_get() {
   return 0
 }
 
+now_ms() {
+  local now="${EPOCHREALTIME/[.,]/}"
+  echo $((now / 1000))
+}
+
+# Prints the timeout for the next redis-cli call: redis_cli_timeout_seconds, or
+# while writes are paused, the time the pause has left (200 ms at least).
+redis_cli_timeout() {
+  local limit_ms=$((redis_cli_timeout_seconds * 1000)) left_ms
+  if ! is_empty "$fence_deadline_ms"; then
+    left_ms=$((fence_deadline_ms - $(now_ms)))
+    if [ "$left_ms" -lt "$limit_ms" ]; then
+      limit_ms=$left_ms
+    fi
+  fi
+  if [ "$limit_ms" -lt 200 ]; then
+    limit_ms=200
+  fi
+  printf '%d.%03d\n' $((limit_ms / 1000)) $((limit_ms % 1000))
+}
+
+fence_time_left() {
+  [ "$(now_ms)" -lt "$fence_deadline_ms" ]
+}
+
+# One attempt per sentinel, without retry delays: it runs while writes are
+# paused, and whether a failover started is read from the sentinels anyway.
 execute_sentinel_failover() {
   local master_name=$1
   local success=false
@@ -250,7 +278,7 @@ execute_sentinel_failover() {
   IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
   unset_xtrace_when_ut_mode_false
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
-    if call_func_with_retry 3 5 sentinel_failover_attempt "$sentinel_pod_fqdn" "$master_name"; then
+    if execute_sub_command "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL FAILOVER $master_name"; then
       echo "Sentinel failover started with $sentinel_pod_fqdn"
       success=true
       break
@@ -263,13 +291,6 @@ execute_sentinel_failover() {
     return 1
   fi
   return 0
-}
-
-# Each attempt renews the write pause first: with the retries, one sentinel can
-# take longer than the pause lasts.
-sentinel_failover_attempt() {
-  renew_write_pause
-  execute_sub_command "$1" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL FAILOVER $2"
 }
 
 # Prints the primary address ("host port") each reachable sentinel reports, one
@@ -288,23 +309,37 @@ get_sentinel_master_addrs() {
   done
 }
 
+# Prints the down-after-milliseconds of the first sentinel that answers, or
+# default_down_after_ms.
+get_sentinel_down_after_ms() {
+  local master_name="${CUSTOM_SENTINEL_MASTER_NAME:-$REDIS_COMPONENT_NAME}"
+  local sentinel_pod_fqdn output value
+  local -a sentinel_pod_fqdn_list
+  IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
+  for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
+    output=$(redis_config_get "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL master $master_name" 2>/dev/null) || continue
+    value=$(echo "${output//$'\r'/}" | sed -n '/^down-after-milliseconds$/{n;p;q;}')
+    if [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -gt 0 ]; then
+      echo "$value"
+      return 0
+    fi
+  done
+  echo "$default_down_after_ms"
+}
+
 # Returns 0 when every replica that can be reached follows the primary and has
 # applied its whole replication stream, which stops growing while writes are
 # paused, and the candidate, when there is one, is among them. A replica follows
 # the primary when its master_host and master_port name the primary's pod or
 # primary_addr, the address sentinel has for it ("host port"), which is what
 # replicas are pointed at behind an announce override, a NodePort or a load
-# balancer; the offset of a replica of another master means nothing here. Each replica is asked itself: the
-# primary lists only the replicas that are online, so a replica still syncing
-# would go unchecked, though Sentinel might promote it. The write pause is
-# renewed before each query: with every query allowed its timeout, a scan of
-# many replicas could outlast the pause, and the offset read at its start would
-# then miss the writes taken since.
+# balancer; the offset of a replica of another master means nothing here. Each
+# replica is asked itself: the primary lists only the replicas that are online,
+# so a replica still syncing would go unchecked, though Sentinel might promote it.
 replicas_caught_up() {
   local primary_fqdn="$1" candidate_fqdn="$2" primary_addr="$3"
   local info master_offset pod_fqdn role link offset master_host master_port caught_up=0 candidate_caught_up=false
   local -a redis_pod_fqdn_list
-  renew_write_pause
   info=$(redis_config_get "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "INFO replication") || return 1
   info=${info//$'\r'/}
   master_offset=$(echo "$info" | sed -n 's/^master_repl_offset:\([0-9]*\).*/\1/p')
@@ -315,7 +350,6 @@ replicas_caught_up() {
   IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
   for pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
     [ "$pod_fqdn" = "$primary_fqdn" ] && continue
-    renew_write_pause
     if ! info=$(redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "INFO replication" 2>/dev/null); then
       if ! is_empty "$candidate_fqdn" && [[ "$pod_fqdn" = "$candidate_fqdn"* ]]; then
         echo "the candidate $pod_fqdn cannot be reached" >&2
@@ -400,14 +434,12 @@ sentinel_may_be_failing_over() {
   return 1
 }
 
-# Waits for the failover to switch the primary. Returns 0 with the new primary
-# in new_primary_host and new_primary_port, 2 when the failover ended without
-# switching (writes on the old primary can be resumed), and 1 when it is still
-# not known in time whether it will switch.
+# Waits until until_ms for the failover to switch the primary. Returns 0 with the
+# new primary in new_primary_host and new_primary_port, 2 when the failover
+# ended without switching, and 1 when neither is known by until_ms.
 wait_for_sentinel_to_switch_master() {
-  local initial_addr="$1"
-  local attempt
-  for ((attempt = 0; attempt < new_primary_max_attempts; attempt++)); do
+  local initial_addr="$1" until_ms="$2" poll_seconds="${3:-0.1}"
+  while true; do
     if sentinel_reports_new_primary "$initial_addr"; then
       return 0
     fi
@@ -419,11 +451,11 @@ wait_for_sentinel_to_switch_master() {
       echo "Error: sentinel is no longer failing over and still reports $initial_addr as the primary" >&2
       return 2
     fi
-    renew_write_pause
-    sleep_when_ut_mode_false 1
+    if [ "$(now_ms)" -ge "$until_ms" ]; then
+      return 1
+    fi
+    sleep_when_ut_mode_false "$poll_seconds"
   done
-  echo "Error: sentinel is still failing over from $initial_addr after $new_primary_max_attempts attempts" >&2
-  return 1
 }
 
 # SENTINEL FAILOVER promotes a replica but leaves the old primary a writable
@@ -434,9 +466,14 @@ wait_for_sentinel_to_switch_master() {
 # be left to do it: the pause also blocks the PUBLISH it sends its hellos with,
 # and the commands it sends after it on the same link. Paused writers are never
 # acknowledged: once the old primary is a replica they get READONLY.
+#
+# The pause lasts down-after-milliseconds at most, the node-down time sentinel
+# allows, and every step runs within it. A failover that has not switched by
+# then is still watched without the pause, and the old primary is demoted as
+# soon as it does; what it acknowledged in between may be lost.
 failover_with_writes_paused() {
   local old_primary="$1"
-  local initial_addr attempt caught_up=false switch_rc=0
+  local initial_addr caught_up=false switch_rc=0 failover_rc=0 pause_started_ms
   # Sentinels that disagree on the primary leave no address to tell the new one
   # from, so a stale answer could pass for the switch.
   initial_addr=$(get_sentinel_master_addrs | sort -u)
@@ -448,81 +485,87 @@ failover_with_writes_paused() {
     echo "Error: the sentinels disagree on the primary ($(echo "$initial_addr" | paste -sd, -)), not switching over" >&2
     return 1
   fi
+  write_pause_ms=$(get_sentinel_down_after_ms)
 
-  # the timeout only lifts the pause if this script dies half-way
-  if ! call_func_with_retry 3 1 execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT PAUSE $write_pause_ms WRITE"; then
+  # The pause counts from before it is asked for, so the deadline never falls
+  # after the pause has really ended.
+  pause_started_ms=$(now_ms)
+  if ! execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT PAUSE $write_pause_ms WRITE"; then
     echo "Error: failed to pause writes on $old_primary" >&2
     return 1
   fi
-  paused_primary="$old_primary"
-  echo "writes paused on $old_primary for up to $write_pause_ms ms at a time"
+  fence_deadline_ms=$((pause_started_ms + write_pause_ms))
+  echo "writes paused on $old_primary for $write_pause_ms ms, sentinel's down-after-milliseconds"
 
-  for ((attempt = 0; attempt < replica_catch_up_max_attempts; attempt++)); do
+  while fence_time_left; do
     if replicas_caught_up "$old_primary" "$KB_SWITCHOVER_CANDIDATE_FQDN" "$initial_addr"; then
       caught_up=true
       break
     fi
-    renew_write_pause
-    sleep_when_ut_mode_false 1
+    sleep_when_ut_mode_false 0.1
   done
   if [ "$caught_up" != true ]; then
-    echo "Error: the replicas of $old_primary did not catch up, not switching over" >&2
+    echo "Error: the replicas of $old_primary did not catch up within $write_pause_ms ms, not switching over" >&2
     unpause_writes "$old_primary"
     return 1
   fi
 
   # A request that timed out, or failed after a sentinel took it, may still have
-  # started the failover, so its outcome is read from the sentinels either way:
-  # writes resume only once no sentinel is failing over and none has switched.
-  local failover_rc=0
+  # started the failover, so its outcome is read from the sentinels either way.
   execute_sentinel_failover "$CUSTOM_SENTINEL_MASTER_NAME" || failover_rc=$?
-  wait_for_sentinel_to_switch_master "$initial_addr" || switch_rc=$?
+  wait_for_sentinel_to_switch_master "$initial_addr" "$fence_deadline_ms" || switch_rc=$?
   if [ $switch_rc -eq 2 ]; then
     unpause_writes "$old_primary"
     return 1
   fi
-  if [ $switch_rc -ne 0 ]; then
-    # Sentinel may still switch, and then the writes the old primary took would
-    # be lost: they stay paused until the pause runs out.
-    paused_primary=""
-    echo "Error: cannot tell whether sentinel fails $old_primary over; its writes stay paused for up to $write_pause_ms ms" >&2
-    return 1
+  if [ $switch_rc -eq 1 ]; then
+    # The pause has run out. Keep watching, and demote the old primary the
+    # moment the switch shows, so that few of the writes it takes meanwhile
+    # are lost.
+    fence_deadline_ms=""
+    echo "Warning: sentinel has not switched within the $write_pause_ms ms writes may stay paused; $old_primary takes writes again until it is demoted" >&2
+    switch_rc=0
+    wait_for_sentinel_to_switch_master "$initial_addr" "$(( $(now_ms) + failover_watch_seconds * 1000 ))" 1 || switch_rc=$?
+    if [ $switch_rc -eq 1 ]; then
+      echo "Error: sentinel is still failing over from $initial_addr after another ${failover_watch_seconds}s" >&2
+    fi
+    if [ $switch_rc -ne 0 ]; then
+      return 1
+    fi
   fi
   if [ $failover_rc -ne 0 ]; then
     echo "the failover request failed, but sentinel switched the primary all the same"
   fi
 
-  call_func_with_retry 3 1 execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "REPLICAOF $new_primary_host $new_primary_port" || true
-  # Unpausing a primary that is still a master would let it acknowledge writes
-  # the new primary never gets, so whatever REPLICAOF answered, it is only
-  # unpaused once it reports itself a replica. Otherwise the pause is left to
-  # run out, and Sentinel demotes it after that.
-  if [ "$(check_redis_role "$old_primary" "$redis_service_port" 2>/dev/null)" != "secondary" ]; then
-    paused_primary=""
-    echo "Error: $old_primary is not a replica of $new_primary_host:$new_primary_port yet; its writes stay paused for up to $write_pause_ms ms, then sentinel demotes it" >&2
-    return 1
-  fi
-  echo "$old_primary is now a replica of $new_primary_host:$new_primary_port"
+  demote_old_primary "$old_primary" || return 1
   unpause_writes "$old_primary"
   return 0
 }
 
-# Pauses writes on the old primary for another write_pause_ms, so the pause
-# outlasts every step of the failover however long the steps take.
-renew_write_pause() {
-  is_empty "$paused_primary" && return 0
-  if ! execute_sub_command "$paused_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT PAUSE $write_pause_ms WRITE" >/dev/null; then
-    echo "Warning: failed to renew the write pause on $paused_primary" >&2
-  fi
-  return 0
+# Makes the old primary a replica of the new one. Unpausing a primary that is
+# still a master would let it acknowledge writes the new primary never gets, so
+# whatever REPLICAOF answers, success is its reporting itself a replica; a pause
+# still running is then left to end on its own.
+demote_old_primary() {
+  local old_primary="$1" attempt
+  for ((attempt = 0; attempt < 3; attempt++)); do
+    execute_sub_command "$old_primary" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "REPLICAOF $new_primary_host $new_primary_port" || true
+    if [ "$(check_redis_role "$old_primary" "$redis_service_port" 2>/dev/null)" = "secondary" ]; then
+      echo "$old_primary is now a replica of $new_primary_host:$new_primary_port"
+      return 0
+    fi
+    sleep_when_ut_mode_false 0.1
+  done
+  echo "Error: $old_primary is not a replica of $new_primary_host:$new_primary_port yet; sentinel demotes it, and a running pause ends on its own" >&2
+  return 1
 }
 
 # A failed unpause does not fail the switchover: it only keeps writers waiting
-# until the pause runs out, and loses none of their writes.
+# until the pause ends on its own, and loses none of their writes.
 unpause_writes() {
   local primary_fqdn="$1"
-  paused_primary=""
-  if call_func_with_retry 3 1 execute_sub_command "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT UNPAUSE"; then
+  fence_deadline_ms=""
+  if execute_sub_command "$primary_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CLIENT UNPAUSE"; then
     echo "writes unpaused on $primary_fqdn"
   else
     echo "Warning: failed to unpause writes on $primary_fqdn, the pause ends after $write_pause_ms ms" >&2

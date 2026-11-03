@@ -23,6 +23,16 @@ Describe "FalkorDB Switchover Script Tests"
   # timeout is an external command, so it could not run the redis-cli stubs
   timeout() { shift; "$@"; }
 
+  # A fake clock that sleeping moves on, so the waits measured against the
+  # write pause end at once. sleep takes seconds, with decimals.
+  fake_now_ms=1000000000
+  now_ms() { echo "$fake_now_ms"; }
+  sleep_when_ut_mode_false() {
+    local whole="${1%%.*}" frac=0
+    [[ "$1" == *.* ]] && frac="${1#*.}000" && frac="${frac:0:3}"
+    fake_now_ms=$((fake_now_ms + ${whole:-0} * 1000 + 10#$frac))
+  }
+
   cleanup() {
     rm -f $common_library_file
   }
@@ -225,38 +235,19 @@ master_host:redis-master"
         The stderr should equal ""
       End
 
-      It "renews the write pause before every attempt"
-        # renewals print nothing, so the commands are logged to a file
+      It "tries each sentinel once, with no retry delays"
         cmd_log="./failover-cmds"
-        execute_sub_command() { echo "$1: $4" >> "$cmd_log"; [[ "$4" != "SENTINEL FAILOVER"* ]] || [ "$1" = "sentinel2" ]; }
-        # retries like the common library's, without the delay: sentinel1 fails
-        # all three attempts, sentinel2 takes the first
-        call_func_with_retry() {
-          local max_retries="$1" retries=0
-          shift 2
-          until "$@"; do
-            retries=$((retries + 1))
-            [ "$retries" -lt "$max_retries" ] || return 1
-          done
-        }
+        execute_sub_command() { echo "$1: $4" >> "$cmd_log"; [ "$1" = "sentinel2" ]; }
         logged_commands() {
           : > "$cmd_log"
-          paused_primary="redis1"
           execute_sentinel_failover "redis" >/dev/null
-          paused_primary=""
           cat "$cmd_log"
           rm -f "$cmd_log"
         }
         When call logged_commands
-        The line 1 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
-        The line 2 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
-        The line 3 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
-        The line 4 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
-        The line 5 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
-        The line 6 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
-        The line 7 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
-        The line 8 of stdout should eq "sentinel2: SENTINEL FAILOVER redis"
-        The lines of stdout should eq 8
+        The line 1 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
+        The line 2 of stdout should eq "sentinel2: SENTINEL FAILOVER redis"
+        The lines of stdout should eq 2
       End
 
       It "should fail when all sentinels fail"
@@ -366,19 +357,6 @@ master_host:redis-master"
         The stderr should include "redis1 has no replica that caught up"
       End
 
-      It "renews the write pause before every query"
-        redis2_info=""; redis3_info="$caught"
-        renew_write_pause() { echo "renew"; }
-        # one renewal before the primary's query and one before each replica's
-        When call replicas_caught_up "redis1" ""
-        The status should be success
-        The line 1 of stdout should eq "renew"
-        The line 2 of stdout should eq "renew"
-        The line 3 of stdout should eq "replica redis2 cannot be reached, skipping it"
-        The line 4 of stdout should eq "renew"
-        The lines of stdout should eq 4
-      End
-
       It "fails when a replica follows another master, whatever its offset"
         redis2_info="$caught"; redis3_info='role:slave\r\nmaster_host:redis2\r\nmaster_port:6379\r\nmaster_link_status:up\r\nslave_repl_offset:900\r\n'
         When call replicas_caught_up "redis1" "" "redis1 6379"
@@ -434,14 +412,16 @@ master_host:redis-master"
         The stderr should include "sentinel is no longer failing over and still reports redis1 6379"
       End
 
-      It "returns 1 when the failover is still running after the last attempt"
-        new_primary_max_attempts=3
+      It "returns 1 when the failover is still running at the deadline"
         get_sentinel_master_addrs() { echo "redis1 6379"; }
         sentinel_may_be_failing_over() { return 0; }
-        When call wait_for_sentinel_to_switch_master "redis1 6379"
-        The status should eq 1
-        The stderr should include "still failing over from redis1 6379 after 3 attempts"
-        new_primary_max_attempts=75
+        check_deadline() {
+          local until_ms=$((fake_now_ms + 500)) rc=0
+          wait_for_sentinel_to_switch_master "redis1 6379" "$until_ms" || rc=$?
+          echo "rc=$rc at +$((fake_now_ms - until_ms + 500))ms"
+        }
+        When call check_deadline
+        The stdout should eq "rc=1 at +500ms"
       End
 
       It "takes a switch that happens just as the failover ends"
@@ -492,6 +472,7 @@ master_host:redis-master"
       }
       execute_sentinel_failover() { failover_started=true; echo "failover"; return 0; }
       replicas_caught_up() { return 0; }
+      get_sentinel_down_after_ms() { echo 5000; }
       # the old primary turns into a replica, the new one runs as a master
       check_redis_role() { if [ "$1" = "redis2" ]; then echo "primary"; else echo "secondary"; fi; }
 
@@ -499,7 +480,7 @@ master_host:redis-master"
         failover_started=""
         When call failover_with_writes_paused "redis1"
         The status should be success
-        The line 1 of stdout should eq "cmd redis1: CLIENT PAUSE 30000 WRITE"
+        The line 1 of stdout should eq "cmd redis1: CLIENT PAUSE 5000 WRITE"
         The line 3 of stdout should eq "failover"
         The stdout should include "cmd redis1: REPLICAOF redis2 6379"
         The stdout should include "redis1 is now a replica of redis2:6379"
@@ -527,7 +508,7 @@ master_host:redis-master"
         The stderr should include "sentinel is no longer failing over and still reports redis1 6379"
       End
 
-      It "keeps writes paused when it cannot tell whether sentinel will switch"
+      It "watches on without the pause when sentinel has not switched by its end"
         failover_started=""
         execute_sentinel_failover() { return 0; }
         wait_for_sentinel_to_switch_master() { return 1; }
@@ -535,7 +516,34 @@ master_host:redis-master"
         The status should be failure
         The stdout should not include "CLIENT UNPAUSE"
         The stdout should not include "REPLICAOF"
-        The stderr should include "cannot tell whether sentinel fails redis1 over; its writes stay paused"
+        The stderr should include "sentinel has not switched within the 5000 ms writes may stay paused"
+        The stderr should include "still failing over from redis1 6379 after another 75s"
+      End
+
+      It "demotes the old primary as soon as the switch shows after the pause"
+        failover_started=""
+        waits_file="./switch-waits"
+        echo 0 > "$waits_file"
+        # the first wait, under the pause, ends without a switch; the next sees it
+        wait_for_sentinel_to_switch_master() {
+          local waits=$(( $(cat "$waits_file") + 1 )); echo "$waits" > "$waits_file"
+          [ "$waits" -ge 2 ] || return 1
+          new_primary_host=redis2; new_primary_port=6379
+        }
+        handed_over() { failover_with_writes_paused "redis1"; local rc=$?; rm -f "$waits_file"; return $rc; }
+        When call handed_over
+        The status should be success
+        The stderr should include "takes writes again until it is demoted"
+        The stdout should include "redis1 is now a replica of redis2:6379"
+      End
+
+      It "pauses writes for the down-after-milliseconds sentinel has"
+        failover_started=""
+        get_sentinel_down_after_ms() { echo 3000; }
+        When call failover_with_writes_paused "redis1"
+        The status should be success
+        The line 1 of stdout should eq "cmd redis1: CLIENT PAUSE 3000 WRITE"
+        The stdout should include "writes paused on redis1 for 3000 ms"
       End
 
       It "does not switch over while the sentinels disagree on the primary"
@@ -578,14 +586,14 @@ master_host:redis-master"
         The output should match pattern "*REPLICAOF redis2 6379*cmd redis1: CLIENT UNPAUSE*"
       End
 
-      It "keeps writes paused when the request failed and a sentinel may be failing over"
+      It "does not unpause when the request failed and a sentinel may be failing over"
         failover_started=""
         execute_sentinel_failover() { return 1; }
         wait_for_sentinel_to_switch_master() { return 1; }
         When call failover_with_writes_paused "redis1"
         The status should be failure
         The stdout should not include "CLIENT UNPAUSE"
-        The stderr should include "its writes stay paused"
+        The stderr should include "sentinel has not switched within the 5000 ms"
       End
 
       It "does not fail over when writes cannot be paused"
@@ -616,24 +624,16 @@ master_host:redis-master"
         The stdout should include "cmd redis1: CLIENT UNPAUSE"
       End
 
-      It "renews the pause at every step it waits on"
+      It "gives up within the pause when the replicas do not catch up"
         failover_started=""
-        cmd_log="./switchover-cmds"
-        : > "$cmd_log"
-        # renewals print nothing, so the commands are counted in a file
-        execute_sub_command() { echo "$4" >> "$cmd_log"; return 0; }
-        attempts=0
-        replicas_caught_up() { attempts=$((attempts + 1)); [ "$attempts" -ge 3 ]; }
-        execute_sentinel_failover() { renew_write_pause; failover_started=true; return 0; }
-        count_pauses() {
-          failover_with_writes_paused "redis1" >/dev/null || return 1
-          grep -c "CLIENT PAUSE 30000 WRITE" "$cmd_log"
-          rm -f "$cmd_log"
+        replicas_caught_up() { return 1; }
+        time_taken() {
+          local started=$fake_now_ms
+          failover_with_writes_paused "redis1" >/dev/null 2>&1
+          echo "rc=$? after $((fake_now_ms - started))ms"
         }
-        When call count_pauses
-        The status should be success
-        # once to start, twice while the replicas catch up, once before the failover
-        The stdout should eq 4
+        When call time_taken
+        The stdout should eq "rc=1 after 5000ms"
       End
 
       It "fails when no sentinel knows the primary"
