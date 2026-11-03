@@ -725,7 +725,7 @@ spec:
 
 Sharded clusters (`topology: cluster`) offer the `aof` method too. `aof-timestamp-enabled` is already `yes` in their configuration, so the only step is to enable the `aof` method in the sharding's `BackupSchedule`.
 
-The continuous `Backup` runs one archiver per shard, each a target of the same `Backup`, following its shard's current primary across failovers. Each shard's archive covers its own time range, and the `Backup` reports:
+The continuous `Backup` runs one archiver per shard, each a target of the same `Backup`. Like the other backup methods of a sharded cluster, it archives a replica of each shard, or the primary when the shard has no replica, and picks the pod again after a failover. Each shard's archive covers its own time range, and the `Backup` reports:
 
 - `status.timeRange`: the time every shard covers (the latest start and the earliest end). This is the window a restore can ask for. While any shard has archived nothing yet, or the shards share no time, there is no `timeRange`.
 - `status.extras`: each shard's own range, as `{"shard": "<target>", "start": "...", "end": "..."}`.
@@ -745,6 +745,8 @@ A shard removed by a scale-in leaves its archive in the `Backup`, and that archi
 > [!NOTE]
 > The shards agree on the restore time to the precision of the AOF timestamps (one second) and of the clocks of the nodes the shards run on.
 > Writes made within the second of `restoreTime` are kept, and a write that touched several shards (for example a client writing keys of different slots one after another) can come back on one shard and not another if it spans that second.
+>
+> A replica stamps a write with the time it applies it, not the time the primary committed it. While a replica lags, a write committed just before `restoreTime` can be stamped after it and left out of the restore. The writes at risk are those within the replication lag of `restoreTime`, usually milliseconds.
 
 #### Backup using Cluster API
 
