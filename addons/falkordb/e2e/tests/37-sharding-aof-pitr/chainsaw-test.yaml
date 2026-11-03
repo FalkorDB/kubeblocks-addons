@@ -153,9 +153,22 @@ spec:
 
               # The target is read from inside the cluster: it is compared with
               # the #TS: stamps the shards wrote, not with this machine's clock.
+              # The shell has no pipefail, so kubectl's status is checked before
+              # the \r is stripped, and an empty time fails rather than letting
+              # the window comparisons below pass without waiting.
+              cluster_time() {
+                local t
+                t="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
+                  date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+                t="$(printf '%s' "$t" | tr -d '\r')"
+                case "$t" in
+                  ????-??-??T??:??:??Z) echo "$t" ;;
+                  *) echo "read [$t] as the cluster time" >&2; return 1 ;;
+                esac
+              }
+
               sleep 15
-              target="$(kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
-                date -u +%Y-%m-%dT%H:%M:%SZ | tr -d '\r')"
+              target="$(cluster_time)" || exit 1
               echo "$target" > "$state/restore-time"
               echo "recovery target is $target"
               sleep 15
@@ -174,8 +187,8 @@ spec:
               # The restore waits for the archive to cover this, so every shard
               # has shipped its late writes and only the cut can keep them out.
               sleep 1
-              kubectl exec -n "$NAMESPACE" "$pod" -c falkordb-cluster -- \
-                date -u +%Y-%m-%dT%H:%M:%SZ | tr -d '\r' > "$state/late-done"
+              late_done="$(cluster_time)" || exit 1
+              echo "$late_done" > "$state/late-done"
         - script:
             env:
               - name: FDB_CONTAINER
