@@ -227,34 +227,45 @@ get_sentinel_primary_flags() {
 # that cannot be asked may be the one running the failover, so it is waited for
 # too. A sentinel that only sees the pod down is not: when every pod restarts at
 # once that would hand a replica, perhaps behind this pod, the time to be
-# promoted. A failover that has started goes on even if the pod comes back, so
-# it is waited for, though not forever: a sentinel that stays unreachable would
-# otherwise keep the pod from ever starting.
+# promoted. The wait is bounded. A failover still running at the end exits the
+# start, since this pod could otherwise start as a master next to the replica
+# being promoted; the container is restarted and asks again. A sentinel that is
+# only unreachable at the end does not, or it could keep the pod from starting.
 wait_while_sentinel_fails_over_current_pod() {
   if is_empty "$SENTINEL_COMPONENT_NAME" || is_empty "$SENTINEL_POD_FQDN_LIST"; then
     return 1
   fi
-  local attempt sentinel_pod_fqdn flags waited=1
+  local attempt sentinel_pod_fqdn flags waited=1 failing_over="" unreachable=""
   for ((attempt = 0; attempt < sentinel_failover_wait_max_attempts; attempt++)); do
-    local failing_over=""
+    failing_over=""
+    unreachable=""
     for sentinel_pod_fqdn in $(split "$SENTINEL_POD_FQDN_LIST" ","); do
       if ! flags=$(get_sentinel_primary_flags "$sentinel_pod_fqdn"); then
-        failing_over="$sentinel_pod_fqdn (cannot be asked, so may be)"
-        break
+        unreachable="${unreachable:+$unreachable }$sentinel_pod_fqdn"
+        continue
       fi
       if [[ ",$flags," == *,failover_in_progress,* ]]; then
         failing_over="$sentinel_pod_fqdn ($flags)"
         break
       fi
     done
-    if is_empty "$failing_over"; then
+    if is_empty "$failing_over" && is_empty "$unreachable"; then
       return $waited
     fi
     waited=0
-    echo "sentinel $failing_over is failing over this pod, its primary; waiting for it before starting."
+    if ! is_empty "$failing_over"; then
+      echo "sentinel $failing_over is failing over this pod, its primary; waiting for it before starting."
+    else
+      echo "sentinel $unreachable cannot be asked and may be failing over this pod, its primary; waiting before starting."
+    fi
     sleep_when_ut_mode_false "$sentinel_failover_wait_delay_second"
   done
-  echo "sentinel is still failing over this pod after $((sentinel_failover_wait_max_attempts * sentinel_failover_wait_delay_second))s; asking it for the primary again."
+  local waited_seconds=$((sentinel_failover_wait_max_attempts * sentinel_failover_wait_delay_second))
+  if ! is_empty "$failing_over"; then
+    echo "Error: sentinel $failing_over is still failing over this pod after ${waited_seconds}s; refusing to start while it may promote another pod. Exiting."
+    exit 1
+  fi
+  echo "sentinel $unreachable still cannot be asked after ${waited_seconds}s; asking the others for the primary again."
   return 0
 }
 

@@ -20,6 +20,9 @@ Describe "FalkorDB Switchover Script Tests"
   }
   BeforeAll "init"
 
+  # timeout is an external command, so it could not run the redis-cli stubs
+  timeout() { shift; "$@"; }
+
   cleanup() {
     rm -f $common_library_file
   }
@@ -222,6 +225,26 @@ master_host:redis-master"
         The stderr should equal ""
       End
 
+      It "renews the write pause before every attempt"
+        # renewals print nothing, so the commands are logged to a file
+        cmd_log="./failover-cmds"
+        execute_sub_command() { echo "$1: $4" >> "$cmd_log"; [[ "$4" != "SENTINEL FAILOVER"* ]] || [ "$1" = "sentinel2" ]; }
+        call_func_with_retry() { shift 2; "$@"; }
+        logged_commands() {
+          : > "$cmd_log"
+          paused_primary="redis1"
+          execute_sentinel_failover "redis" >/dev/null
+          paused_primary=""
+          cat "$cmd_log"
+          rm -f "$cmd_log"
+        }
+        When call logged_commands
+        The line 1 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
+        The line 2 of stdout should eq "sentinel1: SENTINEL FAILOVER redis"
+        The line 3 of stdout should eq "redis1: CLIENT PAUSE 30000 WRITE"
+        The line 4 of stdout should eq "sentinel2: SENTINEL FAILOVER redis"
+      End
+
       It "should fail when all sentinels fail"
         execute_sub_command() {
           return 1
@@ -294,11 +317,24 @@ master_host:redis-master"
     Context "wait_for_sentinel_to_switch_master()"
       It "returns the first primary that differs from the initial one"
         get_sentinel_master_addrs() { printf '%s\n' "redis1 6379" "redis2 6379"; }
+        check_redis_role() { echo "primary"; }
         check_new_primary() {
           wait_for_sentinel_to_switch_master "redis1 6379" && echo "new=$new_primary_host:$new_primary_port"
         }
         When call check_new_primary
         The status should be success
+        The stdout should include "new=redis2:6379"
+      End
+
+      It "skips a primary a lagging sentinel names that is a replica now"
+        get_sentinel_master_addrs() { printf '%s\n' "redis1 6379" "redis3 6379" "redis2 6379"; }
+        check_redis_role() { if [ "$1" = "redis2" ]; then echo "primary"; else echo "secondary"; fi; }
+        check_new_primary() {
+          wait_for_sentinel_to_switch_master "redis1 6379" && echo "new=$new_primary_host:$new_primary_port"
+        }
+        When call check_new_primary
+        The status should be success
+        The stdout should include "redis3 6379 as the primary, but it does not run as one"
         The stdout should include "new=redis2:6379"
       End
 
@@ -319,7 +355,8 @@ master_host:redis-master"
       }
       execute_sentinel_failover() { failover_started=true; echo "failover"; return 0; }
       replicas_caught_up() { return 0; }
-      check_redis_role() { echo "secondary"; }
+      # the old primary turns into a replica, the new one runs as a master
+      check_redis_role() { if [ "$1" = "redis2" ]; then echo "primary"; else echo "secondary"; fi; }
 
       It "pauses writes, fails over, demotes the old primary and only then unpauses"
         failover_started=""

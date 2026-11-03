@@ -1194,14 +1194,35 @@ Describe "FalkorDB Start Bash Script Tests"
       }
       When call wait_while_sentinel_fails_over_current_pod
       The status should be success
-      The stdout should include "sentinel sentinel-1 (cannot be asked, so may be) is failing over this pod"
+      The stdout should include "sentinel sentinel-1 cannot be asked and may be failing over this pod"
     End
 
-    It "stops waiting after the last attempt"
+    It "exits when the failover is still running after the last attempt"
       get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "Error: sentinel sentinel-0 (master,failover_in_progress) is still failing over this pod after 6s"
+    End
+
+    It "goes on after the last attempt when a sentinel is only unreachable"
+      get_sentinel_primary_flags() { [ "$1" = "sentinel-0" ] && echo "master"; }
       When call wait_while_sentinel_fails_over_current_pod
       The status should be success
-      The stdout should include "still failing over this pod after 6s"
+      The stdout should include "sentinel sentinel-1 still cannot be asked after 6s; asking the others for the primary again."
+    End
+
+    It "waits for a failover another sentinel runs even when the first cannot be asked"
+      get_sentinel_primary_flags() {
+        local calls=$(( $(cat "$flags_calls_file") + 1 ))
+        echo "$calls" > "$flags_calls_file"
+        [ "$1" = "sentinel-0" ] && return 1
+        if [ "$calls" -le 2 ]; then echo "master,failover_in_progress"; else echo "master"; fi
+      }
+      When call wait_while_sentinel_fails_over_current_pod
+      # the failover ends; sentinel-0 stays unreachable, which does not stop the start
+      The status should be success
+      The stdout should include "sentinel sentinel-1 (master,failover_in_progress) is failing over this pod"
+      The stdout should include "sentinel sentinel-0 still cannot be asked after 6s"
     End
 
     It "does not wait without sentinel"

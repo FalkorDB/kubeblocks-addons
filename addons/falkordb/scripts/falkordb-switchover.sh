@@ -16,8 +16,9 @@
 # shellcheck disable=SC2153
 ut_mode="false"
 test || __() {
-  # when running in non-unit test mode, set the options "set -ex".
-  set -ex;
+  # when running in non-unit test mode, set the options "set -e". Commands are
+  # not traced (-x): the Redis and Sentinel passwords are passed as arguments.
+  set -e;
 }
 
 declare -A ORIGINAL_PRIORITIES
@@ -31,6 +32,9 @@ new_primary_max_attempts=15
 new_primary_host=""
 new_primary_port=""
 paused_primary=""
+# bounds every redis-cli call, so an unreachable pod cannot hold up the failover
+# for longer than the write pause
+redis_cli_timeout_seconds=5
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -69,9 +73,9 @@ check_redis_role() {
   unset_xtrace_when_ut_mode_false
   local role_info
   if [[ -z "$REDIS_DEFAULT_PASSWORD" ]]; then
-    role_info=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" info replication)
+    role_info=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" info replication)
   else
-    role_info=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$REDIS_DEFAULT_PASSWORD" info replication)
+    role_info=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$REDIS_DEFAULT_PASSWORD" info replication)
   fi
   status=$?
   set_xtrace_when_ut_mode_false
@@ -163,9 +167,9 @@ check_connectivity() {
   local result
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    result=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" PING)
+    result=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" PING)
   else
-    result=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" PING)
+    result=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" PING)
   fi
   set_xtrace_when_ut_mode_false
   if [[ "$result" == "PONG" ]]; then
@@ -186,9 +190,9 @@ execute_sub_command() {
   local output
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
+    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
   else
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
+    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
   fi
   local status=$?
   set_xtrace_when_ut_mode_false
@@ -211,9 +215,9 @@ redis_config_get() {
   local output
   unset_xtrace_when_ut_mode_false
   if ! is_empty "$password"; then
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
+    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" -a "$password" $command)
   else
-    output=$(redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
+    output=$(timeout "$redis_cli_timeout_seconds" redis-cli $REDIS_CLI_TLS_CMD -h "$host" -p "$port" $command)
   fi
   local status=$?
   set_xtrace_when_ut_mode_false
@@ -244,8 +248,7 @@ execute_sentinel_failover() {
   IFS=',' read -ra sentinel_pod_fqdn_list <<< "${SENTINEL_POD_FQDN_LIST}"
   unset_xtrace_when_ut_mode_false
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
-    renew_write_pause
-    if call_func_with_retry 3 5 execute_sub_command "$sentinel_pod_fqdn" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL FAILOVER $master_name"; then
+    if call_func_with_retry 3 5 sentinel_failover_attempt "$sentinel_pod_fqdn" "$master_name"; then
       echo "Sentinel failover started with $sentinel_pod_fqdn"
       success=true
       break
@@ -258,6 +261,13 @@ execute_sentinel_failover() {
     return 1
   fi
   return 0
+}
+
+# Each attempt renews the write pause first: with the retries, one sentinel can
+# take longer than the pause lasts.
+sentinel_failover_attempt() {
+  renew_write_pause
+  execute_sub_command "$1" "$SENTINEL_SERVICE_PORT" "$SENTINEL_PASSWORD" "SENTINEL FAILOVER $2"
 }
 
 # Prints the primary address ("host port") each reachable sentinel reports, one
@@ -299,8 +309,10 @@ replicas_caught_up() {
   return 0
 }
 
-# Waits for a sentinel to report a primary other than initial_addr, and sets
-# new_primary_host and new_primary_port to it.
+# Waits for a sentinel to report a primary other than initial_addr that runs as
+# a master, and sets new_primary_host and new_primary_port to it. A lagging
+# sentinel may still name an earlier primary that is a replica now, and the old
+# primary must not be made a replica of one.
 wait_for_sentinel_to_switch_master() {
   local initial_addr="$1"
   local attempt addr
@@ -310,8 +322,13 @@ wait_for_sentinel_to_switch_master() {
     while read -r addr; do
       if ! is_empty "$addr" && [ "$addr" != "$initial_addr" ]; then
         read -r new_primary_host new_primary_port <<< "$addr"
-        echo "sentinel switched the primary from $initial_addr to $addr"
-        return 0
+        if [ "$(check_redis_role "$new_primary_host" "$new_primary_port" 2>/dev/null)" = "primary" ]; then
+          echo "sentinel switched the primary from $initial_addr to $addr"
+          return 0
+        fi
+        echo "a sentinel reports $addr as the primary, but it does not run as one (yet)"
+        new_primary_host=""
+        new_primary_port=""
       fi
     done <<< "$(get_sentinel_master_addrs)"
     renew_write_pause
@@ -533,6 +550,9 @@ ${__SOURCED__:+false} : || return 0
 
 # main
 load_common_library
+# The common library turns tracing back on after each redis-cli call it hides,
+# which would trace the callers' arguments, passwords among them.
+set_xtrace_when_ut_mode_false() { :; }
 check_environment_exist || exit 1
 if is_empty "$KB_SWITCHOVER_CANDIDATE_FQDN"; then
   switchover_without_candidate || exit 1
