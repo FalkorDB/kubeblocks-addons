@@ -278,10 +278,13 @@ master_host:redis-master"
       export COMPONENT_REPLICAS="2"
       MOCK_RESPONSES=()
       RESPONSE_INDEX=0
+      priorities_file="${SHELLSPEC_TMPBASE:-/tmp}/falkordb-switchover-priorities"
+      rm -f "$priorities_file"
     }
     Before 'setup'
 
     cleanup() {
+      rm -f "$priorities_file"
       unset REDIS_DEFAULT_PASSWORD
       unset SENTINEL_POD_FQDN_LIST
       unset REDIS_POD_FQDN_LIST
@@ -730,7 +733,6 @@ master_host:redis-master"
             echo "secondary"
           fi
         }
-        redis_config_get() { printf 'replica-priority\n100\n'; }
         set_redis_priorities() { echo "set_redis_priorities called"; }
         failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
         When call switchover_with_candidate
@@ -748,28 +750,10 @@ master_host:redis-master"
             *) echo "secondary" ;;
           esac
         }
-        redis_config_get() { printf 'replica-priority\n100\n'; }
         failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
         When call switchover_with_candidate
         The status should be failure
         The stderr should include "not in secondary role"
-        The stdout should not include "called"
-      End
-
-      It "does not report success while the candidate keeps the temporary replica-priority"
-        check_redis_role() {
-          if [ "$1" = "redis2" ]; then
-            echo "primary"
-          else
-            echo "secondary"
-          fi
-        }
-        redis_config_get() { printf 'replica-priority\n1\n'; }
-        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
-        When call switchover_with_candidate
-        The status should be failure
-        The stderr should be present
-        The stdout should not include "nothing to do"
         The stdout should not include "called"
       End
 
@@ -870,6 +854,101 @@ master_host:redis-master"
         The status should be success
         The stdout should not include "nothing to do"
         The stdout should include "failover_with_writes_paused redis2"
+      End
+    End
+
+    # A run keeps the original priorities in its memory; the file lets a later run
+    # restore what that run could not.
+    Context "replica-priority saved across runs"
+      It "saves each original priority before changing it"
+        check_connectivity() { return 0; }
+        redis_config_get() { printf 'replica-priority\n0\n'; }
+        execute_sub_command() { echo "$1 $4"; }
+        When call set_redis_priorities "redis2"
+        The status should be success
+        The stdout should include "redis2 CONFIG SET replica-priority 1"
+        The stdout should include "redis1 CONFIG SET replica-priority 100"
+        The line 1 of contents of file "$priorities_file" should equal "redis1 0"
+        The line 2 of contents of file "$priorities_file" should equal "redis2 0"
+        The line 3 of contents of file "$priorities_file" should equal "redis3 0"
+      End
+
+      It "removes the saved priorities once all are restored"
+        ORIGINAL_PRIORITIES=([redis1]=0 [redis2]=100)
+        printf 'redis1 0\nredis2 100\n' > "$priorities_file"
+        execute_sub_command() { :; }
+        When call recover_redis_priorities
+        The status should be success
+        The stdout should include "recovered"
+        The file "$priorities_file" should not be exist
+      End
+
+      It "keeps the saved priorities when one cannot be restored"
+        ORIGINAL_PRIORITIES=([redis1]=0)
+        printf 'redis1 0\n' > "$priorities_file"
+        call_func_with_retry() { shift 2; "$@"; }
+        execute_sub_command() { return 1; }
+        When call recover_redis_priorities
+        The status should be failure
+        The stdout should include "Recovering"
+        The file "$priorities_file" should be exist
+      End
+
+      It "restores what an earlier run saved, then removes the file"
+        printf 'redis1 0\nredis3 50\n' > "$priorities_file"
+        execute_sub_command() { echo "$1 $4"; }
+        When call restore_saved_priorities
+        The status should be success
+        The stdout should include "redis1 CONFIG SET replica-priority 0"
+        The stdout should include "redis3 CONFIG SET replica-priority 50"
+        The file "$priorities_file" should not be exist
+      End
+
+      It "keeps the file when a saved priority cannot be restored"
+        printf 'redis1 0\n' > "$priorities_file"
+        call_func_with_retry() { shift 2; "$@"; }
+        execute_sub_command() { return 1; }
+        When call restore_saved_priorities
+        The status should be failure
+        The stdout should include "Restoring"
+        The file "$priorities_file" should be exist
+      End
+
+      It "does nothing when no earlier run left priorities"
+        execute_sub_command() { echo "execute_sub_command called"; }
+        When call restore_saved_priorities
+        The status should be success
+        The stdout should equal ""
+      End
+
+      It "restores leftover priorities before taking a repeated switchover as done"
+        printf 'redis1 0\n' > "$priorities_file"
+        execute_sub_command() { echo "$1 $4"; }
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be success
+        The stdout should include "redis1 CONFIG SET replica-priority 0"
+        The stdout should include "redis2 is already the only primary, nothing to do"
+        The stdout should not include "failover_with_writes_paused called"
+        The file "$priorities_file" should not be exist
+      End
+
+      It "does not fail over while leftover priorities cannot be restored"
+        printf 'redis1 0\n' > "$priorities_file"
+        call_func_with_retry() { shift 2; "$@"; }
+        execute_sub_command() { return 1; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_without_candidate
+        The status should be failure
+        The stderr should include "could not restore the replica-priority"
+        The stdout should not include "failover_with_writes_paused called"
       End
     End
 
