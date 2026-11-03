@@ -35,10 +35,11 @@ Describe "FalkorDB backup image version mapping"
     The output should include 'name: falkordb-physical-br-v2'
     The output should include 'name: falkordb-cluster-br-v2'
     The output should include 'name: falkordb-for-pitr-v2'
+    The output should include 'name: falkordb-cluster-for-pitr-v2'
     The output should not include 'registry.example.com/team/falkordb:'
     The output should satisfy awk '
       /image: \$\(FALKORDB_IMAGE\)/ { mapped++ }
-      END { exit mapped == 9 ? 0 : 1 }
+      END { exit mapped == 13 ? 0 : 1 }
     '
   End
 
@@ -60,19 +61,20 @@ Describe "FalkorDB backup image version mapping"
     '
   End
 
-  It "maps cluster datafile jobs to every service version image"
+  It "maps cluster datafile and PITR jobs to every service version image"
     When call render_template backuppolicytemplateforcluster.yaml
     The status should be success
     The output should satisfy awk '
       /actionSetName: falkordb-cluster-br-v2$/ { cluster++ }
+      /actionSetName: falkordb-cluster-for-pitr-v2$/ { pitr++ }
       /actionSetName: falkordb-cluster-br$/ { legacy++ }
-      END { exit cluster == 1 && legacy == 0 ? 0 : 1 }
+      END { exit cluster == 1 && pitr == 1 && legacy == 0 ? 0 : 1 }
     '
     The output should satisfy awk '
       /name: FALKORDB_IMAGE/ { names++ }
       /mappedValue: registry.example.com\/team\/falkordb:v4.12.5/ { v412++ }
       /mappedValue: registry.example.com\/team\/falkordb:v4.14.12/ { v414++ }
-      END { exit names == 1 && v412 == 1 && v414 == 1 ? 0 : 1 }
+      END { exit names == 2 && v412 == 2 && v414 == 2 ? 0 : 1 }
     '
   End
 End

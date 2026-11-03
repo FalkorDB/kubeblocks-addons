@@ -22,6 +22,7 @@ Describe "FalkorDB sharded restore script"
     cat > "$stub_dir/datasafed" <<'EOF'
 #!/bin/sh
 # `datasafed pull -d <decoder> <remote> <local>`: the dump the script reads.
+echo "$*" >> "$STUB_DATASAFED_LOG"
 eval "out=\${$#}"
 : > "$out"
 EOF
@@ -48,7 +49,10 @@ EOF
     export REDIS_DEFAULT_PASSWORD=secret
     export APE_DTS_BIN="$stub_dir/ape-dts"
     export STUB_RECORDED_INI="$work_dir/recorded.ini"
-    unset REDIS_CLI_TLS_CMD STUB_APE_DTS_RC STUB_APE_DTS_SLEEP APE_DTS_RESTORE_TIMEOUT
+    export STUB_DATASAFED_LOG="$work_dir/datasafed.log"
+    : > "$STUB_DATASAFED_LOG"
+    unset REDIS_CLI_TLS_CMD STUB_APE_DTS_RC STUB_APE_DTS_SLEEP APE_DTS_RESTORE_TIMEOUT \
+      RESTORE_FROM_PREPARED_RDB
   }
 
   cleanup() {
@@ -95,6 +99,27 @@ EOF
       When run run_restore
       The status should equal 124
       The stderr should include "did not finish within 1s"
+    End
+  End
+
+  # falkordb-cluster-for-pitr-v2 rebuilds the shard's data at the restore time
+  # in an earlier job (pitr-restore-cluster-data.sh) and sets RESTORE_FROM_PREPARED_RDB.
+  Describe "a point-in-time restore"
+    It "loads the rebuilt RDB instead of pulling the full backup's"
+      export RESTORE_FROM_PREPARED_RDB=true
+      echo "rebuilt" > "$DATA_DIR/kb-dp-dump.rdb"
+      When run run_restore
+      The status should be success
+      The contents of file "$STUB_DATASAFED_LOG" should equal ""
+      The contents of file "$STUB_RECORDED_INI" should include "file_path=$DATA_DIR/kb-dp-dump.rdb"
+    End
+
+    It "fails when the RDB was not rebuilt"
+      export RESTORE_FROM_PREPARED_RDB=true
+      When run run_restore
+      The status should equal 1
+      The stderr should include "kb-dp-dump.rdb is missing"
+      The path "$STUB_RECORDED_INI" should not be exist
     End
   End
 End
