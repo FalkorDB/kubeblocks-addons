@@ -867,20 +867,23 @@ fdb_shard_count() {
 }
 
 # fdb_sharding_pods <namespace> <cluster> <sharding name>
-# Prints every pod belonging to a sharding, across all of its shards.
+# Prints every server pod belonging to a sharding, across all of its shards. The
+# pods a backup runs carry the sharding's labels too, so it selects only those
+# the InstanceSet manages.
 fdb_sharding_pods() {
   local namespace="$1" cluster="$2" sharding="$3"
   kubectl get pods -n "$namespace" \
-    -l "app.kubernetes.io/instance=$cluster,apps.kubeblocks.io/sharding-name=$sharding" \
+    -l "app.kubernetes.io/instance=$cluster,apps.kubeblocks.io/sharding-name=$sharding,workloads.kubeblocks.io/managed-by=InstanceSet" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort
 }
 
 # fdb_any_sharding_pod <namespace> <cluster> <sharding name>
-# Prints one ready pod from the sharding, for use as an entry point to the cluster.
+# Prints one running server pod from the sharding, for use as an entry point to
+# the cluster: never a backup's pod, as fdb_sharding_pods explains.
 fdb_any_sharding_pod() {
   local namespace="$1" cluster="$2" sharding="$3" pod
   pod="$(kubectl get pods -n "$namespace" \
-    -l "app.kubernetes.io/instance=$cluster,apps.kubeblocks.io/sharding-name=$sharding" \
+    -l "app.kubernetes.io/instance=$cluster,apps.kubeblocks.io/sharding-name=$sharding,workloads.kubeblocks.io/managed-by=InstanceSet" \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   if [ -z "$pod" ]; then
