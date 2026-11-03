@@ -1180,6 +1180,26 @@ fdb_kill_pod() {
   fdb_log "$pod is Ready again"
 }
 
+# fdb_delete_pod_within <namespace> <pod> <max_seconds>
+# Deletes the pod, fails if it takes longer than max_seconds to go away, then
+# waits for it to be recreated and Ready. A server that never sees the SIGTERM
+# the container gets is only killed once the termination grace period (30 s)
+# runs out, so a pod that goes well before that shut its server down cleanly.
+fdb_delete_pod_within() {
+  local namespace="$1" pod="$2" max="$3" start took
+  fdb_log "deleting pod $pod, which must be gone within ${max}s"
+  start="$(date +%s)"
+  kubectl delete pod -n "$namespace" "$pod" --wait=true --timeout=5m >/dev/null
+  took=$(( $(date +%s) - start ))
+  kubectl wait --for=create pod -n "$namespace" "$pod" --timeout=5m >/dev/null
+  kubectl wait --for=condition=Ready pod -n "$namespace" "$pod" --timeout=10m >/dev/null
+  if [ "$took" -gt "$max" ]; then
+    fdb_fail "$pod took ${took}s to stop, more than ${max}s"
+    return 1
+  fi
+  fdb_log "$pod stopped in ${took}s and is Ready again"
+}
+
 # fdb_assert_pod_count <namespace> <cluster> <component> <expected>
 fdb_assert_pod_count() {
   local namespace="$1" cluster="$2" component="$3" expected="$4" actual

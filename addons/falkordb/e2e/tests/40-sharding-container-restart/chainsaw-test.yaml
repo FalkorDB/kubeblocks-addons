@@ -1,0 +1,110 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sharding-container-restart
+spec:
+  description: >-
+    The sharded counterpart of container-restart. Kill redis-server inside a
+    shard's container so the kubelet restarts it in place with its emptyDirs,
+    /etc/redis/redis.conf among them, after a CONFIG REWRITE has written a
+    loadmodule line into that file: a start script that appended to it loaded
+    the module twice and crash-looped (#42). Then delete a shard's pod, which
+    must stop well within its grace period now that the start script runs the
+    server in the background and forwards it the SIGTERM (#43). Either way the
+    node must rejoin the cluster with its slots and every key must be readable.
+  steps:
+    - name: create the sharded cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shcrash
+            tail: 200
+
+    - name: the cluster forms and holds data
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_assert_shard_count "$NAMESPACE" fdb-shcrash shard 3
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shcrash shard)"
+              fdb_retry "all 16384 slots to be covered" \
+                fdb_assert_slots_covered "$NAMESPACE" "$pod"
+              fdb_retry "every shard to own its slots" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$pod" 3
+              fdb_write_keys "$NAMESPACE" "$pod" e2e-shcrash 200
+              fdb_verify_keys "$NAMESPACE" "$pod" e2e-shcrash 200
+
+    - name: a shard restarted in place after a config rewrite comes back
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              victim="$(fdb_sharding_pods "$NAMESPACE" fdb-shcrash shard | tail -1)"
+              survivor="$(fdb_sharding_pods "$NAMESPACE" fdb-shcrash shard | head -1)"
+
+              fdb_cli "$NAMESPACE" "$victim" CONFIG REWRITE >/dev/null
+              lines="$(kubectl exec -n "$NAMESPACE" "$victim" -c "$FDB_CONTAINER" -- \
+                sh -c 'grep -c "^loadmodule" /etc/redis/redis.conf || true')"
+              [ "$lines" -ge 1 ] || { echo "CONFIG REWRITE wrote no loadmodule line, so this test proves nothing" >&2; exit 1; }
+              fdb_log "$victim's redis.conf has $lines loadmodule line(s) after CONFIG REWRITE"
+
+              fdb_crash_server "$NAMESPACE" "$victim"
+              lines="$(kubectl exec -n "$NAMESPACE" "$victim" -c "$FDB_CONTAINER" -- \
+                sh -c 'grep -c "^loadmodule" /etc/redis/redis.conf || true')"
+              [ "$lines" -eq 0 ] || { echo "$victim's rebuilt redis.conf still has $lines loadmodule line(s)" >&2; exit 1; }
+              fdb_retry "$victim to rejoin with its slots" \
+                fdb_assert_slots_covered "$NAMESPACE" "$victim"
+              fdb_retry "every shard to own its slots again" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$survivor" 3
+              fdb_retry "every key to be readable again" \
+                fdb_verify_keys "$NAMESPACE" "$survivor" e2e-shcrash 200
+              fdb_assert_restarts_settled "$NAMESPACE" "$victim"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shcrash
+            tail: 200
+
+    - name: a shard's pod stops well within its grace period
+      try:
+        - script:
+            env:
+              - name: FDB_CONTAINER
+                value: falkordb-cluster
+              - name: FDB_CLI_FLAGS
+                value: "-c"
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              victim="$(fdb_sharding_pods "$NAMESPACE" fdb-shcrash shard | tail -1)"
+              survivor="$(fdb_sharding_pods "$NAMESPACE" fdb-shcrash shard | head -1)"
+
+              fdb_delete_pod_within "$NAMESPACE" "$victim" 15
+              fdb_retry "$victim to rejoin with its slots" \
+                fdb_assert_slots_covered "$NAMESPACE" "$victim"
+              fdb_retry "every shard to own its slots again" \
+                fdb_assert_shards_own_slots "$NAMESPACE" "$survivor" 3
+              fdb_retry "every key to be readable again" \
+                fdb_verify_keys "$NAMESPACE" "$survivor" e2e-shcrash 200
+              fdb_write_keys "$NAMESPACE" "$survivor" e2e-shcrash-after 100
+              fdb_verify_keys "$NAMESPACE" "$victim" e2e-shcrash-after 100
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-shcrash
+            tail: 200
