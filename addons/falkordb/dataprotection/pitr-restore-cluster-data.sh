@@ -20,11 +20,19 @@ FALKORDB_MODULE=${FALKORDB_MODULE:-/var/lib/falkordb/bin/falkordb.so}
 pitr_server_cli="redis-cli -h 127.0.0.1 -p ${PITR_SERVER_PORT}"
 pitr_server_pid=""
 
+# A server busy replaying may not act on TERM promptly; a watchdog KILLs it
+# after PITR_STOP_TIMEOUT_SECONDS so cleanup cannot outlast the restore's deadline.
+# (kill -0 cannot tell: the server stays a zombie, and signalable, until waited for.)
 function stop_pitr_server() {
-  if [ -n "${pitr_server_pid}" ] && kill -0 "${pitr_server_pid}" 2>/dev/null; then
-    kill "${pitr_server_pid}" 2>/dev/null
-    wait "${pitr_server_pid}" 2>/dev/null
+  if [ -z "${pitr_server_pid}" ] || ! kill -0 "${pitr_server_pid}" 2>/dev/null; then
+    return
   fi
+  kill "${pitr_server_pid}" 2>/dev/null
+  (sleep "${PITR_STOP_TIMEOUT_SECONDS:-30}"; kill -9 "${pitr_server_pid}" 2>/dev/null) &
+  local watchdog=$!
+  wait "${pitr_server_pid}" 2>/dev/null
+  kill "${watchdog}" 2>/dev/null
+  pitr_server_pid=""
 }
 trap stop_pitr_server EXIT
 

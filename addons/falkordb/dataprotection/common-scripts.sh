@@ -63,11 +63,13 @@ function DP_pull_directory() {
 # Clean up expired logfiles.
 # Default interval is 60s
 # Default rootPath is /
+# Files whose path contains the optional 5th argument are kept.
 function DP_purge_expired_files() {
   local currentUnix="${1:?missing current unix}"
   local last_purge_time="${2:?missing last_purge_time}"
   local root_path=${3:-"/"}
   local interval_seconds=${4:-60}
+  local keep=${5:-}
   local diff_time=$((${currentUnix} - ${last_purge_time}))
   if [[ -z ${DP_TTL_SECONDS} || ${diff_time} -lt ${interval_seconds} ]]; then
     return
@@ -75,6 +77,9 @@ function DP_purge_expired_files() {
   expiredUnix=$((${currentUnix} - ${DP_TTL_SECONDS}))
   files=$(datasafed list -f --recursive --older-than ${expiredUnix} ${root_path})
   for file in ${files}; do
+    if [ -n "${keep}" ] && [[ "${file}" == *"${keep}"* ]]; then
+      continue
+    fi
     datasafed rm ${file}
     echo ${file}
   done

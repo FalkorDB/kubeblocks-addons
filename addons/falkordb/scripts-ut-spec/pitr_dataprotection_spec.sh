@@ -28,17 +28,20 @@ cmd=$1; shift
 case "$cmd" in
 list)
   dirs_only=false recursive=false
+  # --older-than lists every file: the cases that pass it treat them all as expired
   while [ $# -gt 1 ]; do
     case "$1" in
     -d) dirs_only=true ;;
-    -r) recursive=true ;;
+    -r|--recursive) recursive=true ;;
+    --older-than) shift ;;
     esac
     shift
   done
   path=${1#/}
   cd "$STUB_REMOTE" || exit 1
   if $recursive; then
-    find "${path%/}" -type f | sort
+    find "${path%/}" -type f 2>/dev/null | sort
+    [ -n "${path%/}" ] || find . -type f | sed 's|^\./||' | sort
   elif $dirs_only; then
     ls -p | grep '/$'
   else
@@ -165,6 +168,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$STUB_SERVER_RC" ] && exit "$STUB_SERVER_RC"
+# a server that does not act on TERM; only KILL stops it
+[ -n "$STUB_SERVER_IGNORE_TERM" ] && trap '' TERM
 exec /bin/sleep 30
 EOF
     chmod +x "$stub_dir"/*
@@ -190,7 +195,8 @@ EOF
     unset REDIS_CLI_TLS_CMD DP_TTL_SECONDS DP_RESTORE_KEY_PATTERNS DP_RESTORE_TIME \
       STUB_PUSH_RC STUB_PULL_RC STUB_RM_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS \
       MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS \
-      STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS
+      STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS \
+      PURGE_INTERVAL_SECONDS STUB_SERVER_IGNORE_TERM PITR_STOP_TIMEOUT_SECONDS
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -468,6 +474,20 @@ EOF
       The path "$STUB_REMOTE/1000.2.dir/appendonlydir/appendonly.aof.2.base.rdb" should be exist
       The path "$STUB_REMOTE/1000.2.dir/appendonlydir/appendonly.aof.2.incr.aof" should be exist
       The path "$STUB_REMOTE/1000.2.dir/users.acl" should be exist
+    End
+
+    It "purges expired archives but keeps the live seq's files"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      echo "old archive" > "$STUB_REMOTE/900.1.tar.zst"
+      export DP_TTL_SECONDS=60
+      export PURGE_INTERVAL_SECONDS=0
+      When run run_backup
+      The status should be success
+      The output should include "Cleanup expired aof files: 900.1.tar.zst"
+      The path "$STUB_REMOTE/900.1.tar.zst" should not be exist
+      The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.base.rdb" should be exist
+      The path "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
     End
 
     It "retries a failed upload of the live AOF on the next round"
@@ -749,6 +769,19 @@ SET a 1"
       The contents of file "$STUB_SERVER_ARGS" should include "--loadmodule $FALKORDB_MODULE"
       The path "$DATA_DIR/.kb-pitr-restore" should not be exist
       The path "$DATA_DIR/users.acl" should not be exist
+    End
+
+    It "kills a server that does not stop on TERM"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1500
+      export STUB_SERVER_IGNORE_TERM=1
+      export PITR_STOP_TIMEOUT_SECONDS=0
+      # the watchdog sleeps before it kills; do not let the stub end it instead
+      export STUB_ROUNDS=1000000
+      When run run_restore_cluster_data
+      The status should be success
+      The output should include "Replayed 1000.1.dir/ to restore-at-1500"
+      The path "$DATA_DIR/kb-dp-dump.rdb" should be exist
     End
 
     It "fails when the server is still loading at the deadline"
