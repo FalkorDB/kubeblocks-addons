@@ -4,40 +4,22 @@
 export PATH="$PATH:$DP_DATASAFED_BIN_PATH"
 export DATASAFED_BACKEND_BASE_PATH="$DP_BACKUP_BASE_PATH"
 
-# Cut the newest AOF under <dir> (default: DATA_DIR) at DP_RESTORE_TIME.
+# Cut the AOF under <dir> (default: DATA_DIR) at DP_RESTORE_TIME.
 function truncate_aof() {
   local dir=${1:-$DATA_DIR}
-  local aof_file=$(find "$dir" -type f -name "*.aof" | sort -r | head -n 1)
-  local temp_file="${aof_file}.tmp"
+  local manifest=$(find "$dir" -type f -name "*.manifest" | head -n 1)
   local restore_time=$(date -d "$DP_RESTORE_TIME" +%s)
-  # Values in the AOF can hold any byte, NUL included, and a shell variable
-  # cannot, so the file is never copied through the shell. Instead find the
-  # byte offset of the first #TS:<t> annotation after the restore time and keep
-  # everything before it. Annotations start a line between commands, so the
-  # cut leaves only whole commands.
-  if [ -z "$aof_file" ]; then
+  if [ -z "$manifest" ]; then
     return
   fi
-  # grep exits 1 when the file has no annotation at all; anything above that
-  # means the AOF could not be read, and restoring it uncut would ignore the
-  # restore time.
-  local stamps rc
-  stamps=$(grep -a -b -o '^#TS:[0-9][0-9]*' "$aof_file")
-  rc=$?
-  if [ "$rc" -gt 1 ]; then
-    DP_error_log "Failed to read aof file: $aof_file"
-    exit 1
-  fi
-  local offset=$(printf '%s\n' "$stamps" |
-    awk -F: -v rt="$restore_time" '$3 + 0 > rt + 0 { print $1; exit }')
-  if [ -z "$offset" ]; then
-    return
-  fi
-
-  DP_log "Truncate aof file: $aof_file at byte $offset"
-  if ! head -c "$offset" "$aof_file" >"$temp_file" || ! mv "$temp_file" "$aof_file"; then
-    rm -f "$temp_file"
-    DP_error_log "Failed to truncate aof file: $aof_file"
+  # redis-check-aof parses the RESP framing, so only a #TS: annotation between
+  # commands is a cut point: a value can hold any bytes, a "\n#TS:<t>" or a NUL
+  # among them, and is neither cut at nor copied through the shell. It keeps the
+  # commands stamped up to the restore time, and fails on an AOF it cannot read,
+  # which restored uncut would ignore the restore time.
+  DP_log "Truncate aof: $manifest to $restore_time"
+  if ! redis-check-aof --truncate-to-timestamp "$restore_time" "$manifest" </dev/null; then
+    DP_error_log "Failed to truncate aof: $manifest"
     exit 1
   fi
 }

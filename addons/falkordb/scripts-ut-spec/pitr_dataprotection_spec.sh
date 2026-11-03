@@ -27,6 +27,7 @@ mkdir -p "$STUB_REMOTE"
 cmd=$1; shift
 case "$cmd" in
 list)
+  [ "${STUB_LIST_RC:-0}" -ne 0 ] && exit "$STUB_LIST_RC"
   dirs_only=false recursive=false
   # --older-than lists every file: the cases that pass it treat them all as expired
   while [ $# -gt 1 ]; do
@@ -96,10 +97,10 @@ case "$*" in
 # three primaries own slots; the replica and the failed-over primary do not count.
 # STUB_FAILED_PRIMARY_SLOTS gives the failed primary slots, which it has not handed over yet.
 *"CLUSTER NODES"*)
-  echo "a1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460"
+  echo "a1 10.0.0.1:6379@16379 ${STUB_MYSELF_REPLICA:-myself,}master - 0 0 1 connected 0-5460"
   echo "b1 10.0.0.2:6379@16379 master - 0 0 2 connected 5461-10922"
   echo "c1 10.0.0.3:6379@16379 master - 0 0 3 connected 10923-16383"
-  echo "c2 10.0.0.4:6379@16379 slave c1 0 0 3 connected"
+  echo "c2 10.0.0.4:6379@16379 ${STUB_MYSELF_REPLICA:+myself,}slave c1 0 0 3 connected"
   echo "d1 10.0.0.5:6379@16379 master,fail - 0 0 4 disconnected ${STUB_FAILED_PRIMARY_SLOTS:-}"
   ;;
 *" PING"*) echo "${STUB_PING:-PONG}" ;;
@@ -155,6 +156,23 @@ echo round >> "$STUB_SLEEP_LOG"
 [ "$(wc -l < "$STUB_SLEEP_LOG")" -ge "${STUB_ROUNDS:-1}" ] && kill -TERM "$PPID"
 exit 0
 EOF
+    # `redis-check-aof --truncate-to-timestamp <t> <manifest>`: records its
+    # arguments and cuts the line-based fixtures at the first #TS: after <t>, the
+    # way the real one cuts at an annotation between commands; STUB_CHECK_AOF_RC fails it.
+    cat > "$stub_dir/redis-check-aof" <<'EOF'
+#!/bin/bash
+echo "$*" > "$STUB_CHECK_AOF_ARGS"
+[ "${STUB_CHECK_AOF_RC:-0}" -ne 0 ] && { echo "Bad file format" >&2; exit "$STUB_CHECK_AOF_RC"; }
+t=$2 dir=$(dirname "$3")
+for f in "$dir"/*.incr.aof; do
+  [ -f "$f" ] || continue
+  offset=$(grep -a -b -o '^#TS:[0-9]*' "$f" | awk -F: -v t="$t" '$3 + 0 > t + 0 { print $1; exit }')
+  [ -n "$offset" ] && head -c "$offset" "$f" > "$f.cut" && mv "$f.cut" "$f"
+done
+exit 0
+EOF
+    # `timeout <seconds> <command...>`: runs the command, unbounded
+    printf '#!/bin/sh\nshift\nexec "$@"\n' > "$stub_dir/timeout"
     # Records its arguments and where it would save, then waits to be stopped,
     # or exits at once with STUB_SERVER_RC.
     cat > "$stub_dir/redis-server" <<'EOF'
@@ -188,6 +206,7 @@ EOF
     export STUB_SLEEP_LOG="$work_dir/sleep.log"
     export STUB_SERVER_ARGS="$work_dir/server.args"
     export STUB_SERVER_STATE="$work_dir/server.state"
+    export STUB_CHECK_AOF_ARGS="$work_dir/check-aof.args"
     export FALKORDB_MODULE="$work_dir/falkordb.so"
     : > "$STUB_DATASAFED_LOG"
     : > "$STUB_SLEEP_LOG"
@@ -196,7 +215,8 @@ EOF
       STUB_PUSH_RC STUB_PULL_RC STUB_RM_RC STUB_PUSH_FAIL_ONCE STUB_ROUNDS \
       MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS \
       STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS \
-      PURGE_INTERVAL_SECONDS STUB_SERVER_IGNORE_TERM PITR_STOP_TIMEOUT_SECONDS
+      PURGE_INTERVAL_SECONDS STUB_SERVER_IGNORE_TERM PITR_STOP_TIMEOUT_SECONDS \
+      STUB_CHECK_AOF_RC STUB_MYSELF_REPLICA STUB_LIST_RC
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -252,9 +272,10 @@ EOF
     rm -rf "$STUB_REMOTE/1000.1.dir"
     echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
     mkdir -p "$STUB_REMOTE/fdb-aof/shard-b" "$STUB_REMOTE/fdb-aof/shard-c"
-    # <start> <end> <published at>; now is 2000
-    echo "900 1800 1990" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
-    echo "1200 1950 1990" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+    # <start> <end> <published at> <shard primary id>; now is 2000, and the
+    # stub's CLUSTER NODES has primaries a1 (this archiver's), b1 and c1
+    echo "900 1800 1990 b1" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
+    echo "1200 1950 1990 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
   }
 
   backup_info() {
@@ -308,18 +329,6 @@ EOF
 
   prepare_remote_dir() {
     write_backup_tree "$STUB_REMOTE/1000.1.dir"
-  }
-
-  # Real RESP framing, with NUL bytes in the value written before the restore
-  # time and a NUL-free write after it.
-  write_binary_incr() {
-    local incr="$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof"
-    printf '#TS:1100\r\n*3\r\n$3\r\nSET\r\n$3\r\nbin\r\n$5\r\na\000b\000c\r\n' > "$work_dir/expected.aof"
-    { cat "$work_dir/expected.aof"; printf '#TS:1600\r\n*3\r\n$3\r\nSET\r\n$4\r\nlate\r\n$1\r\n1\r\n'; } > "$incr"
-  }
-
-  restored_incr_matches_expected() {
-    cmp "$work_dir/expected.aof" "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
   }
 
   restored_incr() {
@@ -531,38 +540,25 @@ SET a 1"
       The path "$DATA_DIR/.kb-data-protection" should not be exist
     End
 
-    It "keeps NUL bytes in the AOF it truncates"
+    # The cut itself is redis-check-aof's: it parses the RESP framing, so values
+    # holding NUL bytes or a "\n#TS:<t>" are neither cut at nor altered.
+    It "has redis-check-aof cut the restored AOF's manifest at the restore time"
       prepare_remote_dir
-      write_binary_incr
       export DP_RESTORE_TIME=restore-at-1500
       When run run_restore
       The status should be success
-      The output should include "Truncate aof file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof at byte 43"
+      The output should include "Truncate aof: $DATA_DIR/appendonlydir/appendonly.aof.manifest to 1500"
+      The contents of file "$STUB_CHECK_AOF_ARGS" should equal "--truncate-to-timestamp 1500 $DATA_DIR/appendonlydir/appendonly.aof.manifest"
       The output should include "Restore complete."
-      Assert restored_incr_matches_expected
     End
 
-    It "leaves the AOF alone when nothing in it is after the restore time"
+    It "fails rather than restore an AOF redis-check-aof cannot read uncut"
       prepare_remote_dir
-      write_binary_incr
-      cp "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" "$work_dir/expected.aof"
-      export DP_RESTORE_TIME=restore-at-1700
-      When run run_restore
-      The status should be success
-      The output should not include "Truncate aof file"
-      The output should include "Restore complete."
-      Assert restored_incr_matches_expected
-    End
-
-    It "fails rather than restore an AOF it cannot read uncut"
-      prepare_remote_dir
-      # a grep that cannot read the file, as on an I/O error
-      printf '#!/bin/sh\necho "grep: read error" >&2\nexit 2\n' > "$stub_dir/grep"
-      chmod +x "$stub_dir/grep"
       export DP_RESTORE_TIME=restore-at-1500
+      export STUB_CHECK_AOF_RC=1
       When run run_restore
       The status should be failure
-      The output should include "ERROR: Failed to read aof file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The output should include "ERROR: Failed to truncate aof: $DATA_DIR/appendonlydir/appendonly.aof.manifest"
       The output should not include "Restore complete."
     End
 
@@ -648,7 +644,7 @@ SET a 1"
       The path "$STUB_REMOTE/fdb-aof/shard-a/1000.1.dir/appendonlydir/appendonly.aof.1.incr.aof" should be exist
       # the archive starts at its base; the round that started at 2000 covers up to 1999,
       # less the 3s the server may hold back its AOF write
-      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 2000"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 2000 a1"
       The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
       The result of function backup_info should include '{"shard":"shard-a","start":"T1000","end":"T1996"}'
       The result of function backup_info should include '{"shard":"shard-b","start":"T900","end":"T1800"}'
@@ -657,14 +653,35 @@ SET a 1"
 
     It "ignores the range of a shard removed by a scale-in"
       prepare_sharded_backup
-      # a fourth shard, gone from the cluster, whose archiver last published at 1000
+      # a fourth shard, gone from the cluster: its primary owns no slots, even
+      # while its range is still fresh
       mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
-      echo "800 1500 1000" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      echo "800 1500 1995 x9" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
       When run run_backup
       The status should be success
-      The output should include "ignoring shard-d, whose archiver last published at 1000"
+      The output should include "ignoring shard-d, whose primary x9 owns no slots"
       The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
       The result of function backup_info should not include '"shard":"shard-d"'
+    End
+
+    It "publishes its primary's id when it archives a replica"
+      prepare_sharded_backup
+      export STUB_MYSELF_REPLICA=1
+      When run run_backup
+      The status should be success
+      The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 2000 c1"
+    End
+
+    It "keeps its last range when the archive listing fails"
+      prepare_sharded_backup
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-a"
+      echo "1000 1996 1990 a1" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
+      export STUB_LIST_RC=1
+      When run run_backup
+      The status should be success
+      The output should include "save_cluster_backup_status: failed to list the shards"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "1000 1996 1990 a1"
     End
 
     It "counts a failed primary that still owns slots as a shard"
@@ -681,18 +698,18 @@ SET a 1"
       # nothing left to archive or restore: no live AOF, no archive in the repo
       rm "$DATA_DIR"/appendonlydir/appendonly.aof.1.*
       mkdir -p "$STUB_REMOTE/fdb-aof/shard-a"
-      echo "1000 1996 1990" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
+      echo "1000 1996 1990 a1" > "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range"
       When run run_backup
       The status should be success
       The output should include "update_aof_file:"
-      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "0 0 2000"
+      The contents of file "$STUB_REMOTE/fdb-aof/shard-a/kb-archive-range" should equal "0 0 2000 a1"
       The output should include "2 of 3 shards have archived"
       The result of function backup_info should include '"timeRange":null'
     End
 
     It "withdraws the window while a shard has archived nothing"
       prepare_sharded_backup
-      echo "0 0 1990" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      echo "0 0 1990 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
       When run run_backup
       The status should be success
       The output should include "2 of 3 shards have archived"
@@ -702,18 +719,19 @@ SET a 1"
     It "does not let a removed shard's range stand in for a live shard with none"
       prepare_sharded_backup
       rm "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      # removed by a scale-in moments ago: still fresh, and covering the time
       mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
-      echo "800 1900 1000" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      echo "800 1900 1995 x9" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
       When run run_backup
       The status should be success
-      The output should include "ignoring shard-d"
+      The output should include "ignoring shard-d, whose primary x9 owns no slots"
       The output should include "2 of 3 shards have archived"
       The result of function backup_info should include '"timeRange":null'
     End
 
     It "withdraws the window when a live shard's archiver stops publishing"
       prepare_sharded_backup
-      echo "1200 1950 1500" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      echo "1200 1950 1500 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
       When run run_backup
       The status should be success
       The output should include "ignoring shard-c, whose archiver last published at 1500"
@@ -722,7 +740,7 @@ SET a 1"
 
     It "withdraws the window when the shards share no time"
       prepare_sharded_backup
-      echo "1900 1950 1990" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      echo "1900 1950 1990 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
       When run run_backup
       The status should be success
       The output should include "they share no time yet"

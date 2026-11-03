@@ -89,6 +89,9 @@ function DP_purge_expired_files() {
 # ${base_file_ctime}.${seq}.dir/ or ${base_file_ctime}.${seq}.tar.zst, and
 # nothing else the repo holds next to them (such as the archive range file of
 # a sharded backup).
+# Returns non-zero when the listing fails, which a pipeline into the filter would hide.
 function DP_pitr_list_archives() {
-  datasafed list / | awk '/^[0-9]+\.[0-9]+\./'
+  local listing
+  listing=$(datasafed list /) || return 1
+  awk '/^[0-9]+\.[0-9]+\./' <<<"${listing}"
 }

@@ -245,8 +245,9 @@ function purge_expired_files() {
   # a seq that lives longer than the TTL would lose its base and be unrestorable.
   local live_dir="$(get_backup_files_prefix "$(aof_base_file "$global_backup_seq")").dir/"
   info=$(DP_purge_expired_files ${current_unix} ${global_last_purge_time} / "${interval_seconds}" "${live_dir}")
+  # a pass that found nothing expired still waits out the interval before the next
+  global_last_purge_time=${current_unix}
   if [ ! -z "${info}" ]; then
-    global_last_purge_time=${current_unix}
     DP_log "Cleanup expired aof files: ${info}"
     # a sharded backup reports the size of every shard, in save_cluster_backup_status
     if [ "${MODE}" != "cluster" ]; then
@@ -279,12 +280,13 @@ function save_backup_status() {
 # range its own shard covers to ${ARCHIVE_RANGE_FILE}, reads every shard's, and
 # reports their intersection, so the status is the same whichever writes last.
 #
-# The file holds "<start> <end> <published at>", and "0 0 <published at>" while
-# the shard has no archive. Every archiver rewrites its own each status round, so
-# a file not rewritten for RANGE_STALE_SECONDS is from an archiver that stopped:
-# a shard removed by a scale-in (its directory stays in the Backup), or a live
-# shard whose archiver is down. Neither counts; for the live shard that leaves
-# fewer ranges than shards, and the window is withdrawn.
+# The file holds "<start> <end> <published at> <shard primary id>", with start
+# and end 0 while the shard has no archive. Every archiver rewrites its own each
+# status round. The window needs a fresh range with an archive from every shard
+# of the cluster now, matched by its primary's node id: a shard removed by a
+# scale-in (its directory stays in the Backup) owns no slots and is ignored, and
+# a live shard with no archive, or whose archiver stopped (its file is older than
+# RANGE_STALE_SECONDS), withdraws the window.
 ARCHIVE_RANGE_FILE="kb-archive-range"
 CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
 RANGE_STALE_SECONDS=${RANGE_STALE_SECONDS:-300}
@@ -306,25 +308,39 @@ function publish_archive_range() {
     # restarted, and no round has completed yet: leave the last range as it is
     return
   fi
-  if ! echo "${start} ${end} $(date +%s)" | datasafed push - "${ARCHIVE_RANGE_FILE}"; then
+  local primary_id
+  primary_id=$(shard_primary_id)
+  if [ -z "${primary_id}" ]; then
+    DP_error_log "publish_archive_range: cannot tell this shard's primary, retrying next round"
+    return
+  fi
+  if ! echo "${start} ${end} $(date +%s) ${primary_id}" | datasafed push - "${ARCHIVE_RANGE_FILE}"; then
     DP_error_log "publish_archive_range: failed to upload ${ARCHIVE_RANGE_FILE}, retrying next round"
   fi
 }
 
-# The number of shards: primaries that own slots. A failed primary that still
-# owns slots is a shard whose archive is needed too.
-function cluster_shard_count() {
+# The node ids of the cluster's shards: primaries that own slots. A failed
+# primary that still owns slots is a shard whose archive is needed too.
+function cluster_shard_ids() {
   ${connect_url} CLUSTER NODES 2>/dev/null |
-    awk '$3 ~ /(^|,)master(,|$)/ && NF > 8' | grep -c .
+    awk '$3 ~ /(^|,)master(,|$)/ && NF > 8 { print $1 }'
+}
+
+# The node id of the primary of the shard this archiver backs up: the target
+# itself, or the primary it replicates.
+function shard_primary_id() {
+  ${connect_url} CLUSTER NODES 2>/dev/null |
+    awk '$3 ~ /(^|,)myself(,|$)/ { print ($3 ~ /(^|,)master(,|$)/) ? $1 : $4; exit }'
 }
 
 function save_cluster_backup_status() {
   local root
   root=$(dirname "${DP_BACKUP_BASE_PATH}")
-  local shards targets target range start end published now
-  local ranges=0 cluster_start=0 cluster_end=0 extras=""
+  local shard_ids shards targets target range start end published id now
+  local covered=" " cluster_start=0 cluster_end=0 extras=""
   now=$(date +%s)
-  shards=$(cluster_shard_count)
+  shard_ids=" $(cluster_shard_ids | tr '\n' ' ')"
+  shards=$(printf '%s' "${shard_ids}" | wc -w | tr -d ' ')
   if ! targets=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed list -d /); then
     DP_error_log "save_cluster_backup_status: failed to list the shards under ${root}"
     return
@@ -332,25 +348,30 @@ function save_cluster_backup_status() {
   for target in ${targets}; do
     target=${target%/}
     range=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed pull "${target}/${ARCHIVE_RANGE_FILE}" - 2>/dev/null) || continue
-    read -r start end published <<<"${range}"
-    if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ && "${published}" =~ ^[0-9]+$ ]]; then
+    read -r start end published id <<<"${range}"
+    if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ && "${published}" =~ ^[0-9]+$ && -n "${id}" ]]; then
+      continue
+    fi
+    if [[ "${shard_ids}" != *" ${id} "* ]]; then
+      DP_log "save_cluster_backup_status: ignoring ${target}, whose primary ${id} owns no slots"
       continue
     fi
     if [ $((now - published)) -gt "${RANGE_STALE_SECONDS}" ]; then
       DP_log "save_cluster_backup_status: ignoring ${target}, whose archiver last published at ${published}"
       continue
     fi
-    # a live shard with no archive covers no time, and is not counted
+    # a shard with no archive covers no time
     [ "${end}" -eq 0 ] && continue
-    ranges=$((ranges + 1))
+    [[ "${covered}" == *" ${id} "* ]] || covered="${covered}${id} "
     [ "${start}" -gt "${cluster_start}" ] && cluster_start=${start}
     { [ "${cluster_end}" -eq 0 ] || [ "${end}" -lt "${cluster_end}" ]; } && cluster_end=${end}
     extras="${extras:+${extras},}{\"shard\":\"${target}\",\"start\":\"$(date -u -d @"${start}" +%Y-%m-%dT%H:%M:%SZ)\",\"end\":\"$(date -u -d @"${end}" +%Y-%m-%dT%H:%M:%SZ)\"}"
   done
+  local ranges
+  ranges=$(printf '%s' "${covered}" | wc -w | tr -d ' ')
   local total_size
   total_size=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed stat / | grep TotalSize | awk '{print $2}')
-  if [ -z "${shards}" ] || [ "${shards}" -eq 0 ] || [ "${ranges}" -lt "${shards}" ] ||
-    [ "${cluster_start}" -gt "${cluster_end}" ]; then
+  if [ "${shards}" -eq 0 ] || [ "${ranges}" -lt "${shards}" ] || [ "${cluster_start}" -gt "${cluster_end}" ]; then
     # Some shard covers no time yet, or the shards share none, so no time can
     # be restored. The sidecar merge-patches the status, so the null is what
     # takes an earlier window off the Backup.

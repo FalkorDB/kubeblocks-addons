@@ -38,5 +38,9 @@ case "$pitr_archive" in
   ;;
 esac
 
-rm -rf ${data_protection_file} && sync
+if ! rm -rf "${data_protection_file}"; then
+  DP_error_log "Failed to remove ${data_protection_file}"
+  exit 1
+fi
+sync
 DP_log "Restored users.acl from $pitr_archive"

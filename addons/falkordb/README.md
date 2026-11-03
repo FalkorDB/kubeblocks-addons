@@ -735,10 +735,10 @@ To restore a sharded cluster to a point in time, name the continuous `Backup` an
 ```yaml
 metadata:
   annotations:
-    kubeblocks.io/restore-from-backup: '{"shard":{"name":"<continuous backup>","namespace":"demo","volumeRestorePolicy":"Parallel","restoreTime":"2026-11-03T10:15:00Z"}}'
+    kubeblocks.io/restore-from-backup: '{"shard":{"name":"<continuous backup>","namespace":"demo","volumeRestorePolicy":"Parallel","restoreTime":"<a time inside status.timeRange>"}}'
 ```
 
-Every shard of the new cluster replays one source shard's archive, cut at the same `restoreTime`, and writes the result through the new cluster, so each key lands on the shard that owns its slot in the new cluster. The new cluster should have as many shards as the source. The new cluster assigns its own slot layout; it does not reproduce the source's slot ownership.
+Every shard of the new cluster replays one source shard's archive, cut at the same `restoreTime`, and writes the result through the new cluster, so each key lands on the shard that owns its slot in the new cluster. The new cluster must have as many shards as the source. It assigns its own slot layout; it does not reproduce the source's slot ownership.
 
 Every archiver republishes its shard's range every 15 seconds, and a range not republished for 5 minutes is left out. A shard removed by a scale-in leaves its archive in the `Backup`, and its range drops out of the window, which keeps following the live shards. A live shard whose archiver stops drops out the same way, and the window is withdrawn until it archives again. Restoring to a time before the scale-in still needs a new cluster with as many shards as the source had then.
 

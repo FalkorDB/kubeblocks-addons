@@ -63,10 +63,11 @@ pitr_server_pid=$!
 # PING answers LOADING until the AOF is replayed. A server that exits refused the AOF.
 # A server busy replaying may not answer at all, so every PING is bounded and the
 # deadline is wall-clock time (SECONDS), not a count of rounds.
-pitr_ping_cli="${pitr_server_cli}"
-if command -v timeout >/dev/null 2>&1; then
-  pitr_ping_cli="timeout ${PITR_PING_TIMEOUT_SECONDS:-5} ${pitr_server_cli}"
+if ! command -v timeout >/dev/null 2>&1; then
+  DP_error_log "timeout is not available to bound the PING of the server replaying $pitr_archive"
+  exit 1
 fi
+pitr_ping_cli="timeout ${PITR_PING_TIMEOUT_SECONDS:-5} ${pitr_server_cli}"
 SECONDS=0
 until [ "$(${pitr_ping_cli} PING 2>/dev/null | tr -d '\r')" == "PONG" ]; do
   if ! kill -0 "${pitr_server_pid}" 2>/dev/null; then
