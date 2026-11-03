@@ -138,7 +138,8 @@ if [ "$1" = "-d" ]; then
   exit 0
 fi
 case "$*" in
-"+%s") echo 2000 ;;
+# STUB_CLOCK_FILE, when it exists, holds a now other than 2000
+"+%s") if [ -f "$STUB_CLOCK_FILE" ]; then cat "$STUB_CLOCK_FILE"; else echo 2000; fi ;;
 *) echo "1970-01-01 00:33:20" ;;
 esac
 EOF
@@ -208,6 +209,7 @@ EOF
     export STUB_SERVER_ARGS="$work_dir/server.args"
     export STUB_SERVER_STATE="$work_dir/server.state"
     export STUB_CHECK_AOF_ARGS="$work_dir/check-aof.args"
+    export STUB_CLOCK_FILE="$work_dir/clock"
     export FALKORDB_MODULE="$work_dir/falkordb.so"
     : > "$STUB_DATASAFED_LOG"
     : > "$STUB_SLEEP_LOG"
@@ -217,7 +219,8 @@ EOF
       MODE CLUSTER_STATUS_INTERVAL_SECONDS STUB_PING STUB_SERVER_RC FALKORDB_ARGS \
       STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS \
       PURGE_INTERVAL_SECONDS STUB_SERVER_IGNORE_TERM PITR_STOP_TIMEOUT_SECONDS \
-      STUB_CHECK_AOF_RC STUB_MYSELF_REPLICA STUB_LIST_RC STUB_TOTAL_SIZE STUB_CLUSTER_NODES_ERR
+      STUB_CHECK_AOF_RC STUB_MYSELF_REPLICA STUB_LIST_RC STUB_TOTAL_SIZE STUB_CLUSTER_NODES_ERR \
+      STATUS_INTERVAL_SECONDS
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -510,6 +513,32 @@ EOF
       The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
       # the round started at 2000: up to 1999, less the AOF write delay
       The contents of file "$DP_BACKUP_INFO_FILE" should include '"timeRange":{"start":"T1000","end":"T1996"}'
+    End
+
+    It "publishes a later round's end while the size stays the same"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      export STATUS_INTERVAL_SECONDS=0
+      export STUB_ROUNDS=2
+      # the second round starts at 2020 and uploads nothing new
+      export STUB_ON_SLEEP='echo 2020 > "$STUB_CLOCK_FILE"'
+      When run run_backup
+      The status should be success
+      The output should include "Update file: $DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof"
+      The contents of file "$DP_BACKUP_INFO_FILE" should include '"timeRange":{"start":"T1000","end":"T2016"}'
+    End
+
+    It "reports no window while the archive starts after the covered end"
+      prepare_rewritten_aof
+      echo "file appendonly.aof.1.incr.aof seq 1 type i" > "$DATA_DIR/appendonlydir/appendonly.aof.manifest"
+      export STUB_TOTAL_SIZE=100
+      # the base was created at 1000 and the round started at 1002: it covers up to 998
+      echo 1002 > "$STUB_CLOCK_FILE"
+      When run run_backup
+      The status should be success
+      The output should include "save_backup_status: the archives cover no time yet"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
     End
 
     It "reports no window while no round has archived everything"

@@ -13,6 +13,10 @@ global_aof_pushed_at=0
 global_aof_pushed_prefix=""
 global_acl_last_modify_time=0
 global_old_size=0
+# the end, and when, save_backup_status last published
+global_old_end=0
+global_status_time=0
+STATUS_INTERVAL_SECONDS=${STATUS_INTERVAL_SECONDS:-15}
 # every write stamped up to this time is in the backup repo
 global_archived_until=0
 
@@ -264,23 +268,34 @@ function save_backup_status() {
   if [ "${global_archived_until}" -le 0 ]; then
     return
   fi
-  # if no size changes, return
+  local now=$(date +%s)
   local total_size=$(datasafed stat / | grep TotalSize | awk '{print $2}')
-  if [[ -z ${total_size} || ${total_size} -eq 0 || ${total_size} == ${global_old_size} ]]; then
+  if [[ -z ${total_size} || ${total_size} -eq 0 ]]; then
+    return
+  fi
+  # Publish on a size change, and otherwise once the end has moved and
+  # STATUS_INTERVAL_SECONDS have passed: the writes of a last busy round are only
+  # covered by a later round's end, which an idle database would never publish.
+  if [ "${total_size}" == "${global_old_size}" ] &&
+    { [ "${global_archived_until}" -eq "${global_old_end}" ] ||
+      [ $((now - global_status_time)) -lt "${STATUS_INTERVAL_SECONDS}" ]; }; then
     return
   fi
   local archives
   if ! archives=$(DP_pitr_list_archives); then
-    # leave the status, and global_old_size, for the next round to retry
+    # leave the status for the next round to retry
     DP_error_log "save_backup_status: failed to list the archives, retrying next round"
     return
   fi
-  global_old_size=${total_size}
   local start_time=$(awk -F '.' '{print $1}' <<<"${archives}" | sort -n | head -n 1)
-  if [ -z "$start_time" ]; then
-    start_time=$(date +%s)
-    DP_log "save_backup_status: empty start_time from backup repo, use current time"
+  if [ -z "$start_time" ] || [ "${start_time}" -gt "${global_archived_until}" ]; then
+    # no archive, or one younger than the end: nothing can be restored yet
+    DP_log "save_backup_status: the archives cover no time yet, retrying next round"
+    return
   fi
+  global_old_size=${total_size}
+  global_old_end=${global_archived_until}
+  global_status_time=${now}
   DP_save_backup_status_info "${total_size}" "${start_time}" "${global_archived_until}"
 }
 
