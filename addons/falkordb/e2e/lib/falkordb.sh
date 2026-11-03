@@ -1056,7 +1056,10 @@ fdb_check_writer() {
   state="$(fdb_state_dir)"
   run="$(cat "$state/writer-run")"
   kubectl exec -n "$namespace" fdb-writer -- touch /tmp/stop
-  sleep 2
+  # A write in flight can wait for its reply a while, so the logs are read only
+  # once both streams have finished.
+  fdb_retry "the writer to finish its last writes" \
+    kubectl exec -n "$namespace" fdb-writer -- test -f /tmp/done
   primary="$(fdb_primary "$namespace" "$cluster" "$component")" || return 1
   for stream in new persist; do
     kubectl exec -n "$namespace" fdb-writer -- cat "/tmp/$stream.acked" > "$state/$stream.acked"
@@ -1091,9 +1094,14 @@ fdb_check_writer() {
 # a pod's own view instead (the role probe falling back to INFO replication)
 # sends clients to a pod Sentinel no longer treats as the primary.
 fdb_assert_primary_label_follows_sentinel() {
-  local namespace="$1" cluster="$2" component="$3" labelled sent addr host
+  local namespace="$1" cluster="$2" component="$3" labelled sent sentinels addr host
   labelled="$(fdb_primary "$namespace" "$cluster" "$component")" || return 1
-  for sent in $(fdb_pods "$namespace" "$cluster" "$component-sent"); do
+  sentinels="$(fdb_pods "$namespace" "$cluster" "$component-sent")"
+  if [ -z "$sentinels" ]; then
+    fdb_fail "no sentinel pods found for $cluster-$component-sent to compare the primary label with"
+    return 1
+  fi
+  for sent in $sentinels; do
     addr="$(fdb_sentinel_master_addr "$namespace" "$sent" "$cluster-$component")" || return 1
     host="${addr% *}"
     case "$host" in

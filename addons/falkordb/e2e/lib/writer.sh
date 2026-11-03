@@ -73,6 +73,9 @@ persistent_connection() {
     else
       exec {rfd}>&-
     fi
+    # the connection failed or dropped; while the Service has no endpoint,
+    # reconnecting at once would only start process after process
+    [ -f stop ] || sleep 0.5
   done
 }
 
@@ -80,5 +83,7 @@ new_connections &
 persistent_connection &
 until [ -f stop ]; do sleep 0.5; done
 wait
+# both streams have logged their last write; fdb_check_writer waits for this
+touch done
 # stay up, so the logs can still be read after the writers have stopped
 exec sleep infinity
