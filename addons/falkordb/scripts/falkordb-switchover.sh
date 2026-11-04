@@ -54,6 +54,9 @@ switchover_lock_file=/tmp/falkordb-switchover.lock
 switchover_lock_wait_seconds=600
 # pods whose replica-priority could not be read when the run restored them
 priority_unread_pods=()
+# bounds each read of a pod's replica-priority: a pod that does not answer would
+# otherwise cost redis_cli_timeout_seconds of the preStop's 15 s hand-over
+priority_read_timeout_seconds=1
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -719,7 +722,8 @@ configured_replica_priority() {
 # Returns 2 when the pod's replica-priority cannot be read and 1 when it cannot be set.
 restore_configured_priority_of() {
   local pod_fqdn="$1" configured="$2" output priority
-  output=$(redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG GET replica-priority" 2>/dev/null) || return 2
+  output=$(redis_cli_timeout_seconds=$priority_read_timeout_seconds \
+    redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG GET replica-priority" 2>/dev/null) || return 2
   priority=$(sed -n '2p' <<< "$output")
   [ "$priority" = "$configured" ] && return 0
   echo "Restoring the configured replica-priority $configured on $pod_fqdn, which has ${priority:-none}..."
@@ -751,17 +755,25 @@ restore_configured_priorities() {
 
 # Restores the pods restore_configured_priorities could not read. A pod that
 # answers its role may still have a temporary priority, so a run takes the
-# switchover as done only when this succeeds.
+# switchover as done only when this succeeds. With "unless-unreachable", a pod
+# that still cannot be read is left as it is with a warning, and only a pod
+# that answers but cannot be set fails it.
 restore_unread_priorities() {
-  local configured pod_fqdn
+  local mode="${1:-}" configured pod_fqdn rc
+  local -a still_unread=()
   configured=$(configured_replica_priority)
   for pod_fqdn in "${priority_unread_pods[@]}"; do
-    if ! restore_configured_priority_of "$pod_fqdn" "$configured"; then
+    rc=0
+    restore_configured_priority_of "$pod_fqdn" "$configured" || rc=$?
+    if [ "$rc" -eq 2 ] && [ "$mode" = "unless-unreachable" ]; then
+      echo "Warning: $pod_fqdn still does not answer, leaving its replica-priority as it is" >&2
+      still_unread+=("$pod_fqdn")
+    elif [ "$rc" -ne 0 ]; then
       echo "Error: could not restore the configured replica-priority on $pod_fqdn" >&2
       return 1
     fi
   done
-  priority_unread_pods=()
+  priority_unread_pods=("${still_unread[@]}")
 }
 
 # Waits for any other run of the action in this container to end, for at most
@@ -868,6 +880,11 @@ switchover_without_candidate() {
     echo "$KB_SWITCHOVER_CURRENT_NAME is no longer the primary ($current_master is), nothing to do"
     return 0
   fi
+
+  # Sentinel promotes only a replica it reaches, and replicas_caught_up skips a
+  # replica that does not answer in the same way. Refusing to fail over while one
+  # does not answer would leave the preStop to stop the primary with no hand-over.
+  restore_unread_priorities unless-unreachable || return 1
 
   # do switchover
   failover_with_writes_paused "$initial_master" || return 1
