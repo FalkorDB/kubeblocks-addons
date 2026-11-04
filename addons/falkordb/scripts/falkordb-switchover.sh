@@ -38,6 +38,25 @@ new_primary_host=""
 new_primary_port=""
 # bounds every redis-cli call; while writes are paused, the time left caps it
 redis_cli_timeout_seconds=5
+# The replica-priority every pod is configured with comes from redis.conf and the
+# extra redis.conf, which the server includes after it. Each run first puts it back
+# on every pod: the value a pod has at run time can be a temporary one that an
+# earlier run, on this pod or another, could not restore.
+redis_template_conf=/etc/conf/redis.conf
+redis_extra_conf=/etc/conf/extra/redis.conf
+default_replica_priority=100
+# KubeBlocks can start the action again before the first run has ended; runs in
+# this container take this lock in turn, so a second run sees what the first did.
+switchover_lock_file=/tmp/falkordb-switchover.lock
+# A run takes at most about 450 s: setting the priorities with retries, the
+# paused failover and its watch, up to 300 s for the result, and the recovery.
+# A run that waits longer than this for the lock fails, and KubeBlocks retries.
+switchover_lock_wait_seconds=600
+# pods whose replica-priority could not be read when the run restored them
+priority_unread_pods=()
+# bounds each read of a pod's replica-priority: a pod that does not answer would
+# otherwise cost redis_cli_timeout_seconds of the preStop's 15 s hand-over
+priority_read_timeout_seconds=1
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -121,6 +140,24 @@ check_redis_kernel_status() {
 
   echo "$current_master"
   return 0
+}
+
+# The one primary when every data pod answers and exactly one of them is primary.
+# Unlike check_redis_kernel_status it fails when a pod does not answer, since that
+# pod may be a primary too: a repeated switchover is taken as done only on this.
+only_primary_of_all_pods() {
+  local role primary="" redis_pod_fqdn
+  local -a redis_pod_fqdn_list
+  IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
+  for redis_pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
+    role=$(check_redis_role "$redis_pod_fqdn" "$redis_service_port") || return 1
+    if [[ "$role" == "primary" ]]; then
+      [[ -z "$primary" ]] || return 1
+      primary="$redis_pod_fqdn"
+    fi
+  done
+  [[ -n "$primary" ]] || return 1
+  echo "$primary"
 }
 
 check_switchover_result() {
@@ -662,10 +699,119 @@ recover_redis_priorities() {
   return 0
 }
 
+# The last replica-priority (or its old name, slave-priority) the configuration
+# files set, else the server's default.
+configured_replica_priority() {
+  local priority="" conf value
+  for conf in "$redis_template_conf" "$redis_extra_conf"; do
+    [ -r "$conf" ] || continue
+    # redis.conf may quote a value and end lines with CRLF
+    value=$(awk '{ sub(/\r$/, "") }
+      (tolower($1) == "replica-priority" || tolower($1) == "slave-priority") {
+        v = $2
+        if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+        if (v ~ /^[0-9]+$/) p = v
+      }
+      END { print p }' "$conf")
+    [ -n "$value" ] && priority="$value"
+  done
+  echo "${priority:-$default_replica_priority}"
+}
+
+# Gives one pod the configured replica-priority unless it has it already.
+# Returns 2 when the pod's replica-priority cannot be read and 1 when it cannot be set.
+restore_configured_priority_of() {
+  local pod_fqdn="$1" configured="$2" output priority
+  output=$(redis_cli_timeout_seconds=$priority_read_timeout_seconds \
+    redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG GET replica-priority" 2>/dev/null) || return 2
+  priority=$(sed -n '2p' <<< "$output")
+  [ "$priority" = "$configured" ] && return 0
+  echo "Restoring the configured replica-priority $configured on $pod_fqdn, which has ${priority:-none}..."
+  call_func_with_retry 3 5 execute_sub_command "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG SET replica-priority $configured" || return 1
+}
+
+# Puts the configured replica-priority back on every pod that answers, before this
+# run reads or changes any. A pod whose priority cannot be read is left as it is
+# and noted in priority_unread_pods: it cannot be promoted while it does not
+# answer, and restore_unread_priorities must succeed before a run takes the
+# switchover as done.
+restore_configured_priorities() {
+  local configured pod_fqdn rc
+  local -a redis_pod_fqdn_list
+  configured=$(configured_replica_priority)
+  priority_unread_pods=()
+  IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
+  for pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
+    rc=0
+    restore_configured_priority_of "$pod_fqdn" "$configured" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      echo "Warning: could not read the replica-priority of $pod_fqdn, leaving it as it is" >&2
+      priority_unread_pods+=("$pod_fqdn")
+    elif [ "$rc" -ne 0 ]; then
+      return 1
+    fi
+  done
+}
+
+# Restores the pods restore_configured_priorities could not read. A pod that
+# answers its role may still have a temporary priority, so a run takes the
+# switchover as done only when this succeeds. With "unless-unreachable", a pod
+# that still cannot be read is left as it is with a warning, and only a pod
+# that answers but cannot be set fails it.
+restore_unread_priorities() {
+  local mode="${1:-}" configured pod_fqdn rc
+  local -a still_unread=()
+  configured=$(configured_replica_priority)
+  for pod_fqdn in "${priority_unread_pods[@]}"; do
+    rc=0
+    restore_configured_priority_of "$pod_fqdn" "$configured" || rc=$?
+    if [ "$rc" -eq 2 ] && [ "$mode" = "unless-unreachable" ]; then
+      echo "Warning: $pod_fqdn still does not answer, leaving its replica-priority as it is" >&2
+      still_unread+=("$pod_fqdn")
+    elif [ "$rc" -ne 0 ]; then
+      echo "Error: could not restore the configured replica-priority on $pod_fqdn" >&2
+      return 1
+    fi
+  done
+  priority_unread_pods=("${still_unread[@]}")
+}
+
+# Waits for any other run of the action in this container to end, for at most
+# switchover_lock_wait_seconds. Without flock, or when the lock file cannot be
+# opened, the run goes on without waiting.
+lock_switchover() {
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "Warning: flock not found, runs of the switchover action do not wait for each other" >&2
+    return 0
+  fi
+  local lock_fd
+  if ! exec {lock_fd}>"$switchover_lock_file"; then
+    echo "Warning: could not open $switchover_lock_file, runs of the switchover action do not wait for each other" >&2
+    return 0
+  fi
+  if ! flock -w "$switchover_lock_wait_seconds" "$lock_fd"; then
+    echo "Error: another run of the switchover action still holds $switchover_lock_file after ${switchover_lock_wait_seconds}s" >&2
+    return 1
+  fi
+}
+
 switchover_with_candidate() {
+  restore_configured_priorities || {
+    echo "Error: could not restore the configured replica-priority" >&2
+    return 1
+  }
   # check the role of candidate before switchover
-  local candidate_role
+  local candidate_role current_master
   candidate_role=$(check_redis_role "$KB_SWITCHOVER_CANDIDATE_FQDN" "$redis_service_port")
+  # KubeBlocks can run the action a second time for the same OpsRequest, before
+  # the role labels catch up with the first run; that run has already succeeded.
+  # It is done only when every pod answers with the candidate as the one primary.
+  if [[ "$candidate_role" == "primary" ]] && current_master=$(only_primary_of_all_pods) &&
+    [[ "$current_master" == "$KB_SWITCHOVER_CANDIDATE_FQDN"* ]]; then
+    restore_unread_priorities || return 1
+    echo "$KB_SWITCHOVER_CANDIDATE_FQDN is already the only primary, nothing to do"
+    return 0
+  fi
   if [[ "$candidate_role" != "secondary" ]]; then
     echo "Error: Candidate node $KB_SWITCHOVER_CANDIDATE_FQDN is not in secondary role" >&2
     return 1
@@ -674,6 +820,11 @@ switchover_with_candidate() {
   # check redis kernel role before switchover
   local initial_master
   initial_master=$(check_redis_kernel_status) || return 1
+
+  # set_redis_priorities saves each pod's current priority as the one to restore,
+  # so a pod that could not be read must have the configured one back first. It
+  # needs every pod to answer anyway.
+  restore_unread_priorities || return 1
 
   local redis_get_cmd="CONFIG GET replica-priority"
   local redis_set_switchover_cmd="CONFIG SET replica-priority 1"
@@ -715,9 +866,30 @@ switchover_with_candidate() {
 }
 
 switchover_without_candidate() {
+  # Priorities an earlier switchover left would steer which replica Sentinel promotes.
+  restore_configured_priorities || {
+    echo "Error: could not restore the configured replica-priority" >&2
+    return 1
+  }
   # check redis kernel role before switchover
   local initial_master
   initial_master=$(check_redis_kernel_status) || return 1
+
+  # A second run of the action for the same OpsRequest would move the primary
+  # back; once every pod answers and the one primary is no longer the pod
+  # KubeBlocks asked to switch over, we are done.
+  local current_master
+  if ! is_empty "$KB_SWITCHOVER_CURRENT_NAME" && current_master=$(only_primary_of_all_pods) &&
+    [[ "${current_master%%.*}" != "$KB_SWITCHOVER_CURRENT_NAME" ]]; then
+    restore_unread_priorities || return 1
+    echo "$KB_SWITCHOVER_CURRENT_NAME is no longer the primary ($current_master is), nothing to do"
+    return 0
+  fi
+
+  # Sentinel promotes only a replica it reaches, and replicas_caught_up skips a
+  # replica that does not answer in the same way. Refusing to fail over while one
+  # does not answer would leave the preStop to stop the primary with no hand-over.
+  restore_unread_priorities unless-unreachable || return 1
 
   # do switchover
   failover_with_writes_paused "$initial_master" || return 1
@@ -740,6 +912,7 @@ load_common_library
 # which would trace the callers' arguments, passwords among them.
 set_xtrace_when_ut_mode_false() { :; }
 check_environment_exist || exit 1
+lock_switchover || exit 1
 if is_empty "$KB_SWITCHOVER_CANDIDATE_FQDN"; then
   switchover_without_candidate || exit 1
 else

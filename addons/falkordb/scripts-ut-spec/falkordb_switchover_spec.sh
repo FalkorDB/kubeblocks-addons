@@ -278,14 +278,23 @@ master_host:redis-master"
       export COMPONENT_REPLICAS="2"
       MOCK_RESPONSES=()
       RESPONSE_INDEX=0
+      redis_template_conf="${SHELLSPEC_TMPBASE:-/tmp}/switchover-redis.conf"
+      redis_extra_conf="${SHELLSPEC_TMPBASE:-/tmp}/switchover-extra-redis.conf"
+      switchover_lock_file="${SHELLSPEC_TMPBASE:-/tmp}/switchover.lock"
+      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file" \
+        "$switchover_lock_file.held" "$switchover_lock_file.released"
+      priority_unread_pods=()
     }
     Before 'setup'
 
     cleanup() {
+      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file" \
+        "$switchover_lock_file.held" "$switchover_lock_file.released"
       unset REDIS_DEFAULT_PASSWORD
       unset SENTINEL_POD_FQDN_LIST
       unset REDIS_POD_FQDN_LIST
       unset KB_SWITCHOVER_CANDIDATE_FQDN
+      unset KB_SWITCHOVER_CURRENT_NAME
       unset REDIS_COMPONENT_NAME
       unset SERVICE_PORT
       unset KB_SWITCHOVER_ROLE
@@ -690,6 +699,8 @@ master_host:redis-master"
     End
 
     Context "switchover_with_candidate()"
+      # the "configured replica-priority" cases cover the restore before a run
+      Before 'restore_configured_priorities() { :; }'
       It "should execute successful switchover"
         check_redis_role() {
           if [ "$1" = "redis2" ]; then
@@ -719,9 +730,59 @@ master_host:redis-master"
         The stderr should include "not in secondary role"
         The stdout should equal ""
       End
+
+      # KubeBlocks may run the action again for an OpsRequest it has already run.
+      It "succeeds without failing over again when the candidate is already the only primary"
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        set_redis_priorities() { echo "set_redis_priorities called"; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be success
+        The stdout should include "redis2 is already the only primary, nothing to do"
+        The stdout should not include "called"
+        The stderr should equal ""
+      End
+
+      It "does not take the switchover as done while another pod does not answer"
+        check_redis_role() {
+          case "$1" in
+            redis1) return 1 ;;
+            redis2) echo "primary" ;;
+            *) echo "secondary" ;;
+          esac
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be failure
+        The stderr should include "not in secondary role"
+        The stdout should not include "called"
+      End
+
+      It "still fails when the candidate is a primary but not the only one"
+        check_redis_role() {
+          if [ "$1" = "redis3" ]; then
+            echo "secondary"
+          else
+            echo "primary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be failure
+        The stderr should include "not in secondary role"
+        The stdout should not include "called"
+      End
     End
 
     Context "switchover_without_candidate()"
+      # the "configured replica-priority" cases cover the restore before a run
+      Before 'restore_configured_priorities() { :; }'
       It "should execute successful switchover"
         MOCK_RESPONSES=("redis1" "redis2")
         check_redis_kernel_status() {
@@ -754,6 +815,386 @@ master_host:redis-master"
         When call switchover_without_candidate
         The status should be failure
         The stdout should equal ""
+      End
+
+      # KubeBlocks may run the action again for an OpsRequest it has already run.
+      It "does not fail over again once the primary has left the pod being switched over"
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stdout should include "redis1 is no longer the primary (redis2 is), nothing to do"
+        The stdout should not include "called"
+      End
+
+      It "fails over when the pod being switched over is still the primary"
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        check_redis_role() {
+          if [ "$1" = "redis1" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused $1"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stdout should include "failover_with_writes_paused redis1"
+      End
+
+      It "does not take the switchover as done while a pod does not answer"
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        check_redis_role() {
+          case "$1" in
+            redis1) return 1 ;;
+            redis2) echo "primary" ;;
+            *) echo "secondary" ;;
+          esac
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused $1"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stdout should not include "nothing to do"
+        The stdout should include "failover_with_writes_paused redis2"
+      End
+    End
+
+    # A run that cannot restore the priorities leaves temporary ones, and the next
+    # switchover may run on another pod; every run puts the configured one back.
+    Context "configured replica-priority"
+      It "reads the last value of redis.conf, then of the extra redis.conf"
+        printf 'replica-priority 10\nreplica-priority 20\n' > "$redis_template_conf"
+        printf 'slave-priority 30\n' > "$redis_extra_conf"
+        When call configured_replica_priority
+        The stdout should equal "30"
+      End
+
+      It "keeps redis.conf's value when the extra redis.conf sets none"
+        printf 'replica-priority 0\n' > "$redis_template_conf"
+        printf 'maxmemory 1gb\n' > "$redis_extra_conf"
+        When call configured_replica_priority
+        The stdout should equal "0"
+      End
+
+      It "reads a quoted value on a line that ends with CRLF"
+        printf 'replica-priority "0"\r\n' > "$redis_template_conf"
+        printf "slave-priority '7'\r\n" > "$redis_extra_conf"
+        When call configured_replica_priority
+        The stdout should equal "7"
+      End
+
+      It "reads a quoted value in redis.conf"
+        printf 'replica-priority "0"\r\n' > "$redis_template_conf"
+        When call configured_replica_priority
+        The stdout should equal "0"
+      End
+
+      It "is the server's default when no file sets it"
+        When call configured_replica_priority
+        The stdout should equal "100"
+      End
+
+      It "puts the configured value back where a pod has another"
+        printf 'replica-priority 0\n' > "$redis_template_conf"
+        redis_config_get() {
+          case "$1" in
+            redis1) printf 'replica-priority\n0\n' ;;
+            *) printf 'replica-priority\n100\n' ;;
+          esac
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        When call restore_configured_priorities
+        The status should be success
+        The stdout should not include "redis1 CONFIG SET"
+        The stdout should include "redis2 CONFIG SET replica-priority 0"
+        The stdout should include "redis3 CONFIG SET replica-priority 0"
+      End
+
+      It "leaves a pod that does not answer as it is"
+        redis_config_get() {
+          [ "$1" = "redis3" ] && return 1
+          printf 'replica-priority\n1\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        When call restore_configured_priorities
+        The status should be success
+        The stdout should include "redis1 CONFIG SET replica-priority 100"
+        The stdout should include "redis2 CONFIG SET replica-priority 100"
+        The stdout should not include "redis3 CONFIG SET"
+        The stderr should include "could not read the replica-priority of redis3"
+        The variable 'priority_unread_pods[@]' should equal "redis3"
+      End
+
+      It "restores a pod it could not read before taking a repeated switchover as done"
+        reads_of_redis1="$SHELLSPEC_TMPBASE/reads_of_redis1"
+        echo 0 > "$reads_of_redis1"
+        redis_config_get() {
+          if [ "$1" = "redis1" ]; then
+            local n; n=$(( $(cat "$reads_of_redis1") + 1 )); echo "$n" > "$reads_of_redis1"
+            [ "$n" -eq 1 ] && return 1
+            printf 'replica-priority\n1\n'
+            return 0
+          fi
+          printf 'replica-priority\n100\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be success
+        The stderr should include "could not read the replica-priority of redis1"
+        The stdout should include "redis1 CONFIG SET replica-priority 100"
+        The stdout should include "redis2 is already the only primary, nothing to do"
+        The stdout should not include "failover_with_writes_paused called"
+      End
+
+      It "fails, and does not fail over again, while a pod it could not read stays unread"
+        export KB_SWITCHOVER_CANDIDATE_FQDN=""
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        redis_config_get() {
+          [ "$1" = "redis3" ] && return 1
+          printf 'replica-priority\n100\n'
+        }
+        check_redis_kernel_status() { echo "redis2"; }
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_without_candidate
+        The status should be failure
+        The stderr should include "could not restore the configured replica-priority on redis3"
+        The stdout should not include "nothing to do"
+        The stdout should not include "failover_with_writes_paused called"
+      End
+
+      It "fails when a pod that answers cannot be given the configured value"
+        redis_config_get() { printf 'replica-priority\n1\n'; }
+        call_func_with_retry() { shift 2; "$@"; }
+        execute_sub_command() { return 1; }
+        When call restore_configured_priorities
+        The status should be failure
+        The stdout should include "Restoring the configured replica-priority 100 on redis1, which has 1"
+      End
+
+      It "restores the priorities before taking a repeated switchover as done"
+        redis_config_get() { printf 'replica-priority\n1\n'; }
+        execute_sub_command() { echo "$1 $4"; }
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be success
+        The stdout should include "redis1 CONFIG SET replica-priority 100"
+        The stdout should include "redis2 is already the only primary, nothing to do"
+        The stdout should not include "failover_with_writes_paused called"
+      End
+
+      It "does not fail over while the configured priority cannot be put back"
+        redis_config_get() { printf 'replica-priority\n1\n'; }
+        call_func_with_retry() { shift 2; "$@"; }
+        execute_sub_command() { return 1; }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_without_candidate
+        The status should be failure
+        The stdout should include "Restoring"
+        The stderr should include "could not restore the configured replica-priority"
+        The stdout should not include "failover_with_writes_paused called"
+      End
+    End
+
+    # set_redis_priorities saves the priorities it finds, so a pod read only then
+    # would have its leftover temporary priority saved as the one to restore.
+    Context "unread priorities before a switchover with a candidate"
+      It "restores a pod it could not read before setting the priorities"
+        reads_of_redis3="$SHELLSPEC_TMPBASE/reads_of_redis3"
+        echo 0 > "$reads_of_redis3"
+        redis_config_get() {
+          if [ "$1" = "redis3" ]; then
+            local n; n=$(( $(cat "$reads_of_redis3") + 1 )); echo "$n" > "$reads_of_redis3"
+            [ "$n" -eq 1 ] && return 1
+            printf 'replica-priority\n1\n'
+            return 0
+          fi
+          printf 'replica-priority\n100\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        check_redis_role() {
+          if [ "$1" = "redis1" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        check_redis_kernel_status() { echo "redis1"; }
+        set_redis_priorities() { echo "set_redis_priorities after restoring"; }
+        failover_with_writes_paused() { :; }
+        check_switchover_result() { :; }
+        recover_redis_priorities() { :; }
+        When call switchover_with_candidate
+        The status should be success
+        The stderr should include "could not read the replica-priority of redis3"
+        The line 2 of stdout should equal "redis3 CONFIG SET replica-priority 100"
+        The stdout should include "set_redis_priorities after restoring"
+      End
+
+      It "does not set the priorities while a pod it could not read stays unread"
+        redis_config_get() {
+          [ "$1" = "redis3" ] && return 1
+          printf 'replica-priority\n100\n'
+        }
+        check_redis_role() {
+          if [ "$1" = "redis1" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        check_redis_kernel_status() { echo "redis1"; }
+        set_redis_priorities() { echo "set_redis_priorities called"; }
+        When call switchover_with_candidate
+        The status should be failure
+        The stderr should include "could not restore the configured replica-priority on redis3"
+        The stdout should not include "set_redis_priorities called"
+      End
+    End
+
+    # Before a failover with no candidate, a pod whose priority could not be read
+    # is tried again; one that still does not answer does not stop the hand-over.
+    Context "unread priorities before a failover with no candidate"
+      setup_failover_without_candidate() {
+        export KB_SWITCHOVER_CANDIDATE_FQDN=""
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        reads_of_redis3="$SHELLSPEC_TMPBASE/reads_of_redis3"
+        echo 0 > "$reads_of_redis3"
+        check_redis_kernel_status() { echo "redis1"; }
+        check_redis_role() {
+          if [ "$1" = "redis1" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused $1"; }
+      }
+      Before 'setup_failover_without_candidate'
+
+      It "restores a pod that answers on the second try, then fails over"
+        redis_config_get() {
+          if [ "$1" = "redis3" ]; then
+            local n; n=$(( $(cat "$reads_of_redis3") + 1 )); echo "$n" > "$reads_of_redis3"
+            [ "$n" -eq 1 ] && return 1
+            printf 'replica-priority\n1\n'
+            return 0
+          fi
+          printf 'replica-priority\n100\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stderr should include "could not read the replica-priority of redis3"
+        The stdout should include "redis3 CONFIG SET replica-priority 100"
+        The stdout should include "failover_with_writes_paused redis1"
+      End
+
+      It "fails over with a warning while a pod still does not answer"
+        redis_config_get() {
+          [ "$1" = "redis3" ] && return 1
+          printf 'replica-priority\n100\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        When call switchover_without_candidate
+        The status should be success
+        The stderr should include "redis3 still does not answer, leaving its replica-priority as it is"
+        The stdout should not include "CONFIG SET"
+        The stdout should include "failover_with_writes_paused redis1"
+      End
+
+      It "does not fail over when a pod answers but cannot be given the configured value"
+        redis_config_get() {
+          if [ "$1" = "redis3" ]; then
+            local n; n=$(( $(cat "$reads_of_redis3") + 1 )); echo "$n" > "$reads_of_redis3"
+            [ "$n" -eq 1 ] && return 1
+            printf 'replica-priority\n1\n'
+            return 0
+          fi
+          printf 'replica-priority\n100\n'
+        }
+        call_func_with_retry() { shift 2; "$@"; }
+        execute_sub_command() { return 1; }
+        When call switchover_without_candidate
+        The status should be failure
+        The stdout should include "Restoring the configured replica-priority 100 on redis3"
+        The stderr should include "could not restore the configured replica-priority on redis3"
+        The stdout should not include "failover_with_writes_paused"
+      End
+
+      It "reads each priority with the short timeout"
+        read_timeout="$SHELLSPEC_TMPBASE/read_timeout"
+        redis_config_get() { printf 'replica-priority\n100\n'; echo "$redis_cli_timeout_seconds" > "$read_timeout"; }
+        When call restore_configured_priority_of redis1 100
+        The status should be success
+        The contents of file "$read_timeout" should equal "1"
+      End
+    End
+
+    Context "lock_switchover()"
+      It "waits while another run holds the lock"
+        # the other run holds the lock until it is told to let go
+        holds_lock_then_locks() {
+          ( exec 8>"$switchover_lock_file"; flock 8; : > "$switchover_lock_file.held"
+            sleep 0.5; echo released > "$switchover_lock_file.released" ) &
+          until [ -f "$switchover_lock_file.held" ]; do sleep 0.05; done
+          lock_switchover
+          cat "$switchover_lock_file.released" 2>/dev/null || echo "did not wait"
+        }
+        no_flock() { ! command -v flock >/dev/null 2>&1; }
+        Skip if "flock is not installed" no_flock
+        When call holds_lock_then_locks
+        The status should be success
+        The stdout should equal "released"
+      End
+
+      It "fails when another run holds the lock for longer than the wait"
+        holds_lock_too_long() {
+          ( exec 8>"$switchover_lock_file"; flock 8; : > "$switchover_lock_file.held"; sleep 3 ) &
+          until [ -f "$switchover_lock_file.held" ]; do sleep 0.05; done
+          switchover_lock_wait_seconds=1
+          lock_switchover
+        }
+        no_flock() { ! command -v flock >/dev/null 2>&1; }
+        Skip if "flock is not installed" no_flock
+        When call holds_lock_too_long
+        The status should be failure
+        The stderr should include "still holds"
+      End
+
+      It "goes on without waiting when flock is not installed"
+        command() { [ "$2" = "flock" ] && return 1; builtin command "$@"; }
+        When call lock_switchover
+        The status should be success
+        The stderr should include "flock not found"
       End
     End
 
