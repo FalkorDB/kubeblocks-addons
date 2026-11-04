@@ -210,6 +210,16 @@ spec:
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-brk
             tail: 300
+        # a victim that restarted before it rejoined: podLogs only shows the
+        # container that is running now, not the start that failed
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              for victim in $(cat "$(fdb_state_dir)/victims" 2>/dev/null); do
+                echo "=== $victim: the previous falkordb-cluster container"
+                kubectl logs -n "$NAMESPACE" "$victim" -c falkordb-cluster --previous \
+                  --tail 300 2>&1 || true
+              done
       finally:
         - script:
             content: |

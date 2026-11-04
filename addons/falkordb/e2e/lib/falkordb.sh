@@ -324,6 +324,73 @@ fdb_retry() {
   return 1
 }
 
+# fdb_stop_aof_archiving <namespace> <cluster>
+# Turns off every aof entry of the cluster's BackupSchedules and waits until its
+# continuous Backups have stopped and their archive pods are gone.
+#
+# The archive pods mount the data volume of the pod they archive. While one runs,
+# deleting the cluster cannot delete that volume, so the component waits on it,
+# and dataprotection does not always stop the archive when the cluster goes: the
+# cluster then stays Deleting until the namespace is removed around it. Stop the
+# archive first, as an operator would, and the delete has nothing to wait for.
+fdb_stop_aof_archiving() {
+  local namespace="$1" cluster="$2"
+  fdb_retry "aof archiving of $cluster to be turned off" \
+    fdb_turn_off_aof_schedules "$namespace" "$cluster"
+  fdb_retry "the continuous backups of $cluster to stop" \
+    fdb_continuous_backups_stopped "$namespace" "$cluster"
+}
+
+# fdb_turn_off_aof_schedules <namespace> <cluster>
+# Disables every aof entry of the cluster's BackupSchedules; fails on any API error,
+# so that fdb_retry tries again instead of taking a failed listing for no schedules.
+fdb_turn_off_aof_schedules() {
+  local namespace="$1" cluster="$2" schedules schedule methods index method patch
+  schedules="$(kubectl get backupschedule -n "$namespace" \
+    -l "app.kubernetes.io/instance=$cluster" -o jsonpath='{.items[*].metadata.name}')" || return 1
+  for schedule in $schedules; do
+    methods="$(kubectl get backupschedule -n "$namespace" "$schedule" \
+      -o jsonpath='{range .spec.schedules[*]}{.backupMethod}{"\n"}{end}')" || return 1
+    index=0
+    patch=""
+    for method in $methods; do
+      if [ "$method" = "aof" ]; then
+        patch="${patch:+$patch,}{\"op\":\"replace\",\"path\":\"/spec/schedules/$index/enabled\",\"value\":false}"
+      fi
+      index=$((index + 1))
+    done
+    if [ -n "$patch" ]; then
+      fdb_log "turning off aof archiving on BackupSchedule $schedule"
+      kubectl patch backupschedule -n "$namespace" "$schedule" --type=json -p "[$patch]" || return 1
+    fi
+  done
+}
+
+# fdb_continuous_backups_stopped <namespace> <cluster>
+# Succeeds when no continuous Backup of the cluster is Running and none has an
+# archive pod left. The pods are found by the backup-name label KubeBlocks puts on
+# them: their name depends on the BackupPolicy target, and an unnamed target (one
+# component) leaves out the dp-backup- prefix that a sharding's targets get.
+fdb_continuous_backups_stopped() {
+  local namespace="$1" cluster="$2" backups backup running="" pods="" found
+  backups="$(kubectl get backup -n "$namespace" \
+    -l "app.kubernetes.io/instance=$cluster,dataprotection.kubeblocks.io/backup-type=Continuous" \
+    -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}')" || return 1
+  for backup in $backups; do
+    if [ "${backup#*=}" = Running ]; then
+      running="$running ${backup%%=*}"
+    fi
+    found="$(kubectl get pods -n "$namespace" \
+      -l "dataprotection.kubeblocks.io/backup-name=${backup%%=*}" \
+      -o jsonpath='{.items[*].metadata.name}')" || return 1
+    pods="$pods${found:+ $found}"
+  done
+  if [ -n "$running$pods" ]; then
+    echo "still archiving:${running:+ backups$running}${pods:+ pods$pods}" >&2
+    return 1
+  fi
+}
+
 # fdb_write_keys <namespace> <pod> <prefix> <count>
 # Writes count keys named <prefix>:<n> whose value is the same as the key.
 #

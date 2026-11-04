@@ -481,6 +481,69 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       End
     End
 
+    # A secondary that met the cluster but never became a replica is a second master
+    # of its shard, serving no slots, and CLUSTER NODES lists nodes in no fixed order.
+    Context "when the shard has a master that serves no slots"
+      get_cluster_nodes_info() {
+        echo "7381c6dca033cd1b321922508553fab869a29e 10.42.0.228:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc master - 0 1711958289570 4 connected"
+        echo "4958e6dca033cd1b321922508553fab869a29d 10.42.0.227:6379@16379,falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc master - 0 1711958289570 4 connected 0-5460"
+        echo "8492e6dca033cd1b321922508553fab869a29f 10.42.0.229:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc master - 0 1711958289570 5 connected 5461-16383"
+      }
+
+      setup() {
+        export ALL_SHARDS_COMPONENT_SHORT_NAMES="falkordb-shard-sxj,falkordb-shard-abc"
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-sxj"
+        current_comp_primary_node=()
+        current_comp_other_nodes=()
+        other_comp_primary_nodes=()
+      }
+      Before "setup"
+
+      It "puts the master that serves the shard's slots first, even when it is listed second"
+        When call get_current_comp_nodes_for_scale_out_replica "falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc" "6379"
+        The status should be success
+        The stdout should include "current_comp_primary_node: 10.42.0.227#falkordb-shard-sxj-0"
+        The variable 'current_comp_primary_node[0]' should equal "10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
+        The variable 'current_comp_primary_node[1]' should equal "10.42.0.228#falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc:6379@16379"
+      End
+    End
+
+    # A master that is only importing or migrating a slot does not own it, and one the
+    # node cannot reach is not the primary to rejoin.
+    Context "when the shard's other master only imports a slot or cannot be reached"
+      setup() {
+        export ALL_SHARDS_COMPONENT_SHORT_NAMES="falkordb-shard-sxj,falkordb-shard-abc"
+        export CURRENT_SHARD_COMPONENT_NAME="falkordb-shard-sxj"
+        current_comp_primary_node=()
+        current_comp_other_nodes=()
+        other_comp_primary_nodes=()
+      }
+      Before "setup"
+
+      It "does not count an importing marker as a slot"
+        get_cluster_nodes_info() {
+          echo "7381c6dca033cd1b321922508553fab869a29e 10.42.0.228:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc master - 0 1711958289570 4 connected [93-<-4958e6dca033cd1b321922508553fab869a29d]"
+          echo "4958e6dca033cd1b321922508553fab869a29d 10.42.0.227:6379@16379,falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc master - 0 1711958289570 4 connected 0-5460"
+          echo "8492e6dca033cd1b321922508553fab869a29f 10.42.0.229:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc master - 0 1711958289570 5 connected 5461-16383"
+        }
+        When call get_current_comp_nodes_for_scale_out_replica "falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc" "6379"
+        The status should be success
+        The stdout should include "current_comp_primary_node: 10.42.0.227#falkordb-shard-sxj-0"
+      End
+
+      It "does not put a disconnected master first, even though it serves slots"
+        get_cluster_nodes_info() {
+          echo "4958e6dca033cd1b321922508553fab869a29d 10.42.0.227:6379@16379,falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc master - 0 1711958289570 4 connected 0-5460"
+          echo "7381c6dca033cd1b321922508553fab869a29e 10.42.0.228:6379@16379,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc master - 0 1711958289570 6 disconnected 5461-5470"
+          echo "8492e6dca033cd1b321922508553fab869a29f 10.42.0.229:6379@16379,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc master - 0 1711958289570 5 connected 5471-16383"
+        }
+        When call get_current_comp_nodes_for_scale_out_replica "falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc" "6379"
+        The status should be success
+        The variable 'current_comp_primary_node[0]' should equal "10.42.0.227#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc#falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc:6379@16379"
+        The stdout should include "current_comp_primary_node: 10.42.0.227#falkordb-shard-sxj-0"
+      End
+    End
+
     Context "when using advertised ports"
       get_cluster_nodes_info() {
         cluster_nodes_info="4958e6dca033cd1b321922508553fab869a29d 10.42.0.227:31000@32000,falkordb-shard-sxj-0.falkordb-shard-sxj-headless.default.svc master - 0 1711958289570 4 connected 0-1364 5461-6826 10923-12287"$'\n'"7381c6dca033cd1b321922508553fab869a29e 10.42.0.228:31001@32001,falkordb-shard-sxj-1.falkordb-shard-sxj-headless.default.svc slave 4958e6dca033cd1b321922508553fab869a29d 0 1711958289570 4 connected"$'\n'"8492e6dca033cd1b321922508553fab869a29f 10.42.0.229:32222@32223,falkordb-shard-abc-0.falkordb-shard-abc-headless.default.svc master - 0 1711958289570 5 connected 1365-2729 6827-8191 12288-13652"

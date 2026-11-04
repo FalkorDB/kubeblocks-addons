@@ -90,6 +90,24 @@ spec:
               # The new shard only holds data if slots were actually migrated to it.
               fdb_retry "every seeded key to still be readable" \
                 fdb_verify_keys "$NAMESPACE" "$pod" e2e-shard 200
+      catch:
+        # The shards' postProvision moves the slots, and its output is only kept
+        # in the pod: print the last run of each, and the slots each node serves.
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              for p in $(fdb_sharding_pods "$NAMESPACE" fdb-shard shard); do
+                echo "=== $p: /tmp/post-provision.log"
+                kubectl exec -n "$NAMESPACE" "$p" -c falkordb-cluster -- \
+                  sh -c 'tail -n 150 /tmp/post-provision.log 2>/dev/null' || true
+              done
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)" || pod=""
+              if [ -n "$pod" ]; then
+                echo "=== CLUSTER NODES from $pod"
+                FDB_CONTAINER=falkordb-cluster fdb_cli "$NAMESPACE" "$pod" CLUSTER NODES || true
+              else
+                echo "=== no server pod of fdb-shard is running to ask for CLUSTER NODES"
+              fi
 
     - name: scale back in from 4 to 3 shards
       try:
