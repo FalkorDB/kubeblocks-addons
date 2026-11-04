@@ -96,6 +96,12 @@ spec:
                 -p "[{\"op\":\"replace\",\"path\":\"/spec/schedules/$found/enabled\",\"value\":true}]"
       catch:
         - events: {}
+      cleanup:
+        # Runs before the cluster's own cleanup deletes it: see fdb_stop_aof_archiving.
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_stop_aof_archiving "$NAMESPACE" fdb-shpitr
 
     - name: every shard archives and the backup reports their common window
       try:

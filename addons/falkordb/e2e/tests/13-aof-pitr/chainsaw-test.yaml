@@ -71,6 +71,12 @@ spec:
                 -p "[{\"op\":\"replace\",\"path\":\"/spec/schedules/$found/enabled\",\"value\":true}]"
       catch:
         - events: {}
+      cleanup:
+        # Runs before the cluster's own cleanup deletes it: see fdb_stop_aof_archiving.
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_stop_aof_archiving "$NAMESPACE" fdb-pitr
 
     - name: the continuous backup starts archiving
       try:
