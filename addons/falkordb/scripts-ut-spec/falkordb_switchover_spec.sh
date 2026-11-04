@@ -278,13 +278,15 @@ master_host:redis-master"
       export COMPONENT_REPLICAS="2"
       MOCK_RESPONSES=()
       RESPONSE_INDEX=0
-      priorities_file="${SHELLSPEC_TMPBASE:-/tmp}/falkordb-switchover-priorities"
-      rm -f "$priorities_file"
+      redis_template_conf="${SHELLSPEC_TMPBASE:-/tmp}/switchover-redis.conf"
+      redis_extra_conf="${SHELLSPEC_TMPBASE:-/tmp}/switchover-extra-redis.conf"
+      switchover_lock_file="${SHELLSPEC_TMPBASE:-/tmp}/switchover.lock"
+      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file"
     }
     Before 'setup'
 
     cleanup() {
-      rm -f "$priorities_file"
+      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file"
       unset REDIS_DEFAULT_PASSWORD
       unset SENTINEL_POD_FQDN_LIST
       unset REDIS_POD_FQDN_LIST
@@ -694,6 +696,8 @@ master_host:redis-master"
     End
 
     Context "switchover_with_candidate()"
+      # the "configured replica-priority" cases cover the restore before a run
+      Before 'restore_configured_priorities() { :; }'
       It "should execute successful switchover"
         check_redis_role() {
           if [ "$1" = "redis2" ]; then
@@ -774,6 +778,8 @@ master_host:redis-master"
     End
 
     Context "switchover_without_candidate()"
+      # the "configured replica-priority" cases cover the restore before a run
+      Before 'restore_configured_priorities() { :; }'
       It "should execute successful switchover"
         MOCK_RESPONSES=("redis1" "redis2")
         check_redis_kernel_status() {
@@ -857,72 +863,69 @@ master_host:redis-master"
       End
     End
 
-    # A run keeps the original priorities in its memory; the file lets a later run
-    # restore what that run could not.
-    Context "replica-priority saved across runs"
-      It "saves each original priority before changing it"
-        check_connectivity() { return 0; }
-        redis_config_get() { printf 'replica-priority\n0\n'; }
+    # A run that cannot restore the priorities leaves temporary ones, and the next
+    # switchover may run on another pod; every run puts the configured one back.
+    Context "configured replica-priority"
+      It "reads the last value of redis.conf, then of the extra redis.conf"
+        printf 'replica-priority 10\nreplica-priority 20\n' > "$redis_template_conf"
+        printf 'slave-priority 30\n' > "$redis_extra_conf"
+        When call configured_replica_priority
+        The stdout should equal "30"
+      End
+
+      It "keeps redis.conf's value when the extra redis.conf sets none"
+        printf 'replica-priority 0\n' > "$redis_template_conf"
+        printf 'maxmemory 1gb\n' > "$redis_extra_conf"
+        When call configured_replica_priority
+        The stdout should equal "0"
+      End
+
+      It "is the server's default when no file sets it"
+        When call configured_replica_priority
+        The stdout should equal "100"
+      End
+
+      It "puts the configured value back where a pod has another"
+        printf 'replica-priority 0\n' > "$redis_template_conf"
+        redis_config_get() {
+          case "$1" in
+            redis1) printf 'replica-priority\n0\n' ;;
+            *) printf 'replica-priority\n100\n' ;;
+          esac
+        }
         execute_sub_command() { echo "$1 $4"; }
-        When call set_redis_priorities "redis2"
+        When call restore_configured_priorities
         The status should be success
-        The stdout should include "redis2 CONFIG SET replica-priority 1"
+        The stdout should not include "redis1 CONFIG SET"
+        The stdout should include "redis2 CONFIG SET replica-priority 0"
+        The stdout should include "redis3 CONFIG SET replica-priority 0"
+      End
+
+      It "leaves a pod that does not answer as it is"
+        redis_config_get() {
+          [ "$1" = "redis3" ] && return 1
+          printf 'replica-priority\n1\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        When call restore_configured_priorities
+        The status should be success
         The stdout should include "redis1 CONFIG SET replica-priority 100"
-        The line 1 of contents of file "$priorities_file" should equal "redis1 0"
-        The line 2 of contents of file "$priorities_file" should equal "redis2 0"
-        The line 3 of contents of file "$priorities_file" should equal "redis3 0"
+        The stdout should include "redis2 CONFIG SET replica-priority 100"
+        The stdout should not include "redis3 CONFIG SET"
+        The stderr should include "could not read the replica-priority of redis3"
       End
 
-      It "removes the saved priorities once all are restored"
-        ORIGINAL_PRIORITIES=([redis1]=0 [redis2]=100)
-        printf 'redis1 0\nredis2 100\n' > "$priorities_file"
-        execute_sub_command() { :; }
-        When call recover_redis_priorities
-        The status should be success
-        The stdout should include "recovered"
-        The file "$priorities_file" should not be exist
-      End
-
-      It "keeps the saved priorities when one cannot be restored"
-        ORIGINAL_PRIORITIES=([redis1]=0)
-        printf 'redis1 0\n' > "$priorities_file"
+      It "fails when a pod that answers cannot be given the configured value"
+        redis_config_get() { printf 'replica-priority\n1\n'; }
         call_func_with_retry() { shift 2; "$@"; }
         execute_sub_command() { return 1; }
-        When call recover_redis_priorities
+        When call restore_configured_priorities
         The status should be failure
-        The stdout should include "Recovering"
-        The file "$priorities_file" should be exist
+        The stdout should include "Restoring the configured replica-priority 100 on redis1, which has 1"
       End
 
-      It "restores what an earlier run saved, then removes the file"
-        printf 'redis1 0\nredis3 50\n' > "$priorities_file"
-        execute_sub_command() { echo "$1 $4"; }
-        When call restore_saved_priorities
-        The status should be success
-        The stdout should include "redis1 CONFIG SET replica-priority 0"
-        The stdout should include "redis3 CONFIG SET replica-priority 50"
-        The file "$priorities_file" should not be exist
-      End
-
-      It "keeps the file when a saved priority cannot be restored"
-        printf 'redis1 0\n' > "$priorities_file"
-        call_func_with_retry() { shift 2; "$@"; }
-        execute_sub_command() { return 1; }
-        When call restore_saved_priorities
-        The status should be failure
-        The stdout should include "Restoring"
-        The file "$priorities_file" should be exist
-      End
-
-      It "does nothing when no earlier run left priorities"
-        execute_sub_command() { echo "execute_sub_command called"; }
-        When call restore_saved_priorities
-        The status should be success
-        The stdout should equal ""
-      End
-
-      It "restores leftover priorities before taking a repeated switchover as done"
-        printf 'redis1 0\n' > "$priorities_file"
+      It "restores the priorities before taking a repeated switchover as done"
+        redis_config_get() { printf 'replica-priority\n1\n'; }
         execute_sub_command() { echo "$1 $4"; }
         check_redis_role() {
           if [ "$1" = "redis2" ]; then
@@ -934,21 +937,47 @@ master_host:redis-master"
         failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
         When call switchover_with_candidate
         The status should be success
-        The stdout should include "redis1 CONFIG SET replica-priority 0"
+        The stdout should include "redis1 CONFIG SET replica-priority 100"
         The stdout should include "redis2 is already the only primary, nothing to do"
         The stdout should not include "failover_with_writes_paused called"
-        The file "$priorities_file" should not be exist
       End
 
-      It "does not fail over while leftover priorities cannot be restored"
-        printf 'redis1 0\n' > "$priorities_file"
+      It "does not fail over while the configured priority cannot be put back"
+        redis_config_get() { printf 'replica-priority\n1\n'; }
         call_func_with_retry() { shift 2; "$@"; }
         execute_sub_command() { return 1; }
         failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
         When call switchover_without_candidate
         The status should be failure
-        The stderr should include "could not restore the replica-priority"
+        The stdout should include "Restoring"
+        The stderr should include "could not restore the configured replica-priority"
         The stdout should not include "failover_with_writes_paused called"
+      End
+    End
+
+    Context "lock_switchover()"
+      It "waits while another run holds the lock"
+        holds_lock_then_locks() {
+          local released="$switchover_lock_file.released"
+          rm -f "$released"
+          ( exec 8>"$switchover_lock_file"; flock 8; sleep 0.5; echo released > "$released" ) &
+          sleep 0.2
+          lock_switchover
+          cat "$released" 2>/dev/null || echo "did not wait"
+          rm -f "$released"
+        }
+        no_flock() { ! command -v flock >/dev/null 2>&1; }
+        Skip if "flock is not installed" no_flock
+        When call holds_lock_then_locks
+        The status should be success
+        The stdout should equal "released"
+      End
+
+      It "goes on without waiting when flock is not installed"
+        command() { [ "$2" = "flock" ] && return 1; builtin command "$@"; }
+        When call lock_switchover
+        The status should be success
+        The stderr should include "flock not found"
       End
     End
 

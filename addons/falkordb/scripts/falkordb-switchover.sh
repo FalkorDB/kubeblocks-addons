@@ -38,10 +38,16 @@ new_primary_host=""
 new_primary_port=""
 # bounds every redis-cli call; while writes are paused, the time left caps it
 redis_cli_timeout_seconds=5
-# The original replica priorities a run changes, saved before it changes them and
-# removed once all are restored. A run otherwise keeps them only in its own memory,
-# so a later run could not restore them when this one could not.
-priorities_file=/tmp/falkordb-switchover-priorities
+# The replica-priority every pod is configured with comes from redis.conf and the
+# extra redis.conf, which the server includes after it. Each run first puts it back
+# on every pod: the value a pod has at run time can be a temporary one that an
+# earlier run, on this pod or another, could not restore.
+redis_template_conf=/etc/conf/redis.conf
+redis_extra_conf=/etc/conf/extra/redis.conf
+default_replica_priority=100
+# KubeBlocks can start the action again before the first run has ended; runs in
+# this container take this lock in turn, so a second run sees what the first did.
+switchover_lock_file=/tmp/falkordb-switchover.lock
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -654,9 +660,6 @@ set_redis_priorities() {
 
     # Save original priority to global variable
     ORIGINAL_PRIORITIES[$redis_pod_fqdn]=$original_priority
-    # and to a file before the change, so that a later run can restore it if this one cannot
-    echo "$redis_pod_fqdn $original_priority" >> "$priorities_file" ||
-      echo "Warning: could not save the replica-priority of $redis_pod_fqdn to $priorities_file" >&2
 
     local redis_set_cmd
     if [[ "$redis_pod_fqdn" = "$candidate_fqdn"* ]]; then
@@ -683,27 +686,60 @@ recover_redis_priorities() {
     local redis_set_recover_cmd="CONFIG SET replica-priority ${ORIGINAL_PRIORITIES[$redis_pod_fqdn]}"
     call_func_with_retry 3 5 execute_sub_command "$redis_pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "$redis_set_recover_cmd" || return 1
   done
-  rm -f "$priorities_file"
   echo "All FalkorDB config set replica-priority recovered."
   return 0
 }
 
-# Restores the priorities an earlier run saved and could not restore, before this
-# run reads or changes any, and removes the file once all are back.
-restore_saved_priorities() {
-  [ -f "$priorities_file" ] || return 0
-  local pod_fqdn priority
-  echo "Restoring the replica-priority an earlier switchover could not restore..."
-  while read -r pod_fqdn priority; do
-    [ -n "$pod_fqdn" ] && [ -n "$priority" ] || continue
-    call_func_with_retry 3 5 execute_sub_command "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG SET replica-priority $priority" || return 1
-  done < "$priorities_file"
-  rm -f "$priorities_file"
+# The last replica-priority (or its old name, slave-priority) the configuration
+# files set, else the server's default.
+configured_replica_priority() {
+  local priority="" conf value
+  for conf in "$redis_template_conf" "$redis_extra_conf"; do
+    [ -r "$conf" ] || continue
+    value=$(awk '(tolower($1) == "replica-priority" || tolower($1) == "slave-priority") && $2 ~ /^[0-9]+$/ { p = $2 } END { print p }' "$conf")
+    [ -n "$value" ] && priority="$value"
+  done
+  echo "${priority:-$default_replica_priority}"
+}
+
+# Puts the configured replica-priority back on every pod that answers, before this
+# run reads or changes any. A pod that does not answer is left as it is: it cannot
+# be promoted while it does not answer, and the next run looks at it again.
+restore_configured_priorities() {
+  local configured pod_fqdn output priority
+  local -a redis_pod_fqdn_list
+  configured=$(configured_replica_priority)
+  IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
+  for pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
+    if ! output=$(redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG GET replica-priority" 2>/dev/null); then
+      echo "Warning: could not read the replica-priority of $pod_fqdn, leaving it as it is" >&2
+      continue
+    fi
+    priority=$(sed -n '2p' <<< "$output")
+    [ "$priority" = "$configured" ] && continue
+    echo "Restoring the configured replica-priority $configured on $pod_fqdn, which has ${priority:-none}..."
+    call_func_with_retry 3 5 execute_sub_command "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG SET replica-priority $configured" || return 1
+  done
+}
+
+# Waits for any other run of the action in this container to end. Without flock,
+# or when the lock file cannot be opened, the run goes on without waiting.
+lock_switchover() {
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "Warning: flock not found, runs of the switchover action do not wait for each other" >&2
+    return 0
+  fi
+  local lock_fd
+  if ! exec {lock_fd}>"$switchover_lock_file"; then
+    echo "Warning: could not open $switchover_lock_file, runs of the switchover action do not wait for each other" >&2
+    return 0
+  fi
+  flock "$lock_fd"
 }
 
 switchover_with_candidate() {
-  restore_saved_priorities || {
-    echo "Error: could not restore the replica-priority an earlier switchover saved in $priorities_file" >&2
+  restore_configured_priorities || {
+    echo "Error: could not restore the configured replica-priority" >&2
     return 1
   }
   # check the role of candidate before switchover
@@ -767,8 +803,8 @@ switchover_with_candidate() {
 
 switchover_without_candidate() {
   # Priorities an earlier switchover left would steer which replica Sentinel promotes.
-  restore_saved_priorities || {
-    echo "Error: could not restore the replica-priority an earlier switchover saved in $priorities_file" >&2
+  restore_configured_priorities || {
+    echo "Error: could not restore the configured replica-priority" >&2
     return 1
   }
   # check redis kernel role before switchover
@@ -806,6 +842,7 @@ load_common_library
 # which would trace the callers' arguments, passwords among them.
 set_xtrace_when_ut_mode_false() { :; }
 check_environment_exist || exit 1
+lock_switchover
 if is_empty "$KB_SWITCHOVER_CANDIDATE_FQDN"; then
   switchover_without_candidate || exit 1
 else
