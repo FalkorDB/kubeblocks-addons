@@ -207,7 +207,11 @@ get_current_comp_nodes_for_scale_out_replica() {
     local node_role
     node_role=$(echo "$line" | awk '{print $3}')
 
-    printf "%s %s %s %s %s" "$node_announce_ip" "$node_fqdn" "$node_port" "$node_bus_port" "$node_role"
+    local node_slot_fields
+    # fields 9 and later are the slots a node serves
+    node_slot_fields=$(echo "$line" | awk '{print (NF > 8 ? NF - 8 : 0)}')
+
+    printf "%s %s %s %s %s %s" "$node_announce_ip" "$node_fqdn" "$node_port" "$node_bus_port" "$node_role" "$node_slot_fields"
   }
 
   build_node_entry() {
@@ -238,11 +242,18 @@ get_current_comp_nodes_for_scale_out_replica() {
     local node_entry="$1"
     local node_fqdn="$2"
     local node_role="$3"
+    local node_slot_fields="$4"
 
     if contains "$node_fqdn" "$CURRENT_SHARD_COMPONENT_NAME"; then
       if contains "$node_role" "master"; then
         if contains "$node_role" "fail"; then
           current_comp_primary_fail_node+=("$node_entry")
+        elif [ "${node_slot_fields:-0}" -gt 0 ]; then
+          # the shard's primary is the master that serves its slots. A secondary that
+          # met the cluster but never became a replica is a master too, serving none,
+          # and CLUSTER NODES lists nodes in no fixed order: taken first, it would see
+          # itself as the primary and never rejoin as a replica.
+          current_comp_primary_node=("$node_entry" "${current_comp_primary_node[@]}")
         else
           current_comp_primary_node+=("$node_entry")
         fi
@@ -266,15 +277,15 @@ get_current_comp_nodes_for_scale_out_replica() {
   while read -r line; do
     local node_info
     node_info=$(parse_node_line_info "$line")
-    local node_announce_ip node_fqdn node_port node_bus_port node_role
-    read -r node_announce_ip node_fqdn node_port node_bus_port node_role <<< "$node_info"
+    local node_announce_ip node_fqdn node_port node_bus_port node_role node_slot_fields
+    read -r node_announce_ip node_fqdn node_port node_bus_port node_role node_slot_fields <<< "$node_info"
 
     # build node entry based on network mode
     local node_entry
     node_entry=$(build_node_entry "$network_mode" "$node_announce_ip" "$node_fqdn" "$node_port" "$node_bus_port")
 
     # categorize nodes
-    categorize_node "$node_entry" "$node_fqdn" "$node_role"
+    categorize_node "$node_entry" "$node_fqdn" "$node_role" "$node_slot_fields"
   done <<< "$cluster_nodes_info"
 
   echo "current_comp_primary_node: ${current_comp_primary_node[*]}"
