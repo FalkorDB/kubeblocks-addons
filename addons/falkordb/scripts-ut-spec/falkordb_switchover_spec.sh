@@ -281,12 +281,15 @@ master_host:redis-master"
       redis_template_conf="${SHELLSPEC_TMPBASE:-/tmp}/switchover-redis.conf"
       redis_extra_conf="${SHELLSPEC_TMPBASE:-/tmp}/switchover-extra-redis.conf"
       switchover_lock_file="${SHELLSPEC_TMPBASE:-/tmp}/switchover.lock"
-      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file"
+      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file" \
+        "$switchover_lock_file.held" "$switchover_lock_file.released"
+      priority_unread_pods=()
     }
     Before 'setup'
 
     cleanup() {
-      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file"
+      rm -f "$redis_template_conf" "$redis_extra_conf" "$switchover_lock_file" \
+        "$switchover_lock_file.held" "$switchover_lock_file.released"
       unset REDIS_DEFAULT_PASSWORD
       unset SENTINEL_POD_FQDN_LIST
       unset REDIS_POD_FQDN_LIST
@@ -880,6 +883,19 @@ master_host:redis-master"
         The stdout should equal "0"
       End
 
+      It "reads a quoted value on a line that ends with CRLF"
+        printf 'replica-priority "0"\r\n' > "$redis_template_conf"
+        printf "slave-priority '7'\r\n" > "$redis_extra_conf"
+        When call configured_replica_priority
+        The stdout should equal "7"
+      End
+
+      It "reads a quoted value in redis.conf"
+        printf 'replica-priority "0"\r\n' > "$redis_template_conf"
+        When call configured_replica_priority
+        The stdout should equal "0"
+      End
+
       It "is the server's default when no file sets it"
         When call configured_replica_priority
         The stdout should equal "100"
@@ -913,6 +929,59 @@ master_host:redis-master"
         The stdout should include "redis2 CONFIG SET replica-priority 100"
         The stdout should not include "redis3 CONFIG SET"
         The stderr should include "could not read the replica-priority of redis3"
+        The variable 'priority_unread_pods[@]' should equal "redis3"
+      End
+
+      It "restores a pod it could not read before taking a repeated switchover as done"
+        reads_of_redis1="$SHELLSPEC_TMPBASE/reads_of_redis1"
+        echo 0 > "$reads_of_redis1"
+        redis_config_get() {
+          if [ "$1" = "redis1" ]; then
+            local n; n=$(( $(cat "$reads_of_redis1") + 1 )); echo "$n" > "$reads_of_redis1"
+            [ "$n" -eq 1 ] && return 1
+            printf 'replica-priority\n1\n'
+            return 0
+          fi
+          printf 'replica-priority\n100\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_with_candidate
+        The status should be success
+        The stderr should include "could not read the replica-priority of redis1"
+        The stdout should include "redis1 CONFIG SET replica-priority 100"
+        The stdout should include "redis2 is already the only primary, nothing to do"
+        The stdout should not include "failover_with_writes_paused called"
+      End
+
+      It "fails, and does not fail over again, while a pod it could not read stays unread"
+        export KB_SWITCHOVER_CANDIDATE_FQDN=""
+        export KB_SWITCHOVER_CURRENT_NAME="redis1"
+        redis_config_get() {
+          [ "$1" = "redis3" ] && return 1
+          printf 'replica-priority\n100\n'
+        }
+        check_redis_kernel_status() { echo "redis2"; }
+        check_redis_role() {
+          if [ "$1" = "redis2" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        failover_with_writes_paused() { echo "failover_with_writes_paused called"; }
+        When call switchover_without_candidate
+        The status should be failure
+        The stderr should include "could not restore the configured replica-priority on redis3"
+        The stdout should not include "nothing to do"
+        The stdout should not include "failover_with_writes_paused called"
       End
 
       It "fails when a pod that answers cannot be given the configured value"
@@ -957,20 +1026,33 @@ master_host:redis-master"
 
     Context "lock_switchover()"
       It "waits while another run holds the lock"
+        # the other run holds the lock until it is told to let go
         holds_lock_then_locks() {
-          local released="$switchover_lock_file.released"
-          rm -f "$released"
-          ( exec 8>"$switchover_lock_file"; flock 8; sleep 0.5; echo released > "$released" ) &
-          sleep 0.2
+          ( exec 8>"$switchover_lock_file"; flock 8; : > "$switchover_lock_file.held"
+            sleep 0.5; echo released > "$switchover_lock_file.released" ) &
+          until [ -f "$switchover_lock_file.held" ]; do sleep 0.05; done
           lock_switchover
-          cat "$released" 2>/dev/null || echo "did not wait"
-          rm -f "$released"
+          cat "$switchover_lock_file.released" 2>/dev/null || echo "did not wait"
         }
         no_flock() { ! command -v flock >/dev/null 2>&1; }
         Skip if "flock is not installed" no_flock
         When call holds_lock_then_locks
         The status should be success
         The stdout should equal "released"
+      End
+
+      It "fails when another run holds the lock for longer than the wait"
+        holds_lock_too_long() {
+          ( exec 8>"$switchover_lock_file"; flock 8; : > "$switchover_lock_file.held"; sleep 3 ) &
+          until [ -f "$switchover_lock_file.held" ]; do sleep 0.05; done
+          switchover_lock_wait_seconds=1
+          lock_switchover
+        }
+        no_flock() { ! command -v flock >/dev/null 2>&1; }
+        Skip if "flock is not installed" no_flock
+        When call holds_lock_too_long
+        The status should be failure
+        The stderr should include "still holds"
       End
 
       It "goes on without waiting when flock is not installed"

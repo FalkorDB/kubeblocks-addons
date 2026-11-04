@@ -48,6 +48,12 @@ default_replica_priority=100
 # KubeBlocks can start the action again before the first run has ended; runs in
 # this container take this lock in turn, so a second run sees what the first did.
 switchover_lock_file=/tmp/falkordb-switchover.lock
+# A run takes at most about 450 s: setting the priorities with retries, the
+# paused failover and its watch, up to 300 s for the result, and the recovery.
+# A run that waits longer than this for the lock fails, and KubeBlocks retries.
+switchover_lock_wait_seconds=600
+# pods whose replica-priority could not be read when the run restored them
+priority_unread_pods=()
 
 load_common_library() {
   # the common.sh scripts is mounted to the same path which is defined in the cmpd.spec.scripts
@@ -696,34 +702,71 @@ configured_replica_priority() {
   local priority="" conf value
   for conf in "$redis_template_conf" "$redis_extra_conf"; do
     [ -r "$conf" ] || continue
-    value=$(awk '(tolower($1) == "replica-priority" || tolower($1) == "slave-priority") && $2 ~ /^[0-9]+$/ { p = $2 } END { print p }' "$conf")
+    # redis.conf may quote a value and end lines with CRLF
+    value=$(awk '{ sub(/\r$/, "") }
+      (tolower($1) == "replica-priority" || tolower($1) == "slave-priority") {
+        v = $2
+        if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+        if (v ~ /^[0-9]+$/) p = v
+      }
+      END { print p }' "$conf")
     [ -n "$value" ] && priority="$value"
   done
   echo "${priority:-$default_replica_priority}"
 }
 
+# Gives one pod the configured replica-priority unless it has it already.
+# Returns 2 when the pod's replica-priority cannot be read and 1 when it cannot be set.
+restore_configured_priority_of() {
+  local pod_fqdn="$1" configured="$2" output priority
+  output=$(redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG GET replica-priority" 2>/dev/null) || return 2
+  priority=$(sed -n '2p' <<< "$output")
+  [ "$priority" = "$configured" ] && return 0
+  echo "Restoring the configured replica-priority $configured on $pod_fqdn, which has ${priority:-none}..."
+  call_func_with_retry 3 5 execute_sub_command "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG SET replica-priority $configured" || return 1
+}
+
 # Puts the configured replica-priority back on every pod that answers, before this
-# run reads or changes any. A pod that does not answer is left as it is: it cannot
-# be promoted while it does not answer, and the next run looks at it again.
+# run reads or changes any. A pod whose priority cannot be read is left as it is
+# and noted in priority_unread_pods: it cannot be promoted while it does not
+# answer, and restore_unread_priorities must succeed before a run takes the
+# switchover as done.
 restore_configured_priorities() {
-  local configured pod_fqdn output priority
+  local configured pod_fqdn rc
   local -a redis_pod_fqdn_list
   configured=$(configured_replica_priority)
+  priority_unread_pods=()
   IFS=',' read -ra redis_pod_fqdn_list <<< "${REDIS_POD_FQDN_LIST}"
   for pod_fqdn in "${redis_pod_fqdn_list[@]}"; do
-    if ! output=$(redis_config_get "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG GET replica-priority" 2>/dev/null); then
+    rc=0
+    restore_configured_priority_of "$pod_fqdn" "$configured" || rc=$?
+    if [ "$rc" -eq 2 ]; then
       echo "Warning: could not read the replica-priority of $pod_fqdn, leaving it as it is" >&2
-      continue
+      priority_unread_pods+=("$pod_fqdn")
+    elif [ "$rc" -ne 0 ]; then
+      return 1
     fi
-    priority=$(sed -n '2p' <<< "$output")
-    [ "$priority" = "$configured" ] && continue
-    echo "Restoring the configured replica-priority $configured on $pod_fqdn, which has ${priority:-none}..."
-    call_func_with_retry 3 5 execute_sub_command "$pod_fqdn" "$redis_service_port" "$REDIS_DEFAULT_PASSWORD" "CONFIG SET replica-priority $configured" || return 1
   done
 }
 
-# Waits for any other run of the action in this container to end. Without flock,
-# or when the lock file cannot be opened, the run goes on without waiting.
+# Restores the pods restore_configured_priorities could not read. A pod that
+# answers its role may still have a temporary priority, so a run takes the
+# switchover as done only when this succeeds.
+restore_unread_priorities() {
+  local configured pod_fqdn
+  configured=$(configured_replica_priority)
+  for pod_fqdn in "${priority_unread_pods[@]}"; do
+    if ! restore_configured_priority_of "$pod_fqdn" "$configured"; then
+      echo "Error: could not restore the configured replica-priority on $pod_fqdn" >&2
+      return 1
+    fi
+  done
+  priority_unread_pods=()
+}
+
+# Waits for any other run of the action in this container to end, for at most
+# switchover_lock_wait_seconds. Without flock, or when the lock file cannot be
+# opened, the run goes on without waiting.
 lock_switchover() {
   if ! command -v flock >/dev/null 2>&1; then
     echo "Warning: flock not found, runs of the switchover action do not wait for each other" >&2
@@ -734,7 +777,10 @@ lock_switchover() {
     echo "Warning: could not open $switchover_lock_file, runs of the switchover action do not wait for each other" >&2
     return 0
   fi
-  flock "$lock_fd"
+  if ! flock -w "$switchover_lock_wait_seconds" "$lock_fd"; then
+    echo "Error: another run of the switchover action still holds $switchover_lock_file after ${switchover_lock_wait_seconds}s" >&2
+    return 1
+  fi
 }
 
 switchover_with_candidate() {
@@ -750,6 +796,7 @@ switchover_with_candidate() {
   # It is done only when every pod answers with the candidate as the one primary.
   if [[ "$candidate_role" == "primary" ]] && current_master=$(only_primary_of_all_pods) &&
     [[ "$current_master" == "$KB_SWITCHOVER_CANDIDATE_FQDN"* ]]; then
+    restore_unread_priorities || return 1
     echo "$KB_SWITCHOVER_CANDIDATE_FQDN is already the only primary, nothing to do"
     return 0
   fi
@@ -817,6 +864,7 @@ switchover_without_candidate() {
   local current_master
   if ! is_empty "$KB_SWITCHOVER_CURRENT_NAME" && current_master=$(only_primary_of_all_pods) &&
     [[ "${current_master%%.*}" != "$KB_SWITCHOVER_CURRENT_NAME" ]]; then
+    restore_unread_priorities || return 1
     echo "$KB_SWITCHOVER_CURRENT_NAME is no longer the primary ($current_master is), nothing to do"
     return 0
   fi
@@ -842,7 +890,7 @@ load_common_library
 # which would trace the callers' arguments, passwords among them.
 set_xtrace_when_ut_mode_false() { :; }
 check_environment_exist || exit 1
-lock_switchover
+lock_switchover || exit 1
 if is_empty "$KB_SWITCHOVER_CANDIDATE_FQDN"; then
   switchover_without_candidate || exit 1
 else
