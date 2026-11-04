@@ -101,9 +101,13 @@ spec:
                 kubectl exec -n "$NAMESPACE" "$p" -c falkordb-cluster -- \
                   sh -c 'tail -n 150 /tmp/post-provision.log 2>/dev/null' || true
               done
-              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)"
-              echo "=== CLUSTER NODES from $pod"
-              FDB_CONTAINER=falkordb-cluster fdb_cli "$NAMESPACE" "$pod" CLUSTER NODES || true
+              pod="$(fdb_any_sharding_pod "$NAMESPACE" fdb-shard shard)" || pod=""
+              if [ -n "$pod" ]; then
+                echo "=== CLUSTER NODES from $pod"
+                FDB_CONTAINER=falkordb-cluster fdb_cli "$NAMESPACE" "$pod" CLUSTER NODES || true
+              else
+                echo "=== no server pod of fdb-shard is running to ask for CLUSTER NODES"
+              fi
 
     - name: scale back in from 4 to 3 shards
       try:
