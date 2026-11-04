@@ -309,6 +309,23 @@ spec:
               EOF
         - assert:
             file: assert-restored-running.yaml
+        # The cluster reports Running while each shard's post-ready restore,
+        # which replays the archive up to the target, may still be going, and
+        # deleting the cluster under a running restore leaves the restore with
+        # no pod to finish on and the deletion stuck. So wait for all of them:
+        # prepare-data and post-ready for each of the 3 shards.
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_retry "every restore of fdb-shpitr-r to complete" bash -c '
+                phases="$(kubectl get restore -n "'"$NAMESPACE"'" \
+                  -o jsonpath="{range .items[*]}{.metadata.name} {.status.phase}{\"\n\"}{end}" |
+                  grep "^fdb-shpitr-r-" || true)"
+                total="$(printf "%s\n" "$phases" | grep -c . || true)"
+                done="$(printf "%s\n" "$phases" | grep -c " Completed$" || true)"
+                echo "$done of $total restores completed" >&2
+                [ "$total" -eq 6 ] && [ "$done" -eq 6 ]
+              '
       catch:
         - events: {}
         - podLogs:

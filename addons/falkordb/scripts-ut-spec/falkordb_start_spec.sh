@@ -73,6 +73,15 @@ Describe "FalkorDB Start Bash Script Tests"
       The contents of file "$redis_real_conf" should include "include /etc/conf/redis.conf"
       The contents of file "$redis_real_conf" should include "include $redis_extra_conf"
     End
+
+    It "drops what an earlier start or a CONFIG REWRITE left in redis.conf"
+      # a container restart keeps the emptyDir that holds redis.conf
+      printf '%s\n' "include /etc/conf/redis.conf" "loadmodule /var/lib/falkordb/bin/falkordb.so" "replicaof old-primary 6379" > $redis_real_conf
+      When call load_redis_template_conf
+      The line 1 of contents of file "$redis_real_conf" should eq "include /etc/conf/redis.conf"
+      The line 2 of contents of file "$redis_real_conf" should eq "include $redis_extra_conf"
+      The lines of contents of file "$redis_real_conf" should eq 2
+    End
   End
 
   Describe "build_redis_default_accounts()"
@@ -1100,6 +1109,302 @@ Describe "FalkorDB Start Bash Script Tests"
     End
   End
 
+  Describe "get_sentinel_primary_flags()"
+    It "prints the flags field of the sentinel's reply"
+      timeout() { shift; "$@"; }
+      redis-cli() { printf '%s\n' name mymaster ip falkordb-0 flags "master,failover_in_progress" num-slaves 1; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The stdout should eq "master,failover_in_progress"
+    End
+
+    It "adds the sentinel's down-after-milliseconds when the reply has it"
+      timeout() { shift; "$@"; }
+      redis-cli() { printf '%s\r\n' name mymaster flags master down-after-milliseconds 5000 num-slaves 1; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The stdout should eq "master 5000"
+    End
+
+    It "prints nothing when the sentinel monitors no primary"
+      timeout() { shift; "$@"; }
+      # redis-cli exits 0 on an error reply
+      redis-cli() { echo "ERR No such master with that name"; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The status should be success
+      The stdout should eq ""
+    End
+
+    It "fails when the sentinel cannot be reached"
+      timeout() { shift; "$@"; }
+      redis-cli() { echo "Could not connect to Redis at sentinel-0:26379: Connection refused" >&2; return 1; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The status should be failure
+      The stdout should eq ""
+    End
+
+    It "fails on any other error reply"
+      timeout() { shift; "$@"; }
+      redis-cli() { echo "NOAUTH Authentication required."; }
+      When call get_sentinel_primary_flags "sentinel-0"
+      The status should be failure
+    End
+  End
+
+  Describe "wait_while_sentinel_fails_over_current_pod()"
+    setup() {
+      export SENTINEL_COMPONENT_NAME="falkordb-sent"
+      export SENTINEL_POD_FQDN_LIST="sentinel-0,sentinel-1"
+      sentinel_failover_wait_ms=6000
+      flags_calls_file="./sentinel-flags-calls"
+    }
+    cleanup_sentinel_env() {
+      unset SENTINEL_COMPONENT_NAME SENTINEL_POD_FQDN_LIST
+      sentinel_failover_wait_ms=""
+      sentinel_failover_wait_delay_ms=1000
+      rm -f "$flags_calls_file".*
+    }
+    Before 'setup'
+    After 'cleanup_sentinel_env'
+    # A fake clock that sleeping moves on: the wait measures its deadline with
+    # it. sleep takes seconds with three decimals.
+    fake_now_ms=1000000000
+    now_ms() { echo "$fake_now_ms"; }
+    sleep_when_ut_mode_false() { local ms="${1/./}"; fake_now_ms=$((fake_now_ms + 10#$ms)); }
+    # Prints which round this is for the sentinel: each round asks every
+    # sentinel once, in the background, so a stub counts its calls in a file
+    # of its own.
+    round_of() {
+      local file="$flags_calls_file.$1" calls
+      calls=$(( $(cat "$file" 2>/dev/null || echo 0) + 1 ))
+      echo "$calls" > "$file"
+      echo "$calls"
+    }
+
+    It "does not wait when no sentinel is failing the pod over"
+      get_sentinel_primary_flags() { echo "master"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should eq ""
+    End
+
+    It "does not wait for a sentinel that only sees the pod down"
+      get_sentinel_primary_flags() { echo "master,s_down,o_down"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+    End
+
+    It "waits while one sentinel is failing the pod over, then returns 0"
+      # the second sentinel runs the failover, which ends after two rounds
+      get_sentinel_primary_flags() {
+        local round; round=$(round_of "$1")
+        if [ "$1" = "sentinel-1" ] && [ "$round" -le 2 ]; then echo "master,o_down,failover_in_progress"; else echo "master"; fi
+      }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be success
+      The stdout should include "sentinel sentinel-1 (master,o_down,failover_in_progress) is failing over this pod"
+      The stdout should not include "still failing over"
+    End
+
+    It "waits while a sentinel cannot be asked, as it may be running the failover"
+      get_sentinel_primary_flags() {
+        local round; round=$(round_of "$1")
+        if [ "$1" = "sentinel-1" ] && [ "$round" -le 1 ]; then return 1; fi
+        echo "master"
+      }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be success
+      The stdout should include "sentinel sentinel-1 cannot be asked and may be failing over this pod"
+    End
+
+    It "exits when the failover is still running after the last attempt"
+      get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "(master,failover_in_progress) is still failing over this pod after 6000 ms"
+    End
+
+    It "goes on after the last attempt when a sentinel is only unreachable"
+      get_sentinel_primary_flags() { [ "$1" = "sentinel-0" ] && echo "master"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be success
+      The stdout should include "sentinel sentinel-1 still cannot be asked after 6000 ms; asking the others for the primary again."
+    End
+
+    It "waits for a failover another sentinel runs even when the first cannot be asked"
+      get_sentinel_primary_flags() {
+        local round; round=$(round_of "$1")
+        [ "$1" = "sentinel-0" ] && return 1
+        if [ "$round" -le 1 ]; then echo "master,failover_in_progress"; else echo "master"; fi
+      }
+      When call wait_while_sentinel_fails_over_current_pod
+      # the failover ends; sentinel-0 stays unreachable, which does not stop the start
+      The status should be success
+      The stdout should include "sentinel sentinel-1 (master,failover_in_progress) is failing over this pod"
+      The stdout should include "sentinel sentinel-0 still cannot be asked after 6000 ms"
+    End
+
+    It "asks every sentinel at once, so one that never answers does not hold up the others"
+      # sentinel-0 answers only once sentinel-1 has been asked while it is still
+      # waiting; asked one after the other, it would time out first
+      asked_file="$flags_calls_file.asked-sentinel-1"
+      get_sentinel_primary_flags() {
+        if [ "$1" = "sentinel-1" ]; then
+          touch "$asked_file"
+          echo "master,failover_in_progress"
+          return 0
+        fi
+        local tries=0
+        while [ ! -e "$asked_file" ] && [ "$tries" -lt 50 ]; do sleep 0.05; tries=$((tries + 1)); done
+        [ -e "$asked_file" ] || return 1
+        echo "concurrent" > "$flags_calls_file.concurrent"
+        return 1
+      }
+      concurrent() {
+        local out
+        out=$( ( wait_while_sentinel_fails_over_current_pod ) )
+        echo "$out" | grep -m1 "is failing over this pod"
+        cat "$flags_calls_file.concurrent" 2>/dev/null
+      }
+      When call concurrent
+      The line 1 of stdout should include "sentinel sentinel-1 (master,failover_in_progress) is failing over this pod"
+      The line 2 of stdout should eq "concurrent"
+    End
+
+    It "keeps a reported failover in mind while that sentinel cannot be asked again"
+      # sentinel-1 reports a failover, then stops answering; sentinel-0 never sees one
+      get_sentinel_primary_flags() {
+        local round; round=$(round_of "$1")
+        if [ "$1" = "sentinel-0" ]; then echo "master"; return 0; fi
+        [ "$round" -le 1 ] || return 1
+        echo "master,failover_in_progress"
+      }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "Error: sentinel sentinel-1 (master,failover_in_progress) is still failing over this pod after 6000 ms"
+    End
+
+    It "forgets a failover once that sentinel says it is over"
+      get_sentinel_primary_flags() {
+        local round; round=$(round_of "$1")
+        if [ "$1" = "sentinel-1" ] && [ "$round" -le 1 ]; then echo "master,failover_in_progress"; else echo "master"; fi
+      }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be success
+      The stdout should include "sentinel sentinel-1 (master,failover_in_progress) is failing over this pod"
+      The stdout should not include "Error"
+    End
+
+    It "gives each sentinel query no more than the time left, nor than the query timeout"
+      # a 3 s budget polled every 2 s: the first round's queries get the 2 s
+      # query timeout, the second's the 1 s left, and none is asked once it is up
+      sentinel_failover_wait_ms=3000
+      sentinel_failover_wait_delay_ms=2000
+      timeouts_file="./sentinel-query-timeouts"
+      : > "$timeouts_file"
+      get_sentinel_primary_flags() { echo "$1 $2" >> "$timeouts_file"; echo "master,failover_in_progress"; }
+      query_timeouts() {
+        ( wait_while_sentinel_fails_over_current_pod ) >/dev/null
+        sort "$timeouts_file"
+        rm -f "$timeouts_file"
+      }
+      When call query_timeouts
+      The line 1 of stdout should eq "sentinel-0 1.000"
+      The line 2 of stdout should eq "sentinel-0 2.000"
+      The line 3 of stdout should eq "sentinel-1 1.000"
+      The line 4 of stdout should eq "sentinel-1 2.000"
+      The lines of stdout should eq 4
+    End
+
+    It "waits no longer than the down-after-milliseconds sentinel has"
+      sentinel_failover_wait_ms=""
+      # each query logs when it was made, so the test sees where polling stops
+      query_times="./sentinel-query-times"
+      : > "$query_times"
+      get_sentinel_primary_flags() { echo "$((fake_now_ms - 1000000000))" >> "$query_times"; echo "master,failover_in_progress 2000"; }
+      polled() {
+        ( wait_while_sentinel_fails_over_current_pod ) >/dev/null
+        echo "exit $?"
+        sort -n "$query_times" | uniq
+        rm -f "$query_times"
+      }
+      When call polled
+      # asked at 0 and 1000 ms; the 2000 ms deadline comes before a third round
+      The line 1 of stdout should eq "exit 1"
+      The line 2 of stdout should eq "0"
+      The line 3 of stdout should eq "1000"
+      The lines of stdout should eq 3
+    End
+
+    It "reports the down-after-milliseconds it waited for"
+      sentinel_failover_wait_ms=""
+      get_sentinel_primary_flags() { echo "master,failover_in_progress 2000"; }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "still failing over this pod after 2000 ms, its down-after-milliseconds"
+    End
+
+    It "waits the registered 5 s until a sentinel says otherwise"
+      sentinel_failover_wait_ms=""
+      get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
+      When run wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+      The stdout should include "still failing over this pod after 5000 ms"
+    End
+
+    It "does not wait without sentinel"
+      unset SENTINEL_COMPONENT_NAME
+      get_sentinel_primary_flags() { echo "master,failover_in_progress"; }
+      When call wait_while_sentinel_fails_over_current_pod
+      The status should be failure
+    End
+  End
+
+  Describe "build_replicaof_config()"
+    setup() {
+      echo "" > $redis_real_conf
+      resolve_calls=0
+    }
+    Before 'setup'
+    # the first answer names this pod; after the failover it names the other one
+    init_or_get_primary_from_redis_sentinel() {
+      resolve_calls=$((resolve_calls + 1))
+      if [ "$resolve_calls" -eq 1 ]; then primary="this-pod"; else primary="other-pod"; fi
+      primary_port=6379
+    }
+    check_current_pod_is_primary() { [ "$primary" = "this-pod" ]; }
+
+    It "follows the pod sentinel promotes while it was failing this pod over"
+      wait_while_sentinel_fails_over_current_pod() { return 0; }
+      When call build_replicaof_config
+      The contents of file "$redis_real_conf" should include "replicaof other-pod 6379"
+    End
+
+    It "asks again even when no sentinel was failing it over, as the failover may have ended since"
+      wait_while_sentinel_fails_over_current_pod() { return 1; }
+      When call build_replicaof_config
+      The contents of file "$redis_real_conf" should include "replicaof other-pod 6379"
+    End
+
+    It "starts as primary when sentinel still names it after asking again"
+      wait_while_sentinel_fails_over_current_pod() { return 1; }
+      init_or_get_primary_from_redis_sentinel() { primary="this-pod"; primary_port=6379; }
+      When call build_replicaof_config
+      The contents of file "$redis_real_conf" should not include "replicaof"
+    End
+
+    It "does not ask again when sentinel names another pod"
+      wait_while_sentinel_fails_over_current_pod() { echo "waited"; return 0; }
+      init_or_get_primary_from_redis_sentinel() {
+        resolve_calls=$((resolve_calls + 1))
+        primary="other-pod"
+        primary_port=6379
+      }
+      check_calls() { build_replicaof_config; echo "calls=$resolve_calls"; }
+      When call check_calls
+      The stdout should eq "calls=1"
+      The contents of file "$redis_real_conf" should include "replicaof other-pod 6379"
+    End
+  End
+
   Describe "get_peer_replication_role()"
     timeout() { shift; "$@"; }
 
@@ -1204,7 +1509,7 @@ Describe "FalkorDB Start Bash Script Tests"
       # A pty hands back "\r\n" line endings, and "\r\r\n" for the INFO section
       # of a crash report, which already uses "\r\n".
       build_redis_server_start_cmd() {
-        echo "printf '1:M 13 Oct 2026 10:00:00.000 # Redis crashed by signal: 11\\r\\n# Server\\r\\r\\n\\r\\n'; exit 139"
+        echo "sh -c \"printf '1:M 13 Oct 2026 10:00:00.000 # Redis crashed by signal: 11\\r\\n# Server\\r\\r\\n\\r\\n'; exit 139\""
       }
       When call start_redis_server
       The status should eq 139
@@ -1224,6 +1529,108 @@ Describe "FalkorDB Start Bash Script Tests"
       The status should eq 139
       The line 2 of stdout should eq "[falkordb] crashed"
       The stdout should include "falkordb server exited with status 139"
+    End
+
+    It "passes SIGTERM on to the server and exits with its status once it stops"
+      # The server shuts down when it gets the signal; stand in for the /proc
+      # lookup, which needs Linux, by signalling the launcher directly.
+      forward_signal_to_redis_server() { kill -"$1" "$redis_server_launcher_pid"; }
+      build_redis_server_start_cmd() {
+        echo "sh -c 'trap \"echo shutting down; exit 0\" TERM; echo ready; while :; do sleep 0.1; done'"
+      }
+      send_term_when_ready() {
+        start_redis_server &
+        local starter=$!
+        sleep 1
+        kill -TERM "$starter"
+        wait "$starter"
+      }
+      When call send_term_when_ready
+      The status should be success
+      The stdout should include "[falkordb] shutting down"
+      The stdout should include "falkordb server exited with status 0"
+    End
+
+    It "keeps a signal that comes before the server runs and passes it on once it does"
+      # the trap's lookup finds no server yet, so it keeps the signal; the loop
+      # then finds the server and passes it on. The stub counts its calls in a
+      # file because the test reads the count afterwards
+      forward_calls_file="./forward-calls"
+      echo 0 > "$forward_calls_file"
+      # stand in for the /proc lookup, which needs Linux
+      redis_server_pids() { echo "$redis_server_launcher_pid"; }
+      forward_signal_to_redis_server() {
+        local calls=$(( $(cat "$forward_calls_file") + 1 ))
+        echo "$calls" > "$forward_calls_file"
+        [ "$calls" -ge 2 ] || return 1
+        kill -"$1" "$redis_server_launcher_pid"
+      }
+      build_redis_server_start_cmd() {
+        echo "sh -c 'trap \"echo shutting down; exit 0\" TERM; echo ready; while :; do sleep 0.1; done'"
+      }
+      send_term_when_ready() {
+        start_redis_server &
+        local starter=$!
+        sleep 1
+        kill -TERM "$starter"
+        wait "$starter"
+        local status=$?
+        rm -f "$forward_calls_file"
+        return $status
+      }
+      When call send_term_when_ready
+      The status should be success
+      The stdout should include "falkordb server is not running yet, passing SIGTERM on once it is"
+      The stdout should include "[falkordb] shutting down"
+    End
+  End
+
+  Describe "forward_signal_to_redis_server()"
+    setup() {
+      proc_root="./fake-proc"
+      redis_server_launcher_pid="100"
+      # 100 is `script`, 101 the server it runs on a pty, 102 a server that is
+      # not ours, 103 the log sed
+      mkdir -p "$proc_root"/{100,101,102,103}
+      echo "script" > "$proc_root/100/comm"; echo "100 (script) S 1 100" > "$proc_root/100/stat"
+      echo "redis-server" > "$proc_root/101/comm"; echo "101 (redis-server) S 100 101" > "$proc_root/101/stat"
+      echo "redis-server" > "$proc_root/102/comm"; echo "102 (redis-server) S 7 102" > "$proc_root/102/stat"
+      echo "sed" > "$proc_root/103/comm"; echo "103 (sed) S 100 103" > "$proc_root/103/stat"
+    }
+    cleanup_fake_proc() {
+      rm -rf "$proc_root"
+      proc_root="/proc"
+    }
+    Before 'setup'
+    After 'cleanup_fake_proc'
+    kill() { echo "kill $*"; }
+
+    It "signals only the server the launcher started"
+      When call forward_signal_to_redis_server TERM
+      The status should be success
+      The stdout should include "kill -TERM 101"
+      The stdout should not include "kill -TERM 102"
+      The stdout should not include "kill -TERM 103"
+    End
+
+    It "signals the launcher itself when it exec'd the server"
+      redis_server_launcher_pid="102"
+      When call forward_signal_to_redis_server TERM
+      The stdout should include "kill -TERM 102"
+      The stdout should not include "kill -TERM 101"
+    End
+
+    It "fails when the launcher started no server"
+      redis_server_launcher_pid="999"
+      When call forward_signal_to_redis_server TERM
+      The status should be failure
+      The stdout should eq ""
+    End
+
+    It "fails before the server is launched"
+      redis_server_launcher_pid=""
+      When call forward_signal_to_redis_server TERM
+      The status should be failure
     End
   End
 End

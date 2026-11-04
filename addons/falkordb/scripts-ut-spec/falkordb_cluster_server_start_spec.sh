@@ -54,6 +54,15 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The contents of file "$redis_real_conf" should include "include /etc/conf/redis.conf"
       The contents of file "$redis_real_conf" should include "include $redis_extra_conf"
     End
+
+    It "drops what an earlier start or a CONFIG REWRITE left in redis.conf"
+      # a container restart keeps the emptyDir that holds redis.conf
+      printf '%s\n' "include /etc/conf/redis.conf" "loadmodule /var/lib/falkordb/bin/falkordb.so" "replicaof old-primary 6379" > $redis_real_conf
+      When call load_redis_template_conf
+      The line 1 of contents of file "$redis_real_conf" should eq "include /etc/conf/redis.conf"
+      The line 2 of contents of file "$redis_real_conf" should eq "include $redis_extra_conf"
+      The lines of contents of file "$redis_real_conf" should eq 2
+    End
   End
 
   Describe "build_redis_default_accounts()"
@@ -1914,7 +1923,7 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       # A pty hands back "\r\n" line endings, and "\r\r\n" for the INFO section
       # of a crash report, which already uses "\r\n".
       build_redis_server_start_cmd() {
-        echo "printf '1:M 13 Oct 2026 10:00:00.000 # Redis crashed by signal: 11\\r\\n# Server\\r\\r\\n\\r\\n'; exit 139"
+        echo "sh -c \"printf '1:M 13 Oct 2026 10:00:00.000 # Redis crashed by signal: 11\\r\\n# Server\\r\\r\\n\\r\\n'; exit 139\""
       }
       When call start_redis_server
       The status should eq 139
@@ -1934,6 +1943,108 @@ Describe "FalkorDB Cluster Server Start Bash Script Tests"
       The status should eq 139
       The line 2 of stdout should eq "[falkordb] crashed"
       The stdout should include "falkordb server exited with status 139"
+    End
+
+    It "passes SIGTERM on to the server and exits with its status once it stops"
+      # The server shuts down when it gets the signal; stand in for the /proc
+      # lookup, which needs Linux, by signalling the launcher directly.
+      forward_signal_to_redis_server() { kill -"$1" "$redis_server_launcher_pid"; }
+      build_redis_server_start_cmd() {
+        echo "sh -c 'trap \"echo shutting down; exit 0\" TERM; echo ready; while :; do sleep 0.1; done'"
+      }
+      send_term_when_ready() {
+        start_redis_server &
+        local starter=$!
+        sleep 1
+        kill -TERM "$starter"
+        wait "$starter"
+      }
+      When call send_term_when_ready
+      The status should be success
+      The stdout should include "[falkordb] shutting down"
+      The stdout should include "falkordb server exited with status 0"
+    End
+
+    It "keeps a signal that comes before the server runs and passes it on once it does"
+      # the trap's lookup finds no server yet, so it keeps the signal; the loop
+      # then finds the server and passes it on. The stub counts its calls in a
+      # file because the test reads the count afterwards
+      forward_calls_file="./forward-calls"
+      echo 0 > "$forward_calls_file"
+      # stand in for the /proc lookup, which needs Linux
+      redis_server_pids() { echo "$redis_server_launcher_pid"; }
+      forward_signal_to_redis_server() {
+        local calls=$(( $(cat "$forward_calls_file") + 1 ))
+        echo "$calls" > "$forward_calls_file"
+        [ "$calls" -ge 2 ] || return 1
+        kill -"$1" "$redis_server_launcher_pid"
+      }
+      build_redis_server_start_cmd() {
+        echo "sh -c 'trap \"echo shutting down; exit 0\" TERM; echo ready; while :; do sleep 0.1; done'"
+      }
+      send_term_when_ready() {
+        start_redis_server &
+        local starter=$!
+        sleep 1
+        kill -TERM "$starter"
+        wait "$starter"
+        local status=$?
+        rm -f "$forward_calls_file"
+        return $status
+      }
+      When call send_term_when_ready
+      The status should be success
+      The stdout should include "falkordb server is not running yet, passing SIGTERM on once it is"
+      The stdout should include "[falkordb] shutting down"
+    End
+  End
+
+  Describe "forward_signal_to_redis_server()"
+    setup() {
+      proc_root="./fake-proc"
+      redis_server_launcher_pid="100"
+      # 100 is `script`, 101 the server it runs on a pty, 102 a server that is
+      # not ours, 103 the log sed
+      mkdir -p "$proc_root"/{100,101,102,103}
+      echo "script" > "$proc_root/100/comm"; echo "100 (script) S 1 100" > "$proc_root/100/stat"
+      echo "redis-server" > "$proc_root/101/comm"; echo "101 (redis-server) S 100 101" > "$proc_root/101/stat"
+      echo "redis-server" > "$proc_root/102/comm"; echo "102 (redis-server) S 7 102" > "$proc_root/102/stat"
+      echo "sed" > "$proc_root/103/comm"; echo "103 (sed) S 100 103" > "$proc_root/103/stat"
+    }
+    cleanup_fake_proc() {
+      rm -rf "$proc_root"
+      proc_root="/proc"
+    }
+    Before 'setup'
+    After 'cleanup_fake_proc'
+    kill() { echo "kill $*"; }
+
+    It "signals only the server the launcher started"
+      When call forward_signal_to_redis_server TERM
+      The status should be success
+      The stdout should include "kill -TERM 101"
+      The stdout should not include "kill -TERM 102"
+      The stdout should not include "kill -TERM 103"
+    End
+
+    It "signals the launcher itself when it exec'd the server"
+      redis_server_launcher_pid="102"
+      When call forward_signal_to_redis_server TERM
+      The stdout should include "kill -TERM 102"
+      The stdout should not include "kill -TERM 101"
+    End
+
+    It "fails when the launcher started no server"
+      redis_server_launcher_pid="999"
+      When call forward_signal_to_redis_server TERM
+      The status should be failure
+      The stdout should eq ""
+    End
+
+    It "fails before the server is launched"
+      redis_server_launcher_pid=""
+      When call forward_signal_to_redis_server TERM
+      The status should be failure
     End
   End
 End

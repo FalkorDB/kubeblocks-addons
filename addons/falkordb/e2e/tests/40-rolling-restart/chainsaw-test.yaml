@@ -1,0 +1,148 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rolling-restart
+spec:
+  description: >-
+    Restart every server with a Restart OpsRequest while a client writes through
+    the read-write Service, then delete each pod on its own. Every pod stop now
+    runs the preStop hand-over, which fails the primary over before its server
+    goes down, and then the ACL SAVE that keeps users created at runtime; and the
+    start script now runs the server in the background and forwards it the
+    SIGTERM. So a rolling restart must lose no acknowledged write, keep writes
+    stopped no longer than a failover does, keep the runtime users, and each pod
+    must stop well within its termination grace period rather than be killed at
+    the end of it.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rolling
+            tail: 100
+
+    - name: seed data and runtime users, and start writing
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rolling falkordb 1 1
+              for sent in $(fdb_pods "$NAMESPACE" fdb-rolling falkordb-sent); do
+                fdb_retry "$sent to report the master it monitors" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$sent"
+              done
+              primary="$(fdb_primary "$NAMESPACE" fdb-rolling falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-rolling falkordb secondary)"
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-rolling 50
+              fdb_retry "data to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-rolling 50
+
+              # ACLs do not replicate, and a user made with ACL SETUSER lives
+              # only in memory until the preStop's ACL SAVE writes it out.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rolling falkordb); do
+                fdb_cli "$NAMESPACE" "$pod" ACL SETUSER e2e-runtime on '>e2e-runtime-pass' '~e2e:*' +get >/dev/null
+                kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath='{.metadata.uid}' > "$state/$pod.uid"
+              done
+
+              fdb_start_writer "$NAMESPACE" fdb-rolling falkordb
+
+    - name: restart every server
+      try:
+        - apply:
+            file: restart.yaml
+        - assert:
+            file: assert-restart-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-rolling-restart
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rolling
+            tail: 200
+
+    - name: the restart lost nothing and kept the topology and the users
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rolling falkordb); do
+                uid="$(kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath='{.metadata.uid}')"
+                [ "$uid" != "$(cat "$state/$pod.uid")" ] || {
+                  echo "$pod was not restarted, so this test proves nothing" >&2; exit 1; }
+              done
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rolling falkordb 1 1
+              fdb_retry "the primary label to follow sentinel" \
+                fdb_assert_primary_label_follows_sentinel "$NAMESPACE" fdb-rolling falkordb
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-rolling falkordb secondary)"
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_check_writer "$NAMESPACE" fdb-rolling falkordb 15
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rolling falkordb); do
+                fdb_verify_keys "$NAMESPACE" "$pod" e2e-rolling 50
+                user="$(fdb_cli "$NAMESPACE" "$pod" ACL GETUSER e2e-runtime | tr -d '\r')"
+                [ -n "$user" ] || {
+                  echo "$pod lost the runtime user e2e-runtime across the restart" >&2; exit 1; }
+                fdb_log "$pod still has the runtime user e2e-runtime"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rolling
+            tail: 200
+
+    - name: each pod stops well within its grace period
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # A replica has nothing to hand over, so it is only the server's
+              # own shutdown.
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-rolling falkordb secondary)"
+              fdb_delete_pod_within "$NAMESPACE" "$replica" 15
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rolling falkordb 1 1
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+
+              # The primary hands over first, which the preStop bounds to leave
+              # its server time to shut down within the 30 s.
+              primary="$(fdb_primary "$NAMESPACE" fdb-rolling falkordb)"
+              fdb_start_writer "$NAMESPACE" fdb-rolling falkordb
+              fdb_delete_pod_within "$NAMESPACE" "$primary" 25
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-rolling falkordb 1 1
+              fdb_retry "the primary label to follow sentinel" \
+                fdb_assert_primary_label_follows_sentinel "$NAMESPACE" fdb-rolling falkordb
+              fdb_check_writer "$NAMESPACE" fdb-rolling falkordb 15
+              for pod in $(fdb_pods "$NAMESPACE" fdb-rolling falkordb); do
+                fdb_retry "the seeded data on $pod" \
+                  fdb_verify_keys "$NAMESPACE" "$pod" e2e-rolling 50
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-rolling
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

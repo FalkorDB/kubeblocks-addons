@@ -31,6 +31,10 @@ redis_acl_file_bak="/data/users.acl.bak"
 retry_times=3
 check_ready_times=30
 retry_delay_second=2
+redis_server_process_name="redis-server"
+redis_server_launcher_pid=""
+pending_server_signal=""
+proc_root="/proc"
 # how long the start script waits for known peers to come up after a full restart
 rejoin_peer_max_attempts=12
 rejoin_peer_retry_delay_second=5
@@ -794,7 +798,11 @@ scale_out_replica_send_meet() {
 }
 
 load_redis_template_conf() {
-  echo "include $redis_template_conf" >> $redis_real_conf
+  # Start from an empty file: it is on an emptyDir that survives a container
+  # restart, so appending would keep the last start's lines and whatever
+  # a CONFIG REWRITE added, including a loadmodule line that, with the
+  # --loadmodule the server is started with, loads the module twice and aborts.
+  echo "include $redis_template_conf" > $redis_real_conf
   # if the file redis_extra_conf exists, include it too
   if [ -f $redis_extra_conf ]; then
     echo "include $redis_extra_conf" >> $redis_real_conf
@@ -1036,19 +1044,91 @@ start_redis_server() {
   # server on a pty, which turns every "\n" into "\r\n" (and the INFO section of a
   # crash report, already "\r\n", into "\r\r\n"), leaving stray ^M in the logs.
   local log_format='s/\r+$//; s/^[0-9]+:[A-Z] [0-9]+ [A-Za-z]{3} [0-9]{4} [0-9:.]+ //; s/^/[falkordb] /'
-  local server_status
+  local log_pid server_status=0
+  exec 3> >(sed -u -E "$log_format")
+  log_pid=$!
+  # This script is the container's PID 1, which ignores SIGTERM unless it traps
+  # it, so the server runs in the background and the signal is passed on to it:
+  # it shuts down cleanly (and fast) instead of being killed at the end of the
+  # grace period. `script` would kill it, so it is signalled directly, and the
+  # command is exec'd so the server is the child of `script`, not of a shell.
+  # The traps go in first: a signal that comes before the server is running is
+  # kept and passed on once it is.
+  pending_server_signal=""
+  trap 'handle_shutdown_signal TERM' TERM
+  trap 'handle_shutdown_signal INT' INT
   if command -v script >/dev/null 2>&1; then
-    script -q -f -e -c "$exec_cmd" /dev/null 2>&1 | sed -u -E "$log_format"
-    server_status=${PIPESTATUS[0]}
+    script -q -f -e -c "exec $exec_cmd" /dev/null >&3 2>&1 &
   else
-    eval "$exec_cmd" 2>&1 | sed -u -E "$log_format"
-    server_status=${PIPESTATUS[0]}
+    eval "exec $exec_cmd" >&3 2>&1 &
   fi
-  # A pipeline's status is that of its last command (sed), which would hide a
-  # crashed server behind exit code 0. Propagate the server's own status so the
-  # container exits non-zero and kubelet records the failure and restarts it.
+  redis_server_launcher_pid=$!
+  # wait returns early when a trapped signal arrives; wait again until the
+  # server has exited, then once more for its status. Until the server can be
+  # found the loop polls instead, as the trap can only keep a signal then. Once
+  # it can be found, a kept signal is passed on, and the trap passes any later
+  # one straight on, so none is left kept while the loop blocks in wait.
+  while kill -0 "$redis_server_launcher_pid" 2>/dev/null; do
+    if is_empty "$(redis_server_pids)"; then
+      sleep 0.1
+      continue
+    fi
+    if ! is_empty "$pending_server_signal"; then
+      if forward_signal_to_redis_server "$pending_server_signal"; then
+        pending_server_signal=""
+      else
+        sleep 0.1
+        continue
+      fi
+    fi
+    wait "$redis_server_launcher_pid" || true
+  done
+  wait "$redis_server_launcher_pid" || server_status=$?
+  # let sed print the server's last lines before the container exits
+  exec 3>&-
+  wait "$log_pid" || true
+  # Propagate the server's own status so the container exits non-zero after a
+  # crash and kubelet records the failure and restarts it.
   echo "falkordb server exited with status $server_status"
   return "$server_status"
+}
+
+handle_shutdown_signal() {
+  if ! forward_signal_to_redis_server "$1"; then
+    echo "falkordb server is not running yet, passing SIG$1 on once it is"
+    pending_server_signal="$1"
+  fi
+}
+
+# Prints the pid of the server started by start_redis_server: the launcher
+# itself when it exec'd the server, or its child when `script` runs it on a pty.
+# The image has no ps or pkill, so the process is found in /proc. Prints
+# nothing when there is no such server (yet).
+redis_server_pids() {
+  local proc pid stat ppid
+  is_empty "$redis_server_launcher_pid" && return 0
+  for proc in "$proc_root"/[0-9]*; do
+    [ "$(cat "$proc/comm" 2>/dev/null)" = "$redis_server_process_name" ] || continue
+    read -r stat < "$proc/stat" 2>/dev/null || continue
+    # the fields after the parenthesised command name are: state ppid ...
+    stat=${stat##*) }
+    read -r _ ppid _ <<< "$stat"
+    pid=${proc##*/}
+    if [ "$pid" = "$redis_server_launcher_pid" ] || [ "$ppid" = "$redis_server_launcher_pid" ]; then
+      echo "$pid"
+    fi
+  done
+}
+
+# Sends the signal to the server started by start_redis_server. Returns 1 when
+# there is no such server (yet).
+forward_signal_to_redis_server() {
+  local signal="$1" pid found=1
+  for pid in $(redis_server_pids); do
+    echo "forwarding SIG$signal to falkordb server (pid $pid)"
+    kill -"$signal" "$pid" && found=0
+  done
+  return $found
 }
 
 # build redis cluster configuration redis.conf

@@ -63,6 +63,10 @@ spec:
               fdb_retry "data to reach $survivor" \
                 fdb_verify_keys "$NAMESPACE" "$survivor" e2e-failover 20
 
+              # A client keeps writing through the Service while the primary
+              # pod is deleted, the way a drain or a rolling restart deletes it.
+              fdb_start_writer "$NAMESPACE" fdb-failover falkordb
+
     - name: kill the primary and let sentinel promote the survivor
       try:
         - script:
@@ -122,6 +126,13 @@ spec:
         - script:
             content: |
               . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The deleted primary hands over in its preStop, with writes paused
+              # for down-after-milliseconds (5 s) at most, instead of keeping
+              # writes stopped until it is killed and Sentinel notices. It must
+              # not come back as a second primary that acknowledges writes the
+              # new one never gets.
+              fdb_check_writer "$NAMESPACE" fdb-failover falkordb 15
 
               primary="$(fdb_primary "$NAMESPACE" fdb-failover falkordb)"
               replica="$(fdb_pods_with_role "$NAMESPACE" fdb-failover falkordb secondary)"

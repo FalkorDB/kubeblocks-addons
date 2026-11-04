@@ -1,0 +1,121 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: container-restart
+spec:
+  description: >-
+    Kill redis-server inside its container, as a crash or an OOM kill does, so
+    the kubelet restarts the container in place and the pod keeps its emptyDirs,
+    /etc/redis/redis.conf among them. Once Sentinel has reconfigured a server,
+    its CONFIG REWRITE has written a loadmodule line into that file, and a start
+    script that appended to it loaded the module a second time from it and
+    crash-looped (#42). Both a replica and the primary have to come back from
+    such a restart, the primary as a replica of the pod Sentinel promoted.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-restart
+            tail: 100
+
+    - name: record the roles and seed data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-restart falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-restart falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-restart falkordb secondary)"
+              echo "$primary" > "$state/primary"
+              echo "$replica" > "$state/replica"
+              for sent in $(fdb_pods "$NAMESPACE" fdb-restart falkordb-sent); do
+                fdb_retry "$sent to report the master it monitors" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$sent"
+              done
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-restart 20
+              fdb_retry "data to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-restart 20
+
+    - name: a replica restarted in place after a config rewrite comes back
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              replica="$(cat "$state/replica")"
+
+              # This is what Sentinel does each time it reconfigures a server.
+              fdb_cli "$NAMESPACE" "$replica" CONFIG REWRITE >/dev/null
+              lines="$(kubectl exec -n "$NAMESPACE" "$replica" -c falkordb -- \
+                sh -c 'grep -c "^loadmodule" /etc/redis/redis.conf || true')"
+              [ "$lines" -ge 1 ] || { echo "CONFIG REWRITE wrote no loadmodule line, so this test proves nothing" >&2; exit 1; }
+              fdb_log "$replica's redis.conf has $lines loadmodule line(s) after CONFIG REWRITE"
+
+              fdb_crash_server "$NAMESPACE" "$replica"
+              # The start script writes the file afresh, and the module comes
+              # only from the command line.
+              lines="$(kubectl exec -n "$NAMESPACE" "$replica" -c falkordb -- \
+                sh -c 'grep -c "^loadmodule" /etc/redis/redis.conf || true')"
+              [ "$lines" -eq 0 ] || { echo "$replica's rebuilt redis.conf still has $lines loadmodule line(s)" >&2; exit 1; }
+              fdb_retry "$replica to report slave" \
+                fdb_assert_role "$NAMESPACE" "$replica" slave
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_verify_keys "$NAMESPACE" "$replica" e2e-restart 20
+              fdb_assert_restarts_settled "$NAMESPACE" "$replica"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-restart
+            tail: 200
+
+    - name: the primary restarted in place comes back without a second primary
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              state="$(fdb_state_dir)"
+              old_primary="$(cat "$state/primary")"
+              survivor="$(cat "$state/replica")"
+
+              fdb_cli "$NAMESPACE" "$old_primary" CONFIG REWRITE >/dev/null
+              fdb_crash_server "$NAMESPACE" "$old_primary"
+
+              # The kubelet restarts the container in a second or two, sooner
+              # than sentinel's down-after-milliseconds (5 s), so sentinel may
+              # or may not have failed it over. Either way exactly one pod may
+              # be the primary: the one sentinel names, and the label with it.
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-restart falkordb 1 1
+              fdb_retry "the primary label to follow sentinel" \
+                fdb_assert_primary_label_follows_sentinel "$NAMESPACE" fdb-restart falkordb
+              primary="$(fdb_primary "$NAMESPACE" fdb-restart falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-restart falkordb secondary)"
+              fdb_retry "$primary to report master" \
+                fdb_assert_role "$NAMESPACE" "$primary" master
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_log "after the restart $primary is the primary and $replica its replica (the primary was $old_primary)"
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-restart 20
+              fdb_assert_restarts_settled "$NAMESPACE" "$old_primary"
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-restart
+            tail: 200
+      finally:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              fdb_clean_state_dir

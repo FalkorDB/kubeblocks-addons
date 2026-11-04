@@ -173,9 +173,14 @@ spec:
 
               # SENTINEL RESET drops the master and everything learned about it.
               # Rediscovery is asynchronous, so retry rather than reading once.
+              # It also forgets the replicas, which a sentinel only learns of
+              # again from the master's INFO, every 10 s. A primary that goes
+              # down before then leaves it nothing to promote.
               for pod in $(fdb_pods "$NAMESPACE" fdb-rops falkordb-sent); do
                 fdb_retry "$pod to monitor the master again" \
                   fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+                fdb_retry "$pod to know the replica again" \
+                  fdb_assert_sentinel_knows_replicas "$NAMESPACE" "$pod" fdb-rops-falkordb 1
               done
 
               # Monitoring the master again is necessary but not sufficient: the
