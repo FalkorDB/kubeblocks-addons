@@ -821,6 +821,11 @@ switchover_with_candidate() {
   local initial_master
   initial_master=$(check_redis_kernel_status) || return 1
 
+  # set_redis_priorities saves each pod's current priority as the one to restore,
+  # so a pod that could not be read must have the configured one back first. It
+  # needs every pod to answer anyway.
+  restore_unread_priorities || return 1
+
   local redis_get_cmd="CONFIG GET replica-priority"
   local redis_set_switchover_cmd="CONFIG SET replica-priority 1"
   local redis_set_lowest_priority_cmd="CONFIG SET replica-priority 100"

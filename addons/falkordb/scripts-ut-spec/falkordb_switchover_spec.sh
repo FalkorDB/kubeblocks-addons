@@ -1024,6 +1024,62 @@ master_host:redis-master"
       End
     End
 
+    # set_redis_priorities saves the priorities it finds, so a pod read only then
+    # would have its leftover temporary priority saved as the one to restore.
+    Context "unread priorities before a switchover with a candidate"
+      It "restores a pod it could not read before setting the priorities"
+        reads_of_redis3="$SHELLSPEC_TMPBASE/reads_of_redis3"
+        echo 0 > "$reads_of_redis3"
+        redis_config_get() {
+          if [ "$1" = "redis3" ]; then
+            local n; n=$(( $(cat "$reads_of_redis3") + 1 )); echo "$n" > "$reads_of_redis3"
+            [ "$n" -eq 1 ] && return 1
+            printf 'replica-priority\n1\n'
+            return 0
+          fi
+          printf 'replica-priority\n100\n'
+        }
+        execute_sub_command() { echo "$1 $4"; }
+        check_redis_role() {
+          if [ "$1" = "redis1" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        check_redis_kernel_status() { echo "redis1"; }
+        set_redis_priorities() { echo "set_redis_priorities after restoring"; }
+        failover_with_writes_paused() { :; }
+        check_switchover_result() { :; }
+        recover_redis_priorities() { :; }
+        When call switchover_with_candidate
+        The status should be success
+        The stderr should include "could not read the replica-priority of redis3"
+        The line 2 of stdout should equal "redis3 CONFIG SET replica-priority 100"
+        The stdout should include "set_redis_priorities after restoring"
+      End
+
+      It "does not set the priorities while a pod it could not read stays unread"
+        redis_config_get() {
+          [ "$1" = "redis3" ] && return 1
+          printf 'replica-priority\n100\n'
+        }
+        check_redis_role() {
+          if [ "$1" = "redis1" ]; then
+            echo "primary"
+          else
+            echo "secondary"
+          fi
+        }
+        check_redis_kernel_status() { echo "redis1"; }
+        set_redis_priorities() { echo "set_redis_priorities called"; }
+        When call switchover_with_candidate
+        The status should be failure
+        The stderr should include "could not restore the configured replica-priority on redis3"
+        The stdout should not include "set_redis_priorities called"
+      End
+    End
+
     # Before a failover with no candidate, a pod whose priority could not be read
     # is tried again; one that still does not answer does not stop the hand-over.
     Context "unread priorities before a failover with no candidate"
