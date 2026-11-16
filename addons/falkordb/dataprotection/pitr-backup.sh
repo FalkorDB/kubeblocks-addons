@@ -325,8 +325,11 @@ function save_backup_status() {
 # leave the window undecided: every live shard read already decides it, and
 # so do readable ranges that share no time, or too few ranges to cover every
 # shard even if each unreadable one were a live shard not read this round. A
-# live shard read as covering no time, or stale, is decided: no unreadable
-# range (a removed shard's, say) can stand in for it. An undecided round leaves the status
+# live shard whose fresh range was read, even one covering no time, is
+# decided: no unreadable range (a removed shard's, say) can stand in for it.
+# A stale one is not: the shard's target may have moved, leaving the old
+# directory behind with the same primary, and its replacement be the one
+# that could not be read. An undecided round leaves the status
 # as it is, for RANGE_STALE_SECONDS after the last round that decided it: a
 # file left cut short for good (its archiver stopped mid-write) then counts as
 # no range, as a stopped archiver's whole file would by then.
@@ -446,11 +449,11 @@ function save_cluster_backup_status() {
       DP_log "save_cluster_backup_status: ignoring ${target}, whose primary ${id} owns no slots"
       continue
     fi
-    [[ "${seen}" == *" ${id} "* ]] || seen="${seen}${id} "
     if [ $((now - published)) -gt "${RANGE_STALE_SECONDS}" ]; then
       DP_log "save_cluster_backup_status: ignoring ${target}, whose archiver last published at ${published}"
       continue
     fi
+    [[ "${seen}" == *" ${id} "* ]] || seen="${seen}${id} "
     # a shard with no archive covers no time
     [ "${end}" -eq 0 ] && continue
     [[ "${covered}" == *" ${id} "* ]] || covered="${covered}${id} "

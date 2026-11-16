@@ -946,6 +946,23 @@ SET a 1"
       The result of function backup_info should include '"timeRange":null'
     End
 
+    It "keeps the status when a shard's target moved and its new range cannot be read"
+      prepare_sharded_backup
+      # the target of shard c1 moved: its old directory stopped publishing, and
+      # the new one, shard-e, cannot be read
+      echo "1200 1950 1500 c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-e"
+      echo "1200 1950 1995 c1" > "$STUB_REMOTE/fdb-aof/shard-e/kb-archive-range"
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      printf '/fdb-aof/shard-e/kb-archive-range fail\n%.0s' 1 2 3 > "$STUB_RANGE_PULLS"
+      echo "$PRIOR_STATUS" > "$DP_BACKUP_INFO_FILE"
+      When run run_backup
+      The status should be success
+      The output should include "ignoring shard-c, whose archiver last published at 1500"
+      The output should include "cannot read the range of shard-e, leaving the status as it is"
+      The contents of file "$DP_BACKUP_INFO_FILE" should equal "$PRIOR_STATUS"
+    End
+
     It "does not let a removed shard's unreadable range run out a live shard's grace period"
       prepare_sharded_backup
       # a shard removed by a scale-in whose range file was left cut short for good
