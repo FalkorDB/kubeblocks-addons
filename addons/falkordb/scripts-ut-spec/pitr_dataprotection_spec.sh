@@ -915,6 +915,44 @@ SET a 1"
       The result of function backup_info should include '"timeRange":null'
     End
 
+    It "withdraws the window when the ranges it can read call for it, whatever it cannot read"
+      prepare_sharded_backup
+      # shard-b's archives are gone: no time can be restored, whatever shard-c says
+      echo "0 0 1990 b1" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      printf '/fdb-aof/shard-c/kb-archive-range fail\n%.0s' 1 2 3 > "$STUB_RANGE_PULLS"
+      echo "$PRIOR_STATUS" > "$DP_BACKUP_INFO_FILE"
+      When run run_backup
+      The status should be success
+      The output should not include "leaving the status as it is"
+      The output should include "1 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "does not let a removed shard's unreadable range run out a live shard's grace period"
+      prepare_sharded_backup
+      # a shard removed by a scale-in whose range file was left cut short for good
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
+      echo "800 1500 1995 x9" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      printf '/fdb-aof/shard-d/kb-archive-range partial\n%.0s' 1 2 3 4 5 6 7 8 9 > "$STUB_RANGE_PULLS"
+      # three rounds at 2000, 2250 and 2400, the live shards publishing each
+      # time; in the last, one read of shard-c fails. 2400 is past the grace
+      # period from the start, not from the round at 2250 that read every live shard.
+      export STUB_ROUNDS=3
+      export STUB_ON_SLEEP='
+        if [ "$(wc -l < "$STUB_SLEEP_LOG")" -eq 1 ]; then t=2250; else t=2400
+          printf "/fdb-aof/shard-c/kb-archive-range fail\n%.0s" 1 2 3 >> "$STUB_RANGE_PULLS"; fi
+        echo "$t" > "$STUB_CLOCK_FILE"
+        echo "900 1800 $t b1" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
+        echo "1200 1950 $t c1" > "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"'
+      When run run_backup
+      The status should be success
+      The output should include "cannot read the range of shard-c shard-d, leaving the status as it is"
+      The output should not include "has not been readable"
+      The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
+    End
+
     It "claims no time for its shard while the live AOF cannot be uploaded"
       prepare_sharded_backup
       export STUB_PUSH_RC=42

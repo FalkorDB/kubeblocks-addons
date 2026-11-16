@@ -320,11 +320,14 @@ function save_backup_status() {
 # serve a read that fails, or a part of the line, and taken as "this shard has
 # no range" that would withdraw the window for a round. KubeBlocks checks a
 # running Restore's time against the window on every reconcile and fails the
-# Restore for good when it is gone, so a read that is not whole is retried,
-# and a round that still cannot read every range leaves the status as it is.
-# Only for RANGE_STALE_SECONDS after the last round that read them all: a file
-# left cut short for good (its archiver stopped mid-write) then counts as no
-# range, as a stopped archiver's whole file would by then.
+# Restore for good when it is gone, so a read that is not whole is retried.
+# A range that still cannot be read only matters when the ranges that could
+# leave the window undecided: every live shard read already decides it, and
+# so do readable ranges that share no time, or too few ranges to cover every
+# shard even if each unreadable one did. An undecided round leaves the status
+# as it is, for RANGE_STALE_SECONDS after the last round that decided it: a
+# file left cut short for good (its archiver stopped mid-write) then counts as
+# no range, as a stopped archiver's whole file would by then.
 ARCHIVE_RANGE_FILE="kb-archive-range"
 CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
 RANGE_STALE_SECONDS=${RANGE_STALE_SECONDS:-300}
@@ -407,7 +410,7 @@ function save_cluster_backup_status() {
   local root
   root=$(dirname "${DP_BACKUP_BASE_PATH}")
   local shard_ids shards targets target range start end published id now
-  local covered=" " cluster_start=0 cluster_end=0 extras="" all_read=true
+  local covered=" " cluster_start=0 cluster_end=0 extras="" unreadable=""
   now=$(date +%s)
   shard_ids=" $(cluster_shard_ids | tr '\n' ' ')"
   shards=$(printf '%s' "${shard_ids}" | wc -w | tr -d ' ')
@@ -428,14 +431,8 @@ function save_cluster_backup_status() {
     0) ;;
     1) continue ;;
     *)
-      # withdrawing the window for a read that failed could fail a running
-      # restore: leave the status as it is until a round reads every range
-      if [ $((now - global_cluster_status_read_time)) -le "${RANGE_STALE_SECONDS}" ]; then
-        DP_error_log "save_cluster_backup_status: cannot read the range of ${target}, leaving the status as it is"
-        return
-      fi
-      DP_error_log "save_cluster_backup_status: the range of ${target} has not been readable since ${global_cluster_status_read_time}, counting it as none"
-      all_read=false
+      # decided once every range that could be read is in
+      unreadable="${unreadable} ${target}"
       continue
       ;;
     esac
@@ -458,9 +455,21 @@ function save_cluster_backup_status() {
     { [ "${cluster_end}" -eq 0 ] || [ "${end}" -lt "${cluster_end}" ]; } && cluster_end=${end}
     extras="${extras:+${extras},}{\"shard\":\"${target}\",\"start\":\"$(date -u -d @"${start}" +%Y-%m-%dT%H:%M:%SZ)\",\"end\":\"$(date -u -d @"${end}" +%Y-%m-%dT%H:%M:%SZ)\"}"
   done
-  [ "${all_read}" = true ] && global_cluster_status_read_time=${now}
-  local ranges
+  local ranges unread
   ranges=$(printf '%s' "${covered}" | wc -w | tr -d ' ')
+  unread=$(printf '%s' "${unreadable}" | wc -w | tr -d ' ')
+  if [ "${unread}" -eq 0 ] || [ "${ranges}" -ge "${shards}" ] ||
+    [ $((ranges + unread)) -lt "${shards}" ] ||
+    { [ "${ranges}" -gt 0 ] && [ "${cluster_start}" -gt "${cluster_end}" ]; }; then
+    global_cluster_status_read_time=${now}
+  elif [ $((now - global_cluster_status_read_time)) -le "${RANGE_STALE_SECONDS}" ]; then
+    # Withdrawing the window over a read that failed could fail a running
+    # restore, and the ranges read do not call for it: leave the status as it is.
+    DP_error_log "save_cluster_backup_status: cannot read the range of${unreadable}, leaving the status as it is"
+    return
+  else
+    DP_error_log "save_cluster_backup_status: the range of${unreadable} has not been readable since ${global_cluster_status_read_time}, counting it as none"
+  fi
   local total_size
   total_size=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed stat / | grep TotalSize | awk '{print $2}')
   if [ "${shards}" -eq 0 ] || [ "${ranges}" -lt "${shards}" ] || [ "${cluster_start}" -gt "${cluster_end}" ]; then
