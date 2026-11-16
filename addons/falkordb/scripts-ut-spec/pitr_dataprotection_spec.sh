@@ -17,11 +17,16 @@ Describe "FalkorDB PITR dataprotection scripts"
 
     # `datasafed list|push|pull|rm|stat` over the directory $STUB_REMOTE.
     # STUB_PUSH_RC / STUB_PULL_RC / STUB_RM_RC make push / pull / rm fail; STUB_PUSH_FAIL_ONCE
-    # fails only the first push whose remote path contains it.
+    # fails only the first push whose remote path contains it. STUB_RANGE_PULLS, a
+    # file of lines "<path> fail|partial", serves one read of the remote path
+    # <path> per line as given, in order, before reads of it go through:
+    # "fail" fails it, "partial" gives the first half of the file, as a read
+    # while another archiver rewrites the file can.
     cat > "$stub_dir/datasafed" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$STUB_DATASAFED_LOG"
 # paths are relative to DATASAFED_BACKEND_BASE_PATH, as in the real datasafed
+work_root=$STUB_REMOTE
 STUB_REMOTE="$STUB_REMOTE${DATASAFED_BACKEND_BASE_PATH%/}"
 mkdir -p "$STUB_REMOTE"
 cmd=$1; shift
@@ -46,6 +51,7 @@ list)
   elif $dirs_only; then
     ls -p | grep '/$'
   else
+    cd "./${path}" 2>/dev/null || exit 1
     ls -p
   fi
   ;;
@@ -68,6 +74,17 @@ push)
 pull)
   [ "$1" = "-d" ] && shift 2
   src=$STUB_REMOTE/$1 dst=$2
+  rel=${src#"$work_root"}
+  if [ -n "$STUB_RANGE_PULLS" ] && [ -s "$STUB_RANGE_PULLS" ]; then
+    line=$(grep -n -F -m 1 "$rel " "$STUB_RANGE_PULLS")
+    if [ -n "$line" ]; then
+      sed -i.bak "${line%%:*}d" "$STUB_RANGE_PULLS"
+      case "${line##* }" in
+      fail) exit 1 ;;
+      partial) head -c $(($(wc -c < "$src") / 2)) "$src"; exit 0 ;;
+      esac
+    fi
+  fi
   if [ "$dst" = "-" ]; then
     cat "$src"
   elif [ "${STUB_PULL_RC:-0}" -eq 0 ]; then
@@ -220,7 +237,8 @@ EOF
       STUB_ON_SLEEP STUB_FAILED_PRIMARY_SLOTS PITR_LOAD_TIMEOUT_SECONDS \
       PURGE_INTERVAL_SECONDS STUB_SERVER_IGNORE_TERM PITR_STOP_TIMEOUT_SECONDS \
       STUB_CHECK_AOF_RC STUB_MYSELF_REPLICA STUB_LIST_RC STUB_TOTAL_SIZE STUB_CLUSTER_NODES_ERR \
-      STATUS_INTERVAL_SECONDS
+      STATUS_INTERVAL_SECONDS STUB_RANGE_PULLS RANGE_READ_ATTEMPTS
+    export RANGE_READ_RETRY_SECONDS=0
 
     # The ActionSets prepend common-scripts.sh (and switch-data-dir.sh for
     # restore), each part on its own lines; common-scripts.sh has no final newline.
@@ -826,6 +844,49 @@ SET a 1"
       When run run_backup
       The status should be success
       The output should include "they share no time yet"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
+    It "leaves the status alone while a shard's range cannot be read"
+      prepare_sharded_backup
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      printf '/fdb-aof/shard-c/kb-archive-range fail\n%.0s' 1 2 3 > "$STUB_RANGE_PULLS"
+      When run run_backup
+      The status should be success
+      The output should include "ERROR: save_cluster_backup_status: cannot read the range of shard-c, leaving the status as it is"
+      The output should not include "shards have archived"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
+    It "does not take a range read while it is rewritten for the whole range"
+      prepare_sharded_backup
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      # half of "1200 1950 1990 c1": a primary id cut short would look like a
+      # shard removed by a scale-in, and a time cut short like a stale archiver
+      printf '/fdb-aof/shard-c/kb-archive-range partial\n%.0s' 1 2 3 > "$STUB_RANGE_PULLS"
+      When run run_backup
+      The status should be success
+      The output should include "cannot read the range of shard-c, leaving the status as it is"
+      The output should not include "ignoring shard-c"
+      The path "$DP_BACKUP_INFO_FILE" should not be exist
+    End
+
+    It "reports the window when a range read succeeds on a retry"
+      prepare_sharded_backup
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      printf '/fdb-aof/shard-b/kb-archive-range fail\n/fdb-aof/shard-b/kb-archive-range partial\n' > "$STUB_RANGE_PULLS"
+      When run run_backup
+      The status should be success
+      The output should not include "cannot read the range"
+      The result of function backup_info should include '"timeRange":{"start":"T1200","end":"T1800"}'
+    End
+
+    It "withdraws the window while a live shard has published no range"
+      prepare_sharded_backup
+      rm "$STUB_REMOTE/fdb-aof/shard-c/kb-archive-range"
+      When run run_backup
+      The status should be success
+      The output should include "2 of 3 shards have archived"
       The result of function backup_info should include '"timeRange":null'
     End
 

@@ -314,9 +314,19 @@ function save_backup_status() {
 # scale-in (its directory stays in the Backup) owns no slots and is ignored, and
 # a live shard with no archive, or whose archiver stopped (its file is older than
 # RANGE_STALE_SECONDS), withdraws the window.
+#
+# The archivers start together and keep the same interval, so one rewrites its
+# file while the others read it. A repository that writes in place can then
+# serve a read that fails, or a part of the line, and taken as "this shard has
+# no range" that would withdraw the window for a round. KubeBlocks checks a
+# running Restore's time against the window on every reconcile and fails the
+# Restore for good when it is gone, so a read that is not whole is retried,
+# and a round that still cannot read every range leaves the status as it is.
 ARCHIVE_RANGE_FILE="kb-archive-range"
 CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
 RANGE_STALE_SECONDS=${RANGE_STALE_SECONDS:-300}
+RANGE_READ_ATTEMPTS=${RANGE_READ_ATTEMPTS:-3}
+RANGE_READ_RETRY_SECONDS=${RANGE_READ_RETRY_SECONDS:-1}
 AOF_WRITE_DELAY_SECONDS=${AOF_WRITE_DELAY_SECONDS:-3}
 global_cluster_status_time=0
 
@@ -360,6 +370,34 @@ function shard_primary_id() {
     awk '$3 ~ /(^|,)myself(,|$)/ { print ($3 ~ /(^|,)master(,|$)/) ? $1 : $4; exit }'
 }
 
+# The range a shard's archiver published, as "<start> <end> <published at> <id>".
+# Fails with 1 when the shard has published none, and with 2 when the file is
+# there but could not be read whole. publish_archive_range ends the line with
+# a newline, and only a whole read ends with one.
+function read_archive_range() {
+  local root=$1 target=$2 raw attempt=1
+  while true; do
+    if raw=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed pull "${target}/${ARCHIVE_RANGE_FILE}" - 2>/dev/null && echo .); then
+      raw=${raw%.}
+      if [[ "${raw}" == *$'\n' && "${raw%$'\n'}" != *$'\n'* ]]; then
+        printf '%s\n' "${raw%$'\n'}"
+        return 0
+      fi
+    fi
+    [ "${attempt}" -ge "${RANGE_READ_ATTEMPTS}" ] && break
+    attempt=$((attempt + 1))
+    [ "${RANGE_READ_RETRY_SECONDS}" -gt 0 ] && sleep "${RANGE_READ_RETRY_SECONDS}"
+  done
+  # A shard whose archiver has not published yet has no file: only a listing
+  # that shows none tells that apart from a read that failed.
+  local files
+  if files=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed list "${target}/") &&
+    ! grep -Fxq "${ARCHIVE_RANGE_FILE}" <<<"${files}"; then
+    return 1
+  fi
+  return 2
+}
+
 function save_cluster_backup_status() {
   local root
   root=$(dirname "${DP_BACKUP_BASE_PATH}")
@@ -380,7 +418,17 @@ function save_cluster_backup_status() {
   fi
   for target in ${targets}; do
     target=${target%/}
-    range=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed pull "${target}/${ARCHIVE_RANGE_FILE}" - 2>/dev/null) || continue
+    range=$(read_archive_range "${root}" "${target}")
+    case $? in
+    0) ;;
+    1) continue ;;
+    *)
+      # withdrawing the window for a read that failed could fail a running
+      # restore: leave the status as it is until a round reads every range
+      DP_error_log "save_cluster_backup_status: cannot read the range of ${target}, leaving the status as it is"
+      return
+      ;;
+    esac
     read -r start end published id <<<"${range}"
     if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ && "${published}" =~ ^[0-9]+$ && -n "${id}" ]]; then
       continue
