@@ -51,8 +51,9 @@ list)
   elif $dirs_only; then
     ls -p | grep '/$'
   else
+    # like datasafed, entries of a directory other than the root carry its path
     cd "./${path}" 2>/dev/null || exit 1
-    ls -p
+    ls -p | sed "s|^|${path:+${path%/}/}|"
   fi
   ;;
 push)
@@ -286,6 +287,10 @@ EOF
 
   # This archiver is shard-a of a three shard Backup; shard-b and shard-c
   # published their ranges earlier.
+  # what an earlier round reported, which a round that cannot read every
+  # range must leave as it is
+  PRIOR_STATUS='{"totalSize":"0","extras":[],"timeRange":{"start":"T1200","end":"T1700"}}'
+
   prepare_sharded_backup() {
     export MODE=cluster
     export CLUSTER_STATUS_INTERVAL_SECONDS=0
@@ -851,11 +856,12 @@ SET a 1"
       prepare_sharded_backup
       export STUB_RANGE_PULLS="$work_dir/range-pulls"
       printf '/fdb-aof/shard-c/kb-archive-range fail\n%.0s' 1 2 3 > "$STUB_RANGE_PULLS"
+      echo "$PRIOR_STATUS" > "$DP_BACKUP_INFO_FILE"
       When run run_backup
       The status should be success
       The output should include "ERROR: save_cluster_backup_status: cannot read the range of shard-c, leaving the status as it is"
       The output should not include "shards have archived"
-      The path "$DP_BACKUP_INFO_FILE" should not be exist
+      The contents of file "$DP_BACKUP_INFO_FILE" should equal "$PRIOR_STATUS"
     End
 
     It "does not take a range read while it is rewritten for the whole range"
@@ -864,11 +870,30 @@ SET a 1"
       # half of "1200 1950 1990 c1": a primary id cut short would look like a
       # shard removed by a scale-in, and a time cut short like a stale archiver
       printf '/fdb-aof/shard-c/kb-archive-range partial\n%.0s' 1 2 3 > "$STUB_RANGE_PULLS"
+      echo "$PRIOR_STATUS" > "$DP_BACKUP_INFO_FILE"
       When run run_backup
       The status should be success
       The output should include "cannot read the range of shard-c, leaving the status as it is"
       The output should not include "ignoring shard-c"
-      The path "$DP_BACKUP_INFO_FILE" should not be exist
+      The contents of file "$DP_BACKUP_INFO_FILE" should equal "$PRIOR_STATUS"
+    End
+
+    It "stops keeping the status once a range has been unreadable for RANGE_STALE_SECONDS"
+      prepare_sharded_backup
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      # cut short for good, as by an archiver that stopped mid-write
+      printf '/fdb-aof/shard-c/kb-archive-range partial\n%.0s' 1 2 3 4 5 6 > "$STUB_RANGE_PULLS"
+      echo "$PRIOR_STATUS" > "$DP_BACKUP_INFO_FILE"
+      # the second round is 301s after the archiver started, the last time
+      # it could count on every range; shard-b published again meanwhile
+      export STUB_ROUNDS=2
+      export STUB_ON_SLEEP='echo 2301 > "$STUB_CLOCK_FILE"; echo "900 1800 2295 b1" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"'
+      When run run_backup
+      The status should be success
+      The output should include "cannot read the range of shard-c, leaving the status as it is"
+      The output should include "the range of shard-c has not been readable since 2000, counting it as none"
+      The output should include "2 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
     End
 
     It "reports the window when a range read succeeds on a retry"
