@@ -314,11 +314,33 @@ function save_backup_status() {
 # scale-in (its directory stays in the Backup) owns no slots and is ignored, and
 # a live shard with no archive, or whose archiver stopped (its file is older than
 # RANGE_STALE_SECONDS), withdraws the window.
+#
+# The archivers start together and keep the same interval, so one rewrites its
+# file while the others read it. A repository that writes in place can then
+# serve a read that fails, or a part of the line, and taken as "this shard has
+# no range" that would withdraw the window for a round. KubeBlocks checks a
+# running Restore's time against the window on every reconcile and fails the
+# Restore for good when it is gone, so a read that is not whole is retried.
+# A range that still cannot be read only matters when the ranges that could
+# leave the window undecided: every live shard read already decides it, and
+# so do readable ranges that share no time, or too few ranges to cover every
+# shard even if each unreadable one were a live shard not read this round. A
+# live shard whose fresh range was read, even one covering no time, is
+# decided: no unreadable range (a removed shard's, say) can stand in for it.
+# A stale one is not: the shard's target may have moved, leaving the old
+# directory behind with the same primary, and its replacement be the one
+# that could not be read. An undecided round leaves the status
+# as it is, for RANGE_STALE_SECONDS after the last round that decided it: a
+# file left cut short for good (its archiver stopped mid-write) then counts as
+# no range, as a stopped archiver's whole file would by then.
 ARCHIVE_RANGE_FILE="kb-archive-range"
 CLUSTER_STATUS_INTERVAL_SECONDS=${CLUSTER_STATUS_INTERVAL_SECONDS:-15}
 RANGE_STALE_SECONDS=${RANGE_STALE_SECONDS:-300}
+RANGE_READ_ATTEMPTS=${RANGE_READ_ATTEMPTS:-3}
+RANGE_READ_RETRY_SECONDS=${RANGE_READ_RETRY_SECONDS:-1}
 AOF_WRITE_DELAY_SECONDS=${AOF_WRITE_DELAY_SECONDS:-3}
 global_cluster_status_time=0
+global_cluster_status_read_time=$(date +%s)
 
 function publish_archive_range() {
   local archives start end
@@ -360,11 +382,40 @@ function shard_primary_id() {
     awk '$3 ~ /(^|,)myself(,|$)/ { print ($3 ~ /(^|,)master(,|$)/) ? $1 : $4; exit }'
 }
 
+# The range a shard's archiver published, as "<start> <end> <published at> <id>".
+# Fails with 1 when the shard has published none, and with 2 when the file is
+# there but could not be read whole. publish_archive_range ends the line with
+# a newline, and only a whole read ends with one.
+function read_archive_range() {
+  local root=$1 target=$2 raw attempt=1
+  while true; do
+    if raw=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed pull "${target}/${ARCHIVE_RANGE_FILE}" - 2>/dev/null && echo .); then
+      raw=${raw%.}
+      if [[ "${raw}" == *$'\n' && "${raw%$'\n'}" != *$'\n'* ]]; then
+        printf '%s\n' "${raw%$'\n'}"
+        return 0
+      fi
+    fi
+    [ "${attempt}" -ge "${RANGE_READ_ATTEMPTS}" ] && break
+    attempt=$((attempt + 1))
+    [ "${RANGE_READ_RETRY_SECONDS}" -gt 0 ] && sleep "${RANGE_READ_RETRY_SECONDS}"
+  done
+  # A shard whose archiver has not published yet has no file: only a listing
+  # that shows none tells that apart from a read that failed. datasafed lists
+  # a directory's entries with the directory in their path.
+  local files
+  if files=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed list "${target}/") &&
+    ! sed 's|.*/||' <<<"${files}" | grep -Fxq "${ARCHIVE_RANGE_FILE}"; then
+    return 1
+  fi
+  return 2
+}
+
 function save_cluster_backup_status() {
   local root
   root=$(dirname "${DP_BACKUP_BASE_PATH}")
   local shard_ids shards targets target range start end published id now
-  local covered=" " cluster_start=0 cluster_end=0 extras=""
+  local covered=" " seen=" " cluster_start=0 cluster_end=0 extras="" unreadable=""
   now=$(date +%s)
   shard_ids=" $(cluster_shard_ids | tr '\n' ' ')"
   shards=$(printf '%s' "${shard_ids}" | wc -w | tr -d ' ')
@@ -380,7 +431,16 @@ function save_cluster_backup_status() {
   fi
   for target in ${targets}; do
     target=${target%/}
-    range=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed pull "${target}/${ARCHIVE_RANGE_FILE}" - 2>/dev/null) || continue
+    range=$(read_archive_range "${root}" "${target}")
+    case $? in
+    0) ;;
+    1) continue ;;
+    *)
+      # decided once every range that could be read is in
+      unreadable="${unreadable} ${target}"
+      continue
+      ;;
+    esac
     read -r start end published id <<<"${range}"
     if ! [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ && "${published}" =~ ^[0-9]+$ && -n "${id}" ]]; then
       continue
@@ -393,6 +453,7 @@ function save_cluster_backup_status() {
       DP_log "save_cluster_backup_status: ignoring ${target}, whose archiver last published at ${published}"
       continue
     fi
+    [[ "${seen}" == *" ${id} "* ]] || seen="${seen}${id} "
     # a shard with no archive covers no time
     [ "${end}" -eq 0 ] && continue
     [[ "${covered}" == *" ${id} "* ]] || covered="${covered}${id} "
@@ -400,8 +461,24 @@ function save_cluster_backup_status() {
     { [ "${cluster_end}" -eq 0 ] || [ "${end}" -lt "${cluster_end}" ]; } && cluster_end=${end}
     extras="${extras:+${extras},}{\"shard\":\"${target}\",\"start\":\"$(date -u -d @"${start}" +%Y-%m-%dT%H:%M:%SZ)\",\"end\":\"$(date -u -d @"${end}" +%Y-%m-%dT%H:%M:%SZ)\"}"
   done
-  local ranges
+  local ranges unread unseen
   ranges=$(printf '%s' "${covered}" | wc -w | tr -d ' ')
+  unread=$(printf '%s' "${unreadable}" | wc -w | tr -d ' ')
+  # only live shards no readable range came from can be behind an unreadable one
+  unseen=$((shards - $(printf '%s' "${seen}" | wc -w | tr -d ' ')))
+  [ "${unread}" -gt "${unseen}" ] && unread=${unseen}
+  if [ "${unread}" -eq 0 ] || [ "${ranges}" -ge "${shards}" ] ||
+    [ $((ranges + unread)) -lt "${shards}" ] ||
+    { [ "${ranges}" -gt 0 ] && [ "${cluster_start}" -gt "${cluster_end}" ]; }; then
+    global_cluster_status_read_time=${now}
+  elif [ $((now - global_cluster_status_read_time)) -le "${RANGE_STALE_SECONDS}" ]; then
+    # Withdrawing the window over a read that failed could fail a running
+    # restore, and the ranges read do not call for it: leave the status as it is.
+    DP_error_log "save_cluster_backup_status: cannot read the range of${unreadable}, leaving the status as it is"
+    return
+  else
+    DP_error_log "save_cluster_backup_status: the range of${unreadable} has not been readable since ${global_cluster_status_read_time}, counting it as none"
+  fi
   local total_size
   total_size=$(DATASAFED_BACKEND_BASE_PATH="${root}" datasafed stat / | grep TotalSize | awk '{print $2}')
   if [ "${shards}" -eq 0 ] || [ "${ranges}" -lt "${shards}" ] || [ "${cluster_start}" -gt "${cluster_end}" ]; then
