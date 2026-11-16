@@ -929,6 +929,23 @@ SET a 1"
       The result of function backup_info should include '"timeRange":null'
     End
 
+    It "does not let a removed shard's unreadable range stand in for a live shard read as covering none"
+      prepare_sharded_backup
+      echo "0 0 1990 b1" > "$STUB_REMOTE/fdb-aof/shard-b/kb-archive-range"
+      # removed by a scale-in, its range left cut short for good: whatever it
+      # holds, it cannot be shard-b's, which was read
+      mkdir -p "$STUB_REMOTE/fdb-aof/shard-d"
+      echo "800 1900 1995 x9" > "$STUB_REMOTE/fdb-aof/shard-d/kb-archive-range"
+      export STUB_RANGE_PULLS="$work_dir/range-pulls"
+      printf '/fdb-aof/shard-d/kb-archive-range partial\n%.0s' 1 2 3 > "$STUB_RANGE_PULLS"
+      echo "$PRIOR_STATUS" > "$DP_BACKUP_INFO_FILE"
+      When run run_backup
+      The status should be success
+      The output should not include "leaving the status as it is"
+      The output should include "2 of 3 shards have archived"
+      The result of function backup_info should include '"timeRange":null'
+    End
+
     It "does not let a removed shard's unreadable range run out a live shard's grace period"
       prepare_sharded_backup
       # a shard removed by a scale-in whose range file was left cut short for good

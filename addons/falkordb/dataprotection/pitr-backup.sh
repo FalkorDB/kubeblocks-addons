@@ -324,7 +324,9 @@ function save_backup_status() {
 # A range that still cannot be read only matters when the ranges that could
 # leave the window undecided: every live shard read already decides it, and
 # so do readable ranges that share no time, or too few ranges to cover every
-# shard even if each unreadable one did. An undecided round leaves the status
+# shard even if each unreadable one were a live shard not read this round. A
+# live shard read as covering no time, or stale, is decided: no unreadable
+# range (a removed shard's, say) can stand in for it. An undecided round leaves the status
 # as it is, for RANGE_STALE_SECONDS after the last round that decided it: a
 # file left cut short for good (its archiver stopped mid-write) then counts as
 # no range, as a stopped archiver's whole file would by then.
@@ -410,7 +412,7 @@ function save_cluster_backup_status() {
   local root
   root=$(dirname "${DP_BACKUP_BASE_PATH}")
   local shard_ids shards targets target range start end published id now
-  local covered=" " cluster_start=0 cluster_end=0 extras="" unreadable=""
+  local covered=" " seen=" " cluster_start=0 cluster_end=0 extras="" unreadable=""
   now=$(date +%s)
   shard_ids=" $(cluster_shard_ids | tr '\n' ' ')"
   shards=$(printf '%s' "${shard_ids}" | wc -w | tr -d ' ')
@@ -444,6 +446,7 @@ function save_cluster_backup_status() {
       DP_log "save_cluster_backup_status: ignoring ${target}, whose primary ${id} owns no slots"
       continue
     fi
+    [[ "${seen}" == *" ${id} "* ]] || seen="${seen}${id} "
     if [ $((now - published)) -gt "${RANGE_STALE_SECONDS}" ]; then
       DP_log "save_cluster_backup_status: ignoring ${target}, whose archiver last published at ${published}"
       continue
@@ -455,9 +458,12 @@ function save_cluster_backup_status() {
     { [ "${cluster_end}" -eq 0 ] || [ "${end}" -lt "${cluster_end}" ]; } && cluster_end=${end}
     extras="${extras:+${extras},}{\"shard\":\"${target}\",\"start\":\"$(date -u -d @"${start}" +%Y-%m-%dT%H:%M:%SZ)\",\"end\":\"$(date -u -d @"${end}" +%Y-%m-%dT%H:%M:%SZ)\"}"
   done
-  local ranges unread
+  local ranges unread unseen
   ranges=$(printf '%s' "${covered}" | wc -w | tr -d ' ')
   unread=$(printf '%s' "${unreadable}" | wc -w | tr -d ' ')
+  # only live shards no readable range came from can be behind an unreadable one
+  unseen=$((shards - $(printf '%s' "${seen}" | wc -w | tr -d ' ')))
+  [ "${unread}" -gt "${unseen}" ] && unread=${unseen}
   if [ "${unread}" -eq 0 ] || [ "${ranges}" -ge "${shards}" ] ||
     [ $((ranges + unread)) -lt "${shards}" ] ||
     { [ "${ranges}" -gt 0 ] && [ "${cluster_start}" -gt "${cluster_end}" ]; }; then
