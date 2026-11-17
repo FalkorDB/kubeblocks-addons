@@ -1,5 +1,10 @@
 name: Release Chart Auto
 
+# Validates (lint + package) the FalkorDB chart after a merge. It never
+# publishes: releases are cut by manually dispatching "Release FalkorDB Chart"
+# with a new VERSION. Without VERSION the release job falls back to the stale
+# version in Chart.yaml, which used to overwrite an already published chart.
+
 on:
   pull_request_target:
     types:
@@ -14,6 +19,8 @@ jobs:
   release-chart:
     if: github.event.pull_request.merged == true
     uses: ./.github/workflows/release-chart.yml
+    with:
+      DRY_RUN: true
     permissions:
       contents: write
       packages: write

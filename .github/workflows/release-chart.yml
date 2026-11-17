@@ -62,6 +62,46 @@ jobs:
           echo "version=${version}" >> $GITHUB_OUTPUT
           echo "Chart version: ${version}"
 
+      - name: Log in to GitHub Container Registry
+        if: ${{ !inputs.DRY_RUN }}
+        run: |
+          echo "${{ github.token }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+
+      # A published chart version is immutable: never overwrite an existing
+      # tag, GitHub release or OCI artifact. In a dry run this only warns.
+      - name: Check version is not already released
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.DRY_RUN }}
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          TAG="falkordb-${version}"
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          found=()
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null 2>&1; then
+            found+=("git tag ${TAG}")
+          fi
+          if gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            found+=("GitHub release ${TAG}")
+          fi
+          if [[ "${DRY_RUN}" != "true" ]] && \
+             helm show chart "oci://ghcr.io/${REPO}/falkordb" --version "${version}" > /dev/null 2>&1; then
+            found+=("OCI chart ghcr.io/${REPO}/falkordb:${version}")
+          fi
+          if (( ${#found[@]} > 0 )); then
+            msg="Chart version ${version} is already released (${found[*]}). Pass a new VERSION; published versions are never overwritten."
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "::warning::${msg}"
+            else
+              echo "::error::${msg}"
+              exit 1
+            fi
+          else
+            echo "Version ${version} is not released yet."
+          fi
+
       - name: Update Chart.yaml version
         shell: bash
         run: |
@@ -93,12 +133,6 @@ jobs:
             --destination .cr-release-packages
           ls -la .cr-release-packages/
 
-      - name: Log in to GitHub Container Registry
-        if: ${{ !inputs.DRY_RUN }}
-        run: |
-          echo "${{ github.token }}" | helm registry login ghcr.io \
-            --username "${{ github.actor }}" --password-stdin
-
       - name: Push chart to GHCR (OCI)
         if: ${{ !inputs.DRY_RUN }}
         run: |
@@ -114,17 +148,9 @@ jobs:
         run: |
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           TAG="falkordb-${{ steps.version.outputs.version }}"
-          if gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "Release ${TAG} already exists, uploading assets only."
-            gh release upload "${TAG}" \
-              .cr-release-packages/*.tgz \
-              --repo "${{ github.repository }}" \
-              --clobber
-          else
-            NOTES="## FalkorDB Helm Chart ${{ steps.version.outputs.version }}"$'\n\n'"Install via OCI:"$'\n'"helm install falkordb oci://ghcr.io/${REPO}/falkordb --version ${{ steps.version.outputs.version }}"
-            gh release create "${TAG}" \
-              .cr-release-packages/*.tgz \
-              --repo "${{ github.repository }}" \
-              --title "FalkorDB Chart ${{ steps.version.outputs.version }}" \
-              --notes "${NOTES}"
-          fi
+          NOTES="## FalkorDB Helm Chart ${{ steps.version.outputs.version }}"$'\n\n'"Install via OCI:"$'\n'"helm install falkordb oci://ghcr.io/${REPO}/falkordb --version ${{ steps.version.outputs.version }}"
+          gh release create "${TAG}" \
+            .cr-release-packages/*.tgz \
+            --repo "${{ github.repository }}" \
+            --title "FalkorDB Chart ${{ steps.version.outputs.version }}" \
+            --notes "${NOTES}"
