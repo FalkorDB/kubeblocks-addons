@@ -180,15 +180,16 @@ EOF
     # `redis-check-aof --truncate-to-timestamp <t> <manifest>`: records its
     # arguments and cuts the manifest's line-based INCR fixtures at the first #TS:
     # after <t>, the way the real one cuts at an annotation between commands. Like
-    # the real one, it aborts on an INCR file that starts after <t>, and
-    # STUB_CHECK_AOF_RC fails it.
+    # the real one, it aborts on an INCR file that starts after <t>, and refuses
+    # to cut any INCR file but the last; STUB_CHECK_AOF_RC fails it.
     cat > "$stub_dir/redis-check-aof" <<'EOF'
 #!/bin/bash
 echo "$*" > "$STUB_CHECK_AOF_ARGS"
 [ "${STUB_CHECK_AOF_RC:-0}" -ne 0 ] && { echo "Bad file format" >&2; exit "$STUB_CHECK_AOF_RC"; }
 t=$2 dir=$(dirname "$3")
+last=$(awk '$6 == "i" { name = $2 } END { print name }' "$3")
 for f in $(awk '$6 == "i" { print $2 }' "$3"); do
-  f="$dir/$f"
+  name=$f f="$dir/$f"
   [ -f "$f" ] || { echo "AOF $f doesn't exist" >&2; exit 1; }
   first=$(head -n 1 "$f")
   if [ "${first#\#TS:}" != "$first" ] && [ "${first#\#TS:}" -gt "$t" ]; then
@@ -196,7 +197,12 @@ for f in $(awk '$6 == "i" { print $2 }' "$3"); do
     exit 1
   fi
   offset=$(grep -a -b -o '^#TS:[0-9]*' "$f" | awk -F: -v t="$t" '$3 + 0 > t + 0 { print $1; exit }')
-  [ -n "$offset" ] && head -c "$offset" "$f" > "$f.cut" && mv "$f.cut" "$f"
+  [ -n "$offset" ] || continue
+  if [ "$name" != "$last" ]; then
+    echo "Failed to truncate AOF $f to timestamp $t to offset $offset because it is not the last file."
+    exit 1
+  fi
+  head -c "$offset" "$f" > "$f.cut" && mv "$f.cut" "$f"
 done
 exit 0
 EOF

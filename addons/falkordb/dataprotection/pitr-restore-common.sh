@@ -57,7 +57,10 @@ function drop_incr_aof_after() {
     exit 1
   fi
   for name in "${dropped[@]}"; do
-    rm -f "$dir/$name"
+    if ! rm -f "$dir/$name"; then
+      DP_error_log "Failed to remove INCR AOF: $dir/$name"
+      exit 1
+    fi
   done
 }
 
