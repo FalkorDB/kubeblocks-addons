@@ -87,7 +87,9 @@ jobs:
         run: |
           TAG="falkordb-${VERSION}"
           REPO=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
-          OCI_REF="ghcr.io/${REPO}/falkordb:${VERSION}"
+          # Helm pushes "+" (build metadata) as "_" in OCI tags.
+          OCI_TAG="${VERSION//+/_}"
+          OCI_REF="ghcr.io/${REPO}/falkordb:${OCI_TAG}"
           found=()
           errors=()
 
@@ -120,7 +122,7 @@ jobs:
             code=$(curl -sS -o /dev/null -w '%{http_code}' --head \
               -H "Authorization: Bearer ${token}" \
               -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json" \
-              "https://ghcr.io/v2/${REPO}/falkordb/manifests/${VERSION}") || code="000"
+              "https://ghcr.io/v2/${REPO}/falkordb/manifests/${OCI_TAG}") || code="000"
             case "${code}" in
               200) found+=("OCI chart ${OCI_REF}") ;;
               404) ;;
