@@ -35,6 +35,12 @@ env:
 jobs:
   release-falkordb-chart:
     name: Release addons/falkordb
+    # Serialize every publishing run (any ref, any caller) from the
+    # "already released" check through the push, so two runs for the same
+    # VERSION cannot both pass the check. Dry runs never publish and run apart.
+    concurrency:
+      group: ${{ inputs.DRY_RUN && format('falkordb-chart-dry-run-{0}', github.run_id) || 'falkordb-chart-publish' }}
+      cancel-in-progress: false
     permissions:
       contents: write
       packages: write
@@ -69,37 +75,74 @@ jobs:
             --username "${{ github.actor }}" --password-stdin
 
       # A published chart version is immutable: never overwrite an existing
-      # tag, GitHub release or OCI artifact. In a dry run this only warns.
+      # tag, GitHub release or OCI artifact. Every probe fails closed: only a
+      # confirmed "not found" counts as absent; any other error stops the
+      # release. In a dry run, hits and probe errors only warn.
       - name: Check version is not already released
         env:
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ inputs.DRY_RUN }}
+          VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
-          version="${{ steps.version.outputs.version }}"
-          TAG="falkordb-${version}"
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          TAG="falkordb-${VERSION}"
+          REPO=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          OCI_REF="ghcr.io/${REPO}/falkordb:${VERSION}"
           found=()
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null 2>&1; then
-            found+=("git tag ${TAG}")
-          fi
-          if gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+          errors=()
+
+          # git tag: ls-remote --exit-code returns 2 when no ref matches.
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null || rc=$?
+          case "${rc}" in
+            0) found+=("git tag ${TAG}") ;;
+            2) ;;
+            *) errors+=("git ls-remote for ${TAG} failed (exit ${rc})") ;;
+          esac
+
+          # GitHub release: only HTTP 404 means absent.
+          rc=0
+          out=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>&1 > /dev/null) || rc=$?
+          if (( rc == 0 )); then
             found+=("GitHub release ${TAG}")
+          elif ! grep -q 'HTTP 404' <<< "${out}"; then
+            errors+=("release lookup for ${TAG} failed: ${out}")
           fi
-          if [[ "${DRY_RUN}" != "true" ]] && \
-             helm show chart "oci://ghcr.io/${REPO}/falkordb" --version "${version}" > /dev/null 2>&1; then
-            found+=("OCI chart ghcr.io/${REPO}/falkordb:${version}")
-          fi
-          if (( ${#found[@]} > 0 )); then
-            msg="Chart version ${version} is already released (${found[*]}). Pass a new VERSION; published versions are never overwritten."
-            if [[ "${DRY_RUN}" == "true" ]]; then
-              echo "::warning::${msg}"
-            else
-              echo "::error::${msg}"
-              exit 1
-            fi
+
+          # OCI chart on GHCR: ask the registry for the manifest; 200 means
+          # present, 404 absent, anything else (auth, 5xx, network) is an error.
+          token=$(curl -fsS -u "${GITHUB_ACTOR}:${GH_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}/falkordb:pull" \
+            | jq -er .token) || token=""
+          if [[ -z "${token}" ]]; then
+            errors+=("could not get a GHCR pull token for ${REPO}/falkordb")
           else
-            echo "Version ${version} is not released yet."
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --head \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json" \
+              "https://ghcr.io/v2/${REPO}/falkordb/manifests/${VERSION}") || code="000"
+            case "${code}" in
+              200) found+=("OCI chart ${OCI_REF}") ;;
+              404) ;;
+              *) errors+=("GHCR manifest lookup for ${OCI_REF} returned HTTP ${code}") ;;
+            esac
+          fi
+
+          level=error
+          [[ "${DRY_RUN}" == "true" ]] && level=warning
+          status=0
+          for e in "${errors[@]}"; do
+            echo "::${level}::${e}"
+            status=1
+          done
+          if (( ${#found[@]} > 0 )); then
+            echo "::${level}::Chart version ${VERSION} is already released (${found[*]}). Pass a new VERSION; published versions are never overwritten."
+            status=1
+          fi
+          if (( status == 0 )); then
+            echo "Version ${VERSION} is not released yet."
+          elif [[ "${DRY_RUN}" != "true" ]]; then
+            exit 1
           fi
 
       - name: Update Chart.yaml version
