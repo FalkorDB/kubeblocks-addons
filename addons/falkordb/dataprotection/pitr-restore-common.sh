@@ -21,10 +21,44 @@ function truncate_aof() {
   # commands stamped up to the restore time, and fails on an AOF it cannot read,
   # which restored uncut would ignore the restore time.
   DP_log "Truncate aof: $manifest to $restore_time"
+  drop_incr_aof_after "$manifest" "$restore_time"
   if ! redis-check-aof --truncate-to-timestamp "$restore_time" "$manifest" </dev/null; then
     DP_error_log "Failed to truncate aof: $manifest"
     exit 1
   fi
+}
+
+# Leave out of <manifest> every INCR file that starts with a #TS: annotation
+# later than <restore_time>: it holds nothing to restore. redis-check-aof aborts
+# on such a file ("has nothing before timestamp") rather than cut it to nothing,
+# and it only cuts the last INCR file, so the one it cuts has to be last. That
+# happens whenever the restore time falls between an AOF rewrite (a new base, as
+# after a failover) and the first write after it, or before a later INCR file.
+# Annotations only grow, so the files left out are the manifest's last ones.
+# An INCR file that does not start with an annotation is left to redis-check-aof.
+function drop_incr_aof_after() {
+  local manifest=$1 restore_time=$2
+  local dir name first_ts dropped=()
+  dir=$(dirname "$manifest")
+  # manifest lines: file <name> seq <n> type <b|h|i> [startoffset <n> endoffset <n>]
+  while read -r name; do
+    [ -f "$dir/$name" ] || continue
+    first_ts=$(head -c 64 "$dir/$name" | head -n 1 | tr -d '\r')
+    if [[ "$first_ts" =~ ^#TS:([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -gt "$restore_time" ]; then
+      dropped+=("$name")
+    fi
+  done < <(awk '$1 == "file" && $5 == "type" && $6 == "i" { print $2 }' "$manifest")
+  [ "${#dropped[@]}" -eq 0 ] && return 0
+  DP_log "Leave out INCR AOF written after $restore_time: ${dropped[*]}"
+  if ! awk -v drop=" ${dropped[*]} " \
+    '!($1 == "file" && $5 == "type" && $6 == "i" && index(drop, " " $2 " "))' \
+    "$manifest" > "$manifest.kb-tmp" || ! mv "$manifest.kb-tmp" "$manifest"; then
+    DP_error_log "Failed to leave INCR AOF out of $manifest"
+    exit 1
+  fi
+  for name in "${dropped[@]}"; do
+    rm -f "$dir/$name"
+  done
 }
 
 # Set pitr_archive to the newest archive (a .dir/ or a .tar.zst) that starts at

@@ -151,6 +151,7 @@ if [ "$1" = "-d" ]; then
   restore-at-1500) echo 1500 ;;
   restore-at-500) echo 500 ;;
   restore-at-1700) echo 1700 ;;
+  restore-at-1050) echo 1050 ;;
   *) echo "date: invalid date '$2'" >&2; exit 1 ;;
   esac
   exit 0
@@ -177,15 +178,23 @@ echo round >> "$STUB_SLEEP_LOG"
 exit 0
 EOF
     # `redis-check-aof --truncate-to-timestamp <t> <manifest>`: records its
-    # arguments and cuts the line-based fixtures at the first #TS: after <t>, the
-    # way the real one cuts at an annotation between commands; STUB_CHECK_AOF_RC fails it.
+    # arguments and cuts the manifest's line-based INCR fixtures at the first #TS:
+    # after <t>, the way the real one cuts at an annotation between commands. Like
+    # the real one, it aborts on an INCR file that starts after <t>, and
+    # STUB_CHECK_AOF_RC fails it.
     cat > "$stub_dir/redis-check-aof" <<'EOF'
 #!/bin/bash
 echo "$*" > "$STUB_CHECK_AOF_ARGS"
 [ "${STUB_CHECK_AOF_RC:-0}" -ne 0 ] && { echo "Bad file format" >&2; exit "$STUB_CHECK_AOF_RC"; }
 t=$2 dir=$(dirname "$3")
-for f in "$dir"/*.incr.aof; do
-  [ -f "$f" ] || continue
+for f in $(awk '$6 == "i" { print $2 }' "$3"); do
+  f="$dir/$f"
+  [ -f "$f" ] || { echo "AOF $f doesn't exist" >&2; exit 1; }
+  first=$(head -n 1 "$f")
+  if [ "${first#\#TS:}" != "$first" ] && [ "${first#\#TS:}" -gt "$t" ]; then
+    echo "AOF $f has nothing before timestamp $t, aborting..."
+    exit 1
+  fi
   offset=$(grep -a -b -o '^#TS:[0-9]*' "$f" | awk -F: -v t="$t" '$3 + 0 > t + 0 { print $1; exit }')
   [ -n "$offset" ] && head -c "$offset" "$f" > "$f.cut" && mv "$f.cut" "$f"
 done
@@ -636,6 +645,39 @@ SET a 1"
       The output should include "Truncate aof: $DATA_DIR/appendonlydir/appendonly.aof.manifest to 1500"
       The contents of file "$STUB_CHECK_AOF_ARGS" should equal "--truncate-to-timestamp 1500 $DATA_DIR/appendonlydir/appendonly.aof.manifest"
       The output should include "Restore complete."
+    End
+
+    # A new base (an AOF rewrite, as after a failover) with no write before the
+    # restore time: redis-check-aof would abort on the INCR file rather than cut
+    # it to nothing, so it is left out and the base restored alone.
+    It "restores the base alone when the INCR file starts after the restore time"
+      prepare_remote_dir
+      export DP_RESTORE_TIME=restore-at-1050
+      When run run_restore
+      The status should be success
+      The output should include "Leave out INCR AOF written after 1050: appendonly.aof.1.incr.aof"
+      The output should include "Restore complete."
+      The contents of file "$DATA_DIR/appendonlydir/appendonly.aof.manifest" should equal "file appendonly.aof.1.base.rdb seq 1 type b"
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.incr.aof" should not be exist
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.1.base.rdb" should be exist
+    End
+
+    # redis-check-aof only cuts the last INCR file, and aborts on a later one
+    # that starts after the restore time.
+    It "leaves out a later INCR file that starts after the restore time and cuts the one before"
+      prepare_remote_dir
+      echo "file appendonly.aof.2.incr.aof seq 2 type i" >> "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.manifest"
+      printf '%s\n' "#TS:1650" "SET c 3" > "$STUB_REMOTE/1000.1.dir/appendonlydir/appendonly.aof.2.incr.aof"
+      export DP_RESTORE_TIME=restore-at-1500
+      When run run_restore
+      The status should be success
+      The output should include "Leave out INCR AOF written after 1500: appendonly.aof.2.incr.aof"
+      The output should include "Restore complete."
+      The result of function restored_incr should equal "#TS:1100
+SET a 1"
+      The path "$DATA_DIR/appendonlydir/appendonly.aof.2.incr.aof" should not be exist
+      The contents of file "$DATA_DIR/appendonlydir/appendonly.aof.manifest" should equal "file appendonly.aof.1.incr.aof seq 1 type i
+file appendonly.aof.1.base.rdb seq 1 type b"
     End
 
     It "fails rather than restore an archive without an AOF manifest uncut"
