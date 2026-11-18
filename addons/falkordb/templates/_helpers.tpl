@@ -77,6 +77,17 @@ sentinel is still on the previous definition.
 {{- end -}}
 
 {{/*
+Regular expression a falkordb cluster shard uses to reference all shards' vars
+(pod lists, advertised and host-network ports). Like the sentinel pattern above
+it pins the major version (`^falkordb-cluster-4-`) but not the addon version, so
+during an addon upgrade a shard already on the new definition still sees the
+shards that are still on the previous one.
+*/}}
+{{- define "falkordbCluster.shardsCmpdVarRefPattern" -}}
+{{ printf "^%s-" .clusterComponentDef }}
+{{- end -}}
+
+{{/*
 Define falkordb cluster component definition regular expression name prefix
 */}}
 {{- define "falkordbCluster.cmpdRegexpPattern" -}}

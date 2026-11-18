@@ -225,7 +225,7 @@ spec:
     - name: ALL_SHARDS_COMPONENT_SHORT_NAMES
       valueFrom:
         componentVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           optional: false
           shortName: Required
           multipleClusterObjectOption:
@@ -237,7 +237,7 @@ spec:
     - name: ALL_SHARDS_POD_NAME_LIST
       valueFrom:
         componentVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           optional: false
           podNames: Required
           multipleClusterObjectOption:
@@ -249,7 +249,7 @@ spec:
     - name: ALL_SHARDS_POD_FQDN_LIST
       valueFrom:
         componentVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           optional: false
           podFQDNs: Required
           multipleClusterObjectOption:
@@ -259,7 +259,7 @@ spec:
     - name: ALL_SHARDS_ADVERTISED_PORT
       valueFrom:
         serviceVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           name: falkordb-advertised
           optional: true
           multipleClusterObjectOption:
@@ -276,7 +276,7 @@ spec:
     - name: ALL_SHARDS_LB_ADVERTISED_PORT
       valueFrom:
         serviceVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           name: falkordb-lb-advertised
           optional: true
           multipleClusterObjectOption:
@@ -293,7 +293,7 @@ spec:
     - name: ALL_SHARDS_LB_ADVERTISED_BUS_PORT
       valueFrom:
         serviceVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           name: falkordb-lb-advertised
           optional: true
           multipleClusterObjectOption:
@@ -308,7 +308,7 @@ spec:
     - name: ALL_SHARDS_LB_ADVERTISED_HOST
       valueFrom:
         serviceVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           name: falkordb-lb-advertised
           optional: true
           multipleClusterObjectOption:
@@ -370,7 +370,7 @@ spec:
     - name: REDIS_CLUSTER_ALL_SHARDS_HOST_NETWORK_PORT
       valueFrom:
         hostNetworkVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           optional: true
           container:
             name: falkordb-cluster
@@ -389,7 +389,7 @@ spec:
     - name: REDIS_CLUSTER_ALL_SHARDS_HOST_NETWORK_BUS_PORT
       valueFrom:
         hostNetworkVarRef:
-          compDef: {{ printf "%s-%s" .clusterComponentDef $.Chart.Version }}
+          compDef: {{ include "falkordbCluster.shardsCmpdVarRefPattern" . }}
           optional: true
           container:
             name: falkordb-cluster
