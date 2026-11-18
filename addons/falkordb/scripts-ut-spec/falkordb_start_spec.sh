@@ -669,6 +669,17 @@ Describe "FalkorDB Start Bash Script Tests"
       The variable REDIS_SENTINEL_PRIMARY_INFO[0] should eq "NOAUTH-primary.example.com"
     End
 
+    It "does not take an announced host named exactly like an error code for an auth error"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "printf 'WRONGPASS\\n6379\\n'"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be success
+      The stdout should include "Successfully retrieved primary info from sentinel"
+      The variable REDIS_SENTINEL_PRIMARY_INFO[0] should eq "WRONGPASS"
+      The variable REDIS_SENTINEL_AUTH_FAILED should not eq "true"
+    End
+
     It "retries on other errors from sentinel"
       build_sentinel_get_master_addr_by_name_command() {
         echo "return 1"

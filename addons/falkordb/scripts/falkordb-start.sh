@@ -643,10 +643,11 @@ sentinel_reply_auth_error() {
   local line
   while IFS= read -r line; do
     # redis-cli may prefix error replies with "(error) " when attached to a tty.
-    # Match whole error codes, so an announced host such as NOAUTH-x.example.com
-    # in a get-master-addr-by-name reply is not taken for an error.
+    # Redis error replies are a code followed by a message, so require the
+    # space: an announced host such as NOAUTH-x.example.com (or plain NOAUTH,
+    # one line of a get-master-addr-by-name reply) is not taken for an error.
     case "${line#(error) }" in
-      NOAUTH|"NOAUTH "*|WRONGPASS|"WRONGPASS "*|"ERR AUTH"*|"AUTH failed"*) echo "${line#(error) }"; return 0 ;;
+      "NOAUTH "*|"WRONGPASS "*|"ERR AUTH"*|"AUTH failed"*) echo "${line#(error) }"; return 0 ;;
     esac
   done <<< "$1"
   return 1
