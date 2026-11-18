@@ -1,0 +1,179 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: mixed-addon-version-sentinel
+spec:
+  description: >-
+    Run the servers and the sentinels on ComponentDefinitions of different addon
+    versions, as an addon upgrade does while it moves one component before the
+    other, and restart the servers in that state.
+
+    The servers read the sentinel credential, pod list and port through var
+    references to the sentinel's ComponentDefinition. References pinned to
+    "falkordb-sent-4-<chart version>" match no sentinel in this window and, being
+    optional, resolve to empty: a replica restarting with data then asks the
+    sentinels for the primary without a password, gets NOAUTH from all of them
+    and crash-loops (issue #56). The references must match the sentinel by
+    major version only.
+
+    To get there without publishing two charts, the installed sentinel
+    definition is copied under another addon version and only the sentinel
+    component is moved onto the copy. The copy's version must not start with
+    the chart's own, because KubeBlocks also matches a reference by name prefix.
+  steps:
+    - name: create the cluster
+      try:
+        - apply:
+            file: cluster.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-mixed
+            tail: 100
+
+    - name: seed data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              fdb_retry "the roles to settle" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-mixed falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-mixed falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-mixed falkordb secondary)"
+              fdb_retry "the replication link on $replica" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-mixed 50
+              fdb_retry "data to reach $replica" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-mixed 50
+              # The replica must hold persisted data when it restarts: that is
+              # the pod the issue saw refuse the default-primary fallback.
+              fdb_cli "$NAMESPACE" "$replica" BGREWRITEAOF >/dev/null
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-mixed
+            tail: 200
+
+    - name: move the sentinels to a definition of another addon version
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              current="$(kubectl get component -n "$NAMESPACE" fdb-mixed-falkordb-sent \
+                -o jsonpath='{.spec.compDef}')"
+              case "$current" in
+                falkordb-sent-4-*) echo "the sentinels run on $current" ;;
+                *) fdb_fail "unexpected sentinel ComponentDefinition: '$current'"; exit 1 ;;
+              esac
+              # Named after this namespace so a rerun never meets a copy still
+              # being deleted, through a checksum since the name can end up in
+              # 63-character label values; 0.0.0 keeps the chart's version from
+              # prefixing it.
+              previous="falkordb-sent-4-0.0.0-e2e-$(printf '%s' "$NAMESPACE" | cksum | cut -d' ' -f1)"
+
+              kubectl get componentdefinition "$current" -o json |
+                jq --arg name "$previous" '
+                  .metadata = {name: $name, labels: {"e2e.falkordb.com/copy-of": .metadata.name}}
+                  | del(.status)' |
+                kubectl apply -f -
+              kubectl wait --for=jsonpath='{.status.phase}'=Available \
+                "componentdefinition/$previous" --timeout=2m
+
+              index="$(kubectl get cluster -n "$NAMESPACE" fdb-mixed \
+                -o jsonpath='{range .spec.componentSpecs[*]}{.name}{"\n"}{end}' |
+                grep -nx falkordb-sent | cut -d: -f1)"
+              kubectl patch cluster fdb-mixed -n "$NAMESPACE" --type=json \
+                -p "[{\"op\":\"add\",\"path\":\"/spec/componentSpecs/$((index - 1))/componentDef\",\"value\":\"$previous\"}]"
+
+              fdb_retry "the sentinel component to move to $previous" \
+                sh -c '[ "$(kubectl get component -n "$1" fdb-mixed-falkordb-sent -o jsonpath="{.spec.compDef}")" = "$2" ]' \
+                _ "$NAMESPACE" "$previous"
+              servers="$(kubectl get component -n "$NAMESPACE" fdb-mixed-falkordb \
+                -o jsonpath='{.spec.compDef}')"
+              [ "$servers" = "$current" ] ||
+                { fdb_fail "the servers moved too: $servers"; exit 1; }
+              echo "the servers stay on $servers, the sentinels run on $previous"
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: apps.kubeblocks.io/v1
+            kind: Component
+            name: fdb-mixed-falkordb-sent
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-mixed
+            tail: 200
+      cleanup:
+        # The copy is script-created, so chainsaw does not track it. Delete the
+        # cluster that uses it first, then the copy.
+        - script:
+            content: |
+              kubectl delete cluster fdb-mixed -n "$NAMESPACE" \
+                --ignore-not-found --wait=true --timeout=5m
+              previous="falkordb-sent-4-0.0.0-e2e-$(printf '%s' "$NAMESPACE" | cksum | cut -d' ' -f1)"
+              kubectl delete componentdefinition "$previous" --ignore-not-found --wait=false
+
+    - name: restart the servers while the versions differ
+      try:
+        - apply:
+            file: restart.yaml
+        - assert:
+            file: assert-restart-succeeded.yaml
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: operations.kubeblocks.io/v1alpha1
+            kind: OpsRequest
+            name: fdb-mixed-restart
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-mixed
+            tail: 200
+
+    - name: the servers still reach the sentinels and kept their data
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+
+              # The restarted pods resolved their sentinel vars while the
+              # sentinels were on the other definition. Check they are set
+              # without printing the password.
+              for pod in $(fdb_pods "$NAMESPACE" fdb-mixed falkordb); do
+                kubectl exec -n "$NAMESPACE" "$pod" -c falkordb -- sh -c '
+                  missing=""
+                  for var in SENTINEL_PASSWORD SENTINEL_USER SENTINEL_COMPONENT_NAME SENTINEL_POD_FQDN_LIST; do
+                    eval "value=\${$var:-}"
+                    [ -n "$value" ] || missing="$missing $var"
+                  done
+                  [ -z "$missing" ] || { echo "empty:$missing" >&2; exit 1; }' ||
+                  { fdb_fail "$pod resolved empty sentinel vars"; exit 1; }
+                echo "$pod resolved every sentinel var"
+              done
+
+              fdb_retry "the roles to settle after the restart" \
+                fdb_assert_role_counts "$NAMESPACE" fdb-mixed falkordb 1 1
+              primary="$(fdb_primary "$NAMESPACE" fdb-mixed falkordb)"
+              replica="$(fdb_pods_with_role "$NAMESPACE" fdb-mixed falkordb secondary)"
+              fdb_verify_keys "$NAMESPACE" "$primary" e2e-mixed 50
+              fdb_retry "the replica to link up again" \
+                fdb_assert_replication_up "$NAMESPACE" "$replica"
+              fdb_write_keys "$NAMESPACE" "$primary" e2e-mixed-after 20
+              fdb_retry "new writes to replicate" \
+                fdb_verify_keys "$NAMESPACE" "$replica" e2e-mixed-after 20
+
+              for pod in $(fdb_pods "$NAMESPACE" fdb-mixed falkordb-sent); do
+                fdb_retry "$pod to monitor the primary" \
+                  fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
+              done
+      catch:
+        - events: {}
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-mixed
+            tail: 200
