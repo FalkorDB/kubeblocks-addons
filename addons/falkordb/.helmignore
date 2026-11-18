@@ -21,3 +21,8 @@
 .idea/
 *.tmproj
 .vscode/
+# Tests live next to the chart but are not part of it. Helm stores the whole
+# chart in its release Secret, capped at 1 MiB, and the e2e suite alone is
+# large enough to push a release past that.
+e2e/
+scripts-ut-spec/

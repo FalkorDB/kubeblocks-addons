@@ -69,6 +69,12 @@ spec:
                 falkordb-sent-4-*) echo "the sentinels run on $current" ;;
                 *) fdb_fail "unexpected sentinel ComponentDefinition: '$current'"; exit 1 ;;
               esac
+              servers_before="$(kubectl get component -n "$NAMESPACE" fdb-mixed-falkordb \
+                -o jsonpath='{.spec.compDef}')"
+              case "$servers_before" in
+                falkordb-4-*) echo "the servers run on $servers_before" ;;
+                *) fdb_fail "unexpected server ComponentDefinition: '$servers_before'"; exit 1 ;;
+              esac
               # Named after this namespace so a rerun never meets a copy still
               # being deleted, through a checksum since the name can end up in
               # 63-character label values; 0.0.0 keeps the chart's version from
@@ -94,7 +100,7 @@ spec:
                 _ "$NAMESPACE" "$previous"
               servers="$(kubectl get component -n "$NAMESPACE" fdb-mixed-falkordb \
                 -o jsonpath='{.spec.compDef}')"
-              [ "$servers" = "$current" ] ||
+              [ "$servers" = "$servers_before" ] ||
                 { fdb_fail "the servers moved too: $servers"; exit 1; }
               echo "the servers stay on $servers, the sentinels run on $previous"
         - assert:
