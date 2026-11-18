@@ -423,7 +423,7 @@ init_or_get_primary_from_redis_sentinel() {
     # Exit so the container restarts and re-reads its environment once the
     # sentinel credential resolves, instead of picking a primary blindly.
     if [ "$sentinels_auth_failed" -gt 0 ]; then
-      echo "Error: no primary node found from all redis sentinels: $sentinels_auth_failed of ${#sentinel_pod_fqdn_list[@]} rejected authentication (SENTINEL_PASSWORD $(is_empty "$SENTINEL_PASSWORD" && echo "is empty" || echo "was rejected")); refusing to pick a primary until the sentinel credential is available. Exiting."
+      echo "Error: no primary node found from all redis sentinels: $sentinels_auth_failed of ${#sentinel_pod_fqdn_list[@]} rejected authentication (SENTINEL_PASSWORD $(sentinel_password_state)); refusing to pick a primary until the sentinel credential is available. Exiting."
       exit 1
     fi
     if ! redis_data_dir_has_persisted_data; then
@@ -637,15 +637,26 @@ redis_data_dir_has_persisted_data() {
   return 1
 }
 
-# succeeds when a sentinel reply is an authentication error
-sentinel_reply_is_auth_error() {
-  local reply="$1"
-  # redis-cli may prefix error replies with "(error) " when attached to a tty
-  reply="${reply#(error) }"
-  case "$reply" in
-    NOAUTH*|WRONGPASS*|"ERR AUTH"*|"AUTH failed"*) return 0 ;;
-  esac
+# prints the first line of a sentinel reply (or redis-cli stderr) that is an
+# authentication error and succeeds, or fails when there is none
+sentinel_reply_auth_error() {
+  local line
+  while IFS= read -r line; do
+    # redis-cli may prefix error replies with "(error) " when attached to a tty
+    case "${line#(error) }" in
+      NOAUTH*|WRONGPASS*|"ERR AUTH"*|"AUTH failed"*) echo "${line#(error) }"; return 0 ;;
+    esac
+  done <<< "$1"
   return 1
+}
+
+# describes SENTINEL_PASSWORD without expanding it, so xtrace never logs it
+sentinel_password_state() {
+  if [ -n "${SENTINEL_PASSWORD:+set}" ]; then
+    echo "was rejected"
+  else
+    echo "is empty"
+  fi
 }
 
 build_sentinel_get_master_addr_by_name_command() {
@@ -663,27 +674,37 @@ build_sentinel_get_master_addr_by_name_command() {
 get_master_addr_by_name_from_sentinel() {
   local master_addr_by_name_command
   local sentinel_pod_fqdn="$1"
+  local stderr_file stderr_output=""
+  # REDIS_SENTINEL_AUTH_FAILED is not reset here but once per sentinel in
+  # retry_get_master_addr_by_name_from_sentinel: a NOAUTH followed by timeouts
+  # must still count as an authentication failure.
   REDIS_SENTINEL_MONITORS_NO_PRIMARY="false"
-  REDIS_SENTINEL_AUTH_FAILED="false"
   unset_xtrace_when_ut_mode_false
   master_addr_by_name_command=$(build_sentinel_get_master_addr_by_name_command "$sentinel_pod_fqdn")
   logging_mask_password_command="${master_addr_by_name_command/$SENTINEL_PASSWORD/********}"
   echo "execute get-master-addr-by-name command: $logging_mask_password_command"
-  output=$(eval "$master_addr_by_name_command")
-  exit_code=$?
+  # redis-cli reports a failed AUTH from -a on stderr ("AUTH failed: WRONGPASS
+  # ..."), so capture stderr apart from the reply to classify it, then pass it on.
+  if stderr_file=$(mktemp 2>/dev/null); then
+    output=$(eval "$master_addr_by_name_command" 2>"$stderr_file")
+    exit_code=$?
+    stderr_output=$(cat "$stderr_file" 2>/dev/null)
+    rm -f "$stderr_file"
+    if [ -n "$stderr_output" ]; then echo "$stderr_output" >&2; fi
+  else
+    output=$(eval "$master_addr_by_name_command")
+    exit_code=$?
+  fi
   set_xtrace_when_ut_mode_false
 
   # An error reply is not an answer about the primary. NOAUTH/WRONGPASS mean
   # SENTINEL_PASSWORD is missing or stale (for example while the sentinel
   # credential reference has not resolved during an addon upgrade), not that
   # the sentinel is down or monitors no primary.
-  if sentinel_reply_is_auth_error "$output"; then
+  local auth_error
+  if auth_error=$(sentinel_reply_auth_error "$output") || auth_error=$(sentinel_reply_auth_error "$stderr_output"); then
     REDIS_SENTINEL_AUTH_FAILED="true"
-    if is_empty "$SENTINEL_PASSWORD"; then
-      echo "Authentication failed on sentinel: $sentinel_pod_fqdn (${output%%$'\n'*}); SENTINEL_PASSWORD is empty."
-    else
-      echo "Authentication failed on sentinel: $sentinel_pod_fqdn (${output%%$'\n'*}); SENTINEL_PASSWORD was rejected."
-    fi
+    echo "Authentication failed on sentinel: $sentinel_pod_fqdn ($auth_error); SENTINEL_PASSWORD $(sentinel_password_state)."
     return 1
   fi
 
@@ -714,6 +735,7 @@ retry_get_master_addr_by_name_from_sentinel() {
   local max_retry="$1"
   local retry_delay="$2"
   local sentinel_pod_fqdn="$3"
+  REDIS_SENTINEL_AUTH_FAILED="false"
   if call_func_with_retry "$max_retry" "$retry_delay" get_master_addr_by_name_from_sentinel "$sentinel_pod_fqdn"; then
     return 0
   else

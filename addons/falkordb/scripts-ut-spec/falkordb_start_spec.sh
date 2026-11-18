@@ -617,6 +617,25 @@ Describe "FalkorDB Start Bash Script Tests"
       The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
     End
 
+    It "reports an AUTH failure redis-cli prints on stderr"
+      SENTINEL_PASSWORD="stale"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo 'AUTH failed: WRONGPASS invalid username-password pair or user is disabled.' >&2; echo ''"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "(AUTH failed: WRONGPASS invalid username-password pair or user is disabled.); SENTINEL_PASSWORD was rejected."
+      The stderr should include "AUTH failed: WRONGPASS"
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+      The variable REDIS_SENTINEL_MONITORS_NO_PRIMARY should eq "false"
+    End
+
+    It "does not expand SENTINEL_PASSWORD when describing it"
+      SENTINEL_PASSWORD="s3cret-value"
+      When call sentinel_password_state
+      The output should eq "was rejected"
+    End
+
     It "retries on other errors from sentinel"
       build_sentinel_get_master_addr_by_name_command() {
         echo "return 1"
@@ -628,6 +647,33 @@ Describe "FalkorDB Start Bash Script Tests"
   End
 
   Describe "retry_get_master_addr_by_name_from_sentinel()"
+    It "keeps an authentication failure when later attempts time out"
+      SENTINEL_PASSWORD=""
+      attempt_file=$(mktemp)
+      build_sentinel_get_master_addr_by_name_command() {
+        if [ ! -s "$attempt_file" ]; then
+          echo 1 > "$attempt_file"
+          echo "echo 'NOAUTH Authentication required.'"
+        else
+          echo "return 124"
+        fi
+      }
+      When call retry_get_master_addr_by_name_from_sentinel 3 0 "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "Authentication failed on sentinel"
+      The stdout should include "Timeout occurred while retrieving primary info from sentinel"
+      The stderr should include "failed after 3 retries"
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+    End
+
+    It "resets the authentication failure for the next sentinel"
+      REDIS_SENTINEL_AUTH_FAILED="true"
+      get_master_addr_by_name_from_sentinel() { return 0; }
+      When call retry_get_master_addr_by_name_from_sentinel 1 0 "sentinel2.redis-sentinel-headless"
+      The status should be success
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "false"
+    End
+
     It "retries to get primary info from sentinel successfully"
       get_master_addr_by_name_from_sentinel() {
         # mock get_master_addr_by_name_from_sentinel success
