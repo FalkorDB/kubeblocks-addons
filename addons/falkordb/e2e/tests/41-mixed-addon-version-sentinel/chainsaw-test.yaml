@@ -90,13 +90,25 @@ spec:
               # prefixing it.
               previous="falkordb-sent-4-0.0.0-e2e-$(printf '%s' "$NAMESPACE" | cksum | cut -d' ' -f1)"
 
+              # Keep the annotations, KubeBlocks only reconciles a definition
+              # that carries kubeblocks.io/crd-api-version, but drop Helm's so
+              # the copy is not taken for part of the release.
               kubectl get componentdefinition "$current" -o json |
                 jq --arg name "$previous" '
-                  .metadata = {name: $name, labels: {"e2e.falkordb.com/copy-of": .metadata.name}}
+                  .metadata = {
+                    name: $name,
+                    labels: {"e2e.falkordb.com/copy-of": .metadata.name},
+                    annotations: ((.metadata.annotations // {})
+                      | with_entries(select(.key | test("^(meta\\.)?helm\\.sh/") | not)))
+                  }
                   | del(.status)' |
                 kubectl apply -f -
               kubectl wait --for=jsonpath='{.status.phase}'=Available \
-                "componentdefinition/$previous" --timeout=2m
+                "componentdefinition/$previous" --timeout=2m || {
+                kubectl get componentdefinition "$previous" -o jsonpath='{.metadata.annotations}{"\n"}{.status}{"\n"}' >&2
+                fdb_fail "$previous did not become Available"
+                exit 1
+              }
 
               index="$(kubectl get cluster -n "$NAMESPACE" fdb-mixed \
                 -o jsonpath='{range .spec.componentSpecs[*]}{.name}{"\n"}{end}' |
