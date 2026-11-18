@@ -376,6 +376,7 @@ init_or_get_primary_from_redis_sentinel() {
   local first_redis_primary_host=""
   local first_redis_primary_port=""
   local sentinels_without_primary=0
+  local sentinels_auth_failed=0
   sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
     # get primary info from sentinel
@@ -404,6 +405,9 @@ init_or_get_primary_from_redis_sentinel() {
       if [ "$REDIS_SENTINEL_MONITORS_NO_PRIMARY" == "true" ]; then
         sentinels_without_primary=$((sentinels_without_primary + 1))
       fi
+      if [ "$REDIS_SENTINEL_AUTH_FAILED" == "true" ]; then
+        sentinels_auth_failed=$((sentinels_auth_failed + 1))
+      fi
       echo "Failed to retrieve primary info from sentinel: $sentinel_pod_fqdn. Skipping this sentinel."
     fi
   done
@@ -414,6 +418,14 @@ init_or_get_primary_from_redis_sentinel() {
   # second primary (split-brain) or replicate from an empty one (data loss).
   echo "get all primary info from redis sentinel master_count_map: ${master_count_map[*]}"
   if [ ${#master_count_map[@]} -eq 0 ]; then
+    # Sentinels that reject our credentials are running and may well know the
+    # primary; nothing can be concluded from them, not even on first bootstrap.
+    # Exit so the container restarts and re-reads its environment once the
+    # sentinel credential resolves, instead of picking a primary blindly.
+    if [ "$sentinels_auth_failed" -gt 0 ]; then
+      echo "Error: no primary node found from all redis sentinels: $sentinels_auth_failed of ${#sentinel_pod_fqdn_list[@]} rejected authentication (SENTINEL_PASSWORD $(is_empty "$SENTINEL_PASSWORD" && echo "is empty" || echo "was rejected")); refusing to pick a primary until the sentinel credential is available. Exiting."
+      exit 1
+    fi
     if ! redis_data_dir_has_persisted_data; then
       echo "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
       get_default_initialize_primary_node
@@ -625,6 +637,17 @@ redis_data_dir_has_persisted_data() {
   return 1
 }
 
+# succeeds when a sentinel reply is an authentication error
+sentinel_reply_is_auth_error() {
+  local reply="$1"
+  # redis-cli may prefix error replies with "(error) " when attached to a tty
+  reply="${reply#(error) }"
+  case "$reply" in
+    NOAUTH*|WRONGPASS*|"ERR AUTH"*|"AUTH failed"*) return 0 ;;
+  esac
+  return 1
+}
+
 build_sentinel_get_master_addr_by_name_command() {
   local sentinel_pod_fqdn="$1"
   local timeout_value=5
@@ -641,6 +664,7 @@ get_master_addr_by_name_from_sentinel() {
   local master_addr_by_name_command
   local sentinel_pod_fqdn="$1"
   REDIS_SENTINEL_MONITORS_NO_PRIMARY="false"
+  REDIS_SENTINEL_AUTH_FAILED="false"
   unset_xtrace_when_ut_mode_false
   master_addr_by_name_command=$(build_sentinel_get_master_addr_by_name_command "$sentinel_pod_fqdn")
   logging_mask_password_command="${master_addr_by_name_command/$SENTINEL_PASSWORD/********}"
@@ -648,6 +672,20 @@ get_master_addr_by_name_from_sentinel() {
   output=$(eval "$master_addr_by_name_command")
   exit_code=$?
   set_xtrace_when_ut_mode_false
+
+  # An error reply is not an answer about the primary. NOAUTH/WRONGPASS mean
+  # SENTINEL_PASSWORD is missing or stale (for example while the sentinel
+  # credential reference has not resolved during an addon upgrade), not that
+  # the sentinel is down or monitors no primary.
+  if sentinel_reply_is_auth_error "$output"; then
+    REDIS_SENTINEL_AUTH_FAILED="true"
+    if is_empty "$SENTINEL_PASSWORD"; then
+      echo "Authentication failed on sentinel: $sentinel_pod_fqdn (${output%%$'\n'*}); SENTINEL_PASSWORD is empty."
+    else
+      echo "Authentication failed on sentinel: $sentinel_pod_fqdn (${output%%$'\n'*}); SENTINEL_PASSWORD was rejected."
+    fi
+    return 1
+  fi
 
   if [ $exit_code -eq 0 ]; then
     read -r -d '' -a REDIS_SENTINEL_PRIMARY_INFO <<< "$output"

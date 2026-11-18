@@ -63,6 +63,20 @@ Define falkordb sentienl component definition regular expression name prefix
 {{- end -}}
 
 {{/*
+Regular expression the falkordb data component uses to reference its sentinel
+component's vars (credential, pod list, port). It is called with a
+falkordbVersions entry as context and pins the major version
+(`^falkordb-sent-4-`) but not the addon version: during an addon upgrade the
+data and sentinel components switch to the new definitions one at a time, and a
+reference pinned to `falkordb-sent-4-<chart version>` resolves to nothing (the
+refs are optional, so SENTINEL_PASSWORD would silently become empty) while the
+sentinel is still on the previous definition.
+*/}}
+{{- define "falkordb.sentinelCmpdVarRefPattern" -}}
+{{ printf "^%s-" .sentinelComponentDef }}
+{{- end -}}
+
+{{/*
 Define falkordb cluster component definition regular expression name prefix
 */}}
 {{- define "falkordbCluster.cmpdRegexpPattern" -}}

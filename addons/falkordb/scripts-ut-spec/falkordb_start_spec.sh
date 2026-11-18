@@ -594,6 +594,29 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should include "Timeout occurred while retrieving primary info from sentinel. Retrying..."
     End
 
+    It "reports NOAUTH as an authentication failure with an empty password"
+      unset SENTINEL_PASSWORD
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo 'NOAUTH Authentication required.'"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "Authentication failed on sentinel: sentinel1.redis-sentinel-headless (NOAUTH Authentication required.); SENTINEL_PASSWORD is empty."
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+      The variable REDIS_SENTINEL_MONITORS_NO_PRIMARY should eq "false"
+    End
+
+    It "reports WRONGPASS as a rejected password even when redis-cli exits non-zero"
+      SENTINEL_PASSWORD="stale"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo 'WRONGPASS invalid username-password pair or user is disabled.'; false"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "SENTINEL_PASSWORD was rejected."
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+    End
+
     It "retries on other errors from sentinel"
       build_sentinel_get_master_addr_by_name_command() {
         echo "return 1"
@@ -1087,7 +1110,21 @@ Describe "FalkorDB Start Bash Script Tests"
         echo "persisted" > "$redis_data_dir/dump.rdb"
         When run init_or_get_primary_from_redis_sentinel
         The status should be failure
-        The stdout should include "(0 of 2 reachable without a primary)"
+        The stdout should include "2 of 2 rejected authentication"
+        The stdout should not include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      It "exits non-zero without a fallback when sentinels reject auth even with no persisted data"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        unset SENTINEL_PASSWORD
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "echo 'NOAUTH Authentication required.'"
+        }
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "Authentication failed on sentinel"
+        The stdout should include "2 of 2 rejected authentication (SENTINEL_PASSWORD is empty)"
         The stdout should not include "default primary fallback called"
         The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
       End
