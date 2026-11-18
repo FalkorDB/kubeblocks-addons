@@ -642,9 +642,11 @@ redis_data_dir_has_persisted_data() {
 sentinel_reply_auth_error() {
   local line
   while IFS= read -r line; do
-    # redis-cli may prefix error replies with "(error) " when attached to a tty
+    # redis-cli may prefix error replies with "(error) " when attached to a tty.
+    # Match whole error codes, so an announced host such as NOAUTH-x.example.com
+    # in a get-master-addr-by-name reply is not taken for an error.
     case "${line#(error) }" in
-      NOAUTH*|WRONGPASS*|"ERR AUTH"*|"AUTH failed"*) echo "${line#(error) }"; return 0 ;;
+      NOAUTH|"NOAUTH "*|WRONGPASS|"WRONGPASS "*|"ERR AUTH"*|"AUTH failed"*) echo "${line#(error) }"; return 0 ;;
     esac
   done <<< "$1"
   return 1
@@ -694,7 +696,13 @@ get_master_addr_by_name_from_sentinel() {
   fi
   output=$(eval "$master_addr_by_name_command" 2>"$stderr_file")
   exit_code=$?
-  stderr_output=$(cat "$stderr_file" 2>/dev/null)
+  # an unreadable capture would hide a rejection the same way, so stop here too
+  if ! stderr_output=$(cat "$stderr_file" 2>/dev/null); then
+    rm -f "$stderr_file"
+    set_xtrace_when_ut_mode_false
+    echo "Error: cannot read the captured stderr of the sentinel reply; refusing to go on without detecting authentication failures. Exiting."
+    exit 1
+  fi
   rm -f "$stderr_file"
   if [ -n "$stderr_output" ]; then echo "$stderr_output" >&2; fi
   set_xtrace_when_ut_mode_false

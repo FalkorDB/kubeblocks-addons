@@ -630,15 +630,43 @@ Describe "FalkorDB Start Bash Script Tests"
       The variable REDIS_SENTINEL_MONITORS_NO_PRIMARY should eq "false"
     End
 
-    It "exits rather than query a sentinel when stderr cannot be captured"
+    Describe "when the sentinel stderr capture fails"
+      setup_query_marker() { query_marker="$(command mktemp -d)/queried"; }
+      cleanup_query_marker() { rm -rf "$(dirname "$query_marker")"; }
+      Before "setup_query_marker"
+      After "cleanup_query_marker"
+
+      It "exits rather than query a sentinel when stderr cannot be captured"
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "touch '$query_marker'"
+        }
+        mktemp() { return 1; }
+        When run get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+        The status should be failure
+        The stdout should include "cannot create a temporary file to capture the sentinel reply's stderr"
+        The path "$query_marker" should not be exist
+      End
+
+      It "exits when the captured stderr cannot be read"
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "echo 'AUTH failed: WRONGPASS' >&2; echo ''"
+        }
+        cat() { return 1; }
+        When run get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+        The status should be failure
+        The stdout should include "cannot read the captured stderr of the sentinel reply"
+        The stdout should not include "Empty primary info retrieved from sentinel"
+      End
+    End
+
+    It "does not take an announced host named like an error code for an auth error"
       build_sentinel_get_master_addr_by_name_command() {
-        echo "echo QUERIED-\$((1 + 1)) >&2"
+        echo "printf 'NOAUTH-primary.example.com\\n6379\\n'"
       }
-      mktemp() { return 1; }
-      When run get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
-      The status should be failure
-      The stdout should include "cannot create a temporary file to capture the sentinel reply's stderr"
-      The stderr should not include "QUERIED-2"
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be success
+      The stdout should include "Successfully retrieved primary info from sentinel"
+      The variable REDIS_SENTINEL_PRIMARY_INFO[0] should eq "NOAUTH-primary.example.com"
     End
 
     It "retries on other errors from sentinel"
