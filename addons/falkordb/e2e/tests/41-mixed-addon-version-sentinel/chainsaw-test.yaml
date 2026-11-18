@@ -119,6 +119,27 @@ spec:
               fdb_retry "the sentinel component to move to $previous" \
                 sh -c '[ "$(kubectl get component -n "$1" fdb-mixed-falkordb-sent -o jsonpath="{.spec.compDef}")" = "$2" ]' \
                 _ "$NAMESPACE" "$previous"
+              # The cluster still reports Running until the controllers act on
+              # the patch, and KubeBlocks refuses a Restart OpsRequest while it
+              # is Updating, so wait for the sentinel rollout itself to finish:
+              # every object caught up with its spec and every pod updated.
+              caught_up() {
+                set -- $(kubectl get "$1" -n "$NAMESPACE" "$2" \
+                  -o jsonpath='{.metadata.generation} {.status.observedGeneration}')
+                [ "$#" -eq 2 ] && [ "$1" = "$2" ]
+              }
+              rolled_out() {
+                caught_up instanceset fdb-mixed-falkordb-sent &&
+                  [ "$(kubectl get instanceset -n "$NAMESPACE" fdb-mixed-falkordb-sent \
+                    -o jsonpath='{.status.updatedReplicas}/{.status.replicas}')" = "3/3" ] &&
+                  caught_up component fdb-mixed-falkordb-sent &&
+                  [ "$(kubectl get component -n "$NAMESPACE" fdb-mixed-falkordb-sent \
+                    -o jsonpath='{.status.phase}')" = Running ] &&
+                  caught_up cluster fdb-mixed &&
+                  [ "$(kubectl get cluster -n "$NAMESPACE" fdb-mixed \
+                    -o jsonpath='{.status.phase}')" = Running ]
+              }
+              fdb_retry "the sentinels to roll out onto $previous" rolled_out
               servers="$(kubectl get component -n "$NAMESPACE" fdb-mixed-falkordb \
                 -o jsonpath='{.spec.compDef}')"
               [ "$servers" = "$servers_before" ] ||
@@ -131,6 +152,10 @@ spec:
         - describe:
             apiVersion: apps.kubeblocks.io/v1
             kind: Component
+            name: fdb-mixed-falkordb-sent
+        - describe:
+            apiVersion: workloads.kubeblocks.io/v1
+            kind: InstanceSet
             name: fdb-mixed-falkordb-sent
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-mixed
