@@ -630,12 +630,6 @@ Describe "FalkorDB Start Bash Script Tests"
       The variable REDIS_SENTINEL_MONITORS_NO_PRIMARY should eq "false"
     End
 
-    It "does not expand SENTINEL_PASSWORD when describing it"
-      SENTINEL_PASSWORD="s3cret-value"
-      When call sentinel_password_state
-      The output should eq "was rejected"
-    End
-
     It "retries on other errors from sentinel"
       build_sentinel_get_master_addr_by_name_command() {
         echo "return 1"
@@ -647,9 +641,14 @@ Describe "FalkorDB Start Bash Script Tests"
   End
 
   Describe "retry_get_master_addr_by_name_from_sentinel()"
+    Describe "with an authentication error followed by timeouts"
+      setup_attempt_file() { attempt_file=$(mktemp); }
+      cleanup_attempt_file() { rm -f "$attempt_file"; }
+      Before "setup_attempt_file"
+      After "cleanup_attempt_file"
+
     It "keeps an authentication failure when later attempts time out"
       SENTINEL_PASSWORD=""
-      attempt_file=$(mktemp)
       build_sentinel_get_master_addr_by_name_command() {
         if [ ! -s "$attempt_file" ]; then
           echo 1 > "$attempt_file"
@@ -664,6 +663,7 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should include "Timeout occurred while retrieving primary info from sentinel"
       The stderr should include "failed after 3 retries"
       The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+    End
     End
 
     It "resets the authentication failure for the next sentinel"
@@ -1173,6 +1173,30 @@ Describe "FalkorDB Start Bash Script Tests"
         The stdout should include "2 of 2 rejected authentication (SENTINEL_PASSWORD is empty)"
         The stdout should not include "default primary fallback called"
         The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      It "keeps a rejected SENTINEL_PASSWORD out of the production xtrace"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        SENTINEL_PASSWORD="s3cret-value"
+        # build the command as production does, password on the command line;
+        # only redis-cli's reply is mocked
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "timeout 5 redis-cli -h $1 -p 26379 -a $SENTINEL_PASSWORD sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+        }
+        timeout() { echo "NOAUTH Authentication required."; }
+        # trace as the container does: set -x at start, toggled by ut_mode=false
+        run_traced_like_production() {
+          ut_mode="false"
+          set -x
+          init_or_get_primary_from_redis_sentinel
+        }
+        When run run_traced_like_production
+        The status should be failure
+        The stdout should include "2 of 2 rejected authentication (SENTINEL_PASSWORD was rejected)"
+        The stdout should include "-a ******** sentinel get-master-addr-by-name"
+        The stdout should not include "s3cret-value"
+        The stderr should include "sentinel_password_state"
+        The stderr should not include "s3cret-value"
       End
 
       running_as_root() { [ "$(id -u)" = "0" ]; }
