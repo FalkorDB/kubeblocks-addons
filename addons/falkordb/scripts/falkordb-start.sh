@@ -685,16 +685,18 @@ get_master_addr_by_name_from_sentinel() {
   echo "execute get-master-addr-by-name command: $logging_mask_password_command"
   # redis-cli reports a failed AUTH from -a on stderr ("AUTH failed: WRONGPASS
   # ..."), so capture stderr apart from the reply to classify it, then pass it on.
-  if stderr_file=$(mktemp 2>/dev/null); then
-    output=$(eval "$master_addr_by_name_command" 2>"$stderr_file")
-    exit_code=$?
-    stderr_output=$(cat "$stderr_file" 2>/dev/null)
-    rm -f "$stderr_file"
-    if [ -n "$stderr_output" ]; then echo "$stderr_output" >&2; fi
-  else
-    output=$(eval "$master_addr_by_name_command")
-    exit_code=$?
+  # Without that capture a rejected password could go unnoticed and let startup
+  # fall back to the default primary, so a failed mktemp stops startup instead.
+  if ! stderr_file=$(mktemp 2>/dev/null); then
+    set_xtrace_when_ut_mode_false
+    echo "Error: cannot create a temporary file to capture the sentinel reply's stderr; refusing to query sentinels without detecting authentication failures. Exiting."
+    exit 1
   fi
+  output=$(eval "$master_addr_by_name_command" 2>"$stderr_file")
+  exit_code=$?
+  stderr_output=$(cat "$stderr_file" 2>/dev/null)
+  rm -f "$stderr_file"
+  if [ -n "$stderr_output" ]; then echo "$stderr_output" >&2; fi
   set_xtrace_when_ut_mode_false
 
   # An error reply is not an answer about the primary. NOAUTH/WRONGPASS mean

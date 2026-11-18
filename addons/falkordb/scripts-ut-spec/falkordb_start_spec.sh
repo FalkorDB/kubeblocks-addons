@@ -630,6 +630,17 @@ Describe "FalkorDB Start Bash Script Tests"
       The variable REDIS_SENTINEL_MONITORS_NO_PRIMARY should eq "false"
     End
 
+    It "exits rather than query a sentinel when stderr cannot be captured"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo QUERIED-\$((1 + 1)) >&2"
+      }
+      mktemp() { return 1; }
+      When run get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "cannot create a temporary file to capture the sentinel reply's stderr"
+      The stderr should not include "QUERIED-2"
+    End
+
     It "retries on other errors from sentinel"
       build_sentinel_get_master_addr_by_name_command() {
         echo "return 1"
