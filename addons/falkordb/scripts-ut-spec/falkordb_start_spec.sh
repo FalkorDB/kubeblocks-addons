@@ -594,6 +594,92 @@ Describe "FalkorDB Start Bash Script Tests"
       The stdout should include "Timeout occurred while retrieving primary info from sentinel. Retrying..."
     End
 
+    It "reports NOAUTH as an authentication failure with an empty password"
+      unset SENTINEL_PASSWORD
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo 'NOAUTH Authentication required.'"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "Authentication failed on sentinel: sentinel1.redis-sentinel-headless (NOAUTH Authentication required.); SENTINEL_PASSWORD is empty."
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+      The variable REDIS_SENTINEL_MONITORS_NO_PRIMARY should eq "false"
+    End
+
+    It "reports WRONGPASS as a rejected password even when redis-cli exits non-zero"
+      SENTINEL_PASSWORD="stale"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo 'WRONGPASS invalid username-password pair or user is disabled.'; false"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "SENTINEL_PASSWORD was rejected."
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+    End
+
+    It "reports an AUTH failure redis-cli prints on stderr"
+      SENTINEL_PASSWORD="stale"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "echo 'AUTH failed: WRONGPASS invalid username-password pair or user is disabled.' >&2; echo ''"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "(AUTH failed: WRONGPASS invalid username-password pair or user is disabled.); SENTINEL_PASSWORD was rejected."
+      The stderr should include "AUTH failed: WRONGPASS"
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+      The variable REDIS_SENTINEL_MONITORS_NO_PRIMARY should eq "false"
+    End
+
+    Describe "when the sentinel stderr capture fails"
+      setup_query_marker() { query_marker="$(command mktemp -d)/queried"; }
+      cleanup_query_marker() { rm -rf "$(dirname "$query_marker")"; }
+      Before "setup_query_marker"
+      After "cleanup_query_marker"
+
+      It "exits rather than query a sentinel when stderr cannot be captured"
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "touch '$query_marker'"
+        }
+        mktemp() { return 1; }
+        When run get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+        The status should be failure
+        The stdout should include "cannot create a temporary file to capture the sentinel reply's stderr"
+        The path "$query_marker" should not be exist
+      End
+
+      It "exits when the captured stderr cannot be read"
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "echo 'AUTH failed: WRONGPASS' >&2; echo ''"
+        }
+        cat() { return 1; }
+        When run get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+        The status should be failure
+        The stdout should include "cannot read the captured stderr of the sentinel reply"
+        The stdout should not include "Empty primary info retrieved from sentinel"
+      End
+    End
+
+    It "does not take an announced host named like an error code for an auth error"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "printf 'NOAUTH-primary.example.com\\n6379\\n'"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be success
+      The stdout should include "Successfully retrieved primary info from sentinel"
+      The variable REDIS_SENTINEL_PRIMARY_INFO[0] should eq "NOAUTH-primary.example.com"
+    End
+
+    It "does not take an announced host named exactly like an error code for an auth error"
+      build_sentinel_get_master_addr_by_name_command() {
+        echo "printf 'WRONGPASS\\n6379\\n'"
+      }
+      When call get_master_addr_by_name_from_sentinel "sentinel1.redis-sentinel-headless"
+      The status should be success
+      The stdout should include "Successfully retrieved primary info from sentinel"
+      The variable REDIS_SENTINEL_PRIMARY_INFO[0] should eq "WRONGPASS"
+      The variable REDIS_SENTINEL_AUTH_FAILED should not eq "true"
+    End
+
     It "retries on other errors from sentinel"
       build_sentinel_get_master_addr_by_name_command() {
         echo "return 1"
@@ -605,6 +691,39 @@ Describe "FalkorDB Start Bash Script Tests"
   End
 
   Describe "retry_get_master_addr_by_name_from_sentinel()"
+    Describe "with an authentication error followed by timeouts"
+      setup_attempt_file() { attempt_file=$(mktemp); }
+      cleanup_attempt_file() { rm -f "$attempt_file"; }
+      Before "setup_attempt_file"
+      After "cleanup_attempt_file"
+
+    It "keeps an authentication failure when later attempts time out"
+      SENTINEL_PASSWORD=""
+      build_sentinel_get_master_addr_by_name_command() {
+        if [ ! -s "$attempt_file" ]; then
+          echo 1 > "$attempt_file"
+          echo "echo 'NOAUTH Authentication required.'"
+        else
+          echo "return 124"
+        fi
+      }
+      When call retry_get_master_addr_by_name_from_sentinel 3 0 "sentinel1.redis-sentinel-headless"
+      The status should be failure
+      The stdout should include "Authentication failed on sentinel"
+      The stdout should include "Timeout occurred while retrieving primary info from sentinel"
+      The stderr should include "failed after 3 retries"
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "true"
+    End
+    End
+
+    It "resets the authentication failure for the next sentinel"
+      REDIS_SENTINEL_AUTH_FAILED="true"
+      get_master_addr_by_name_from_sentinel() { return 0; }
+      When call retry_get_master_addr_by_name_from_sentinel 1 0 "sentinel2.redis-sentinel-headless"
+      The status should be success
+      The variable REDIS_SENTINEL_AUTH_FAILED should eq "false"
+    End
+
     It "retries to get primary info from sentinel successfully"
       get_master_addr_by_name_from_sentinel() {
         # mock get_master_addr_by_name_from_sentinel success
@@ -1087,9 +1206,47 @@ Describe "FalkorDB Start Bash Script Tests"
         echo "persisted" > "$redis_data_dir/dump.rdb"
         When run init_or_get_primary_from_redis_sentinel
         The status should be failure
-        The stdout should include "(0 of 2 reachable without a primary)"
+        The stdout should include "2 of 2 rejected authentication"
         The stdout should not include "default primary fallback called"
         The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      It "exits non-zero without a fallback when sentinels reject auth even with no persisted data"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        unset SENTINEL_PASSWORD
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "echo 'NOAUTH Authentication required.'"
+        }
+        When run init_or_get_primary_from_redis_sentinel
+        The status should be failure
+        The stdout should include "Authentication failed on sentinel"
+        The stdout should include "2 of 2 rejected authentication (SENTINEL_PASSWORD is empty)"
+        The stdout should not include "default primary fallback called"
+        The stderr should include "Function 'get_master_addr_by_name_from_sentinel' failed after 1 retries"
+      End
+
+      It "keeps a rejected SENTINEL_PASSWORD out of the production xtrace"
+        Skip if "shell type and version unmatch, please check!" should_skip_when_shell_type_and_version_invalid
+        SENTINEL_PASSWORD="s3cret-value"
+        # build the command as production does, password on the command line;
+        # only redis-cli's reply is mocked
+        build_sentinel_get_master_addr_by_name_command() {
+          echo "timeout 5 redis-cli -h $1 -p 26379 -a $SENTINEL_PASSWORD sentinel get-master-addr-by-name $REDIS_COMPONENT_NAME"
+        }
+        timeout() { echo "NOAUTH Authentication required."; }
+        # trace as the container does: set -x at start, toggled by ut_mode=false
+        run_traced_like_production() {
+          ut_mode="false"
+          set -x
+          init_or_get_primary_from_redis_sentinel
+        }
+        When run run_traced_like_production
+        The status should be failure
+        The stdout should include "2 of 2 rejected authentication (SENTINEL_PASSWORD was rejected)"
+        The stdout should include "-a ******** sentinel get-master-addr-by-name"
+        The stdout should not include "s3cret-value"
+        The stderr should include "sentinel_password_state"
+        The stderr should not include "s3cret-value"
       End
 
       running_as_root() { [ "$(id -u)" = "0" ]; }

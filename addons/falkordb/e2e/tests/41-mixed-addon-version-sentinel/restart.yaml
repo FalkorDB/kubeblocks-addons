@@ -1,0 +1,9 @@
+apiVersion: operations.kubeblocks.io/v1alpha1
+kind: OpsRequest
+metadata:
+  name: fdb-mixed-restart
+spec:
+  clusterName: fdb-mixed
+  type: Restart
+  restart:
+    - componentName: falkordb

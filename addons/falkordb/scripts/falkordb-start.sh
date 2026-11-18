@@ -376,6 +376,7 @@ init_or_get_primary_from_redis_sentinel() {
   local first_redis_primary_host=""
   local first_redis_primary_port=""
   local sentinels_without_primary=0
+  local sentinels_auth_failed=0
   sentinel_pod_fqdn_list=($(split "$SENTINEL_POD_FQDN_LIST" ","))
   for sentinel_pod_fqdn in "${sentinel_pod_fqdn_list[@]}"; do
     # get primary info from sentinel
@@ -404,6 +405,9 @@ init_or_get_primary_from_redis_sentinel() {
       if [ "$REDIS_SENTINEL_MONITORS_NO_PRIMARY" == "true" ]; then
         sentinels_without_primary=$((sentinels_without_primary + 1))
       fi
+      if [ "$REDIS_SENTINEL_AUTH_FAILED" == "true" ]; then
+        sentinels_auth_failed=$((sentinels_auth_failed + 1))
+      fi
       echo "Failed to retrieve primary info from sentinel: $sentinel_pod_fqdn. Skipping this sentinel."
     fi
   done
@@ -414,6 +418,14 @@ init_or_get_primary_from_redis_sentinel() {
   # second primary (split-brain) or replicate from an empty one (data loss).
   echo "get all primary info from redis sentinel master_count_map: ${master_count_map[*]}"
   if [ ${#master_count_map[@]} -eq 0 ]; then
+    # Sentinels that reject our credentials are running and may well know the
+    # primary; nothing can be concluded from them, not even on first bootstrap.
+    # Exit so the container restarts and re-reads its environment once the
+    # sentinel credential resolves, instead of picking a primary blindly.
+    if [ "$sentinels_auth_failed" -gt 0 ]; then
+      echo "Error: no primary node found from all redis sentinels: $sentinels_auth_failed of ${#sentinel_pod_fqdn_list[@]} rejected authentication (SENTINEL_PASSWORD $(sentinel_password_state)); refusing to pick a primary until the sentinel credential is available. Exiting."
+      exit 1
+    fi
     if ! redis_data_dir_has_persisted_data; then
       echo "no primary node found from all redis sentinels and $redis_data_dir has no persisted data, use default primary node for first bootstrap."
       get_default_initialize_primary_node
@@ -625,6 +637,31 @@ redis_data_dir_has_persisted_data() {
   return 1
 }
 
+# prints the first line of a sentinel reply (or redis-cli stderr) that is an
+# authentication error and succeeds, or fails when there is none
+sentinel_reply_auth_error() {
+  local line
+  while IFS= read -r line; do
+    # redis-cli may prefix error replies with "(error) " when attached to a tty.
+    # Redis error replies are a code followed by a message, so require the
+    # space: an announced host such as NOAUTH-x.example.com (or plain NOAUTH,
+    # one line of a get-master-addr-by-name reply) is not taken for an error.
+    case "${line#(error) }" in
+      "NOAUTH "*|"WRONGPASS "*|"ERR AUTH"*|"AUTH failed"*) echo "${line#(error) }"; return 0 ;;
+    esac
+  done <<< "$1"
+  return 1
+}
+
+# describes SENTINEL_PASSWORD without expanding it, so xtrace never logs it
+sentinel_password_state() {
+  if [ -n "${SENTINEL_PASSWORD:+set}" ]; then
+    echo "was rejected"
+  else
+    echo "is empty"
+  fi
+}
+
 build_sentinel_get_master_addr_by_name_command() {
   local sentinel_pod_fqdn="$1"
   local timeout_value=5
@@ -640,14 +677,47 @@ build_sentinel_get_master_addr_by_name_command() {
 get_master_addr_by_name_from_sentinel() {
   local master_addr_by_name_command
   local sentinel_pod_fqdn="$1"
+  local stderr_file stderr_output=""
+  # REDIS_SENTINEL_AUTH_FAILED is not reset here but once per sentinel in
+  # retry_get_master_addr_by_name_from_sentinel: a NOAUTH followed by timeouts
+  # must still count as an authentication failure.
   REDIS_SENTINEL_MONITORS_NO_PRIMARY="false"
   unset_xtrace_when_ut_mode_false
   master_addr_by_name_command=$(build_sentinel_get_master_addr_by_name_command "$sentinel_pod_fqdn")
   logging_mask_password_command="${master_addr_by_name_command/$SENTINEL_PASSWORD/********}"
   echo "execute get-master-addr-by-name command: $logging_mask_password_command"
-  output=$(eval "$master_addr_by_name_command")
+  # redis-cli reports a failed AUTH from -a on stderr ("AUTH failed: WRONGPASS
+  # ..."), so capture stderr apart from the reply to classify it, then pass it on.
+  # Without that capture a rejected password could go unnoticed and let startup
+  # fall back to the default primary, so a failed mktemp stops startup instead.
+  if ! stderr_file=$(mktemp 2>/dev/null); then
+    set_xtrace_when_ut_mode_false
+    echo "Error: cannot create a temporary file to capture the sentinel reply's stderr; refusing to query sentinels without detecting authentication failures. Exiting."
+    exit 1
+  fi
+  output=$(eval "$master_addr_by_name_command" 2>"$stderr_file")
   exit_code=$?
+  # an unreadable capture would hide a rejection the same way, so stop here too
+  if ! stderr_output=$(cat "$stderr_file" 2>/dev/null); then
+    rm -f "$stderr_file"
+    set_xtrace_when_ut_mode_false
+    echo "Error: cannot read the captured stderr of the sentinel reply; refusing to go on without detecting authentication failures. Exiting."
+    exit 1
+  fi
+  rm -f "$stderr_file"
+  if [ -n "$stderr_output" ]; then echo "$stderr_output" >&2; fi
   set_xtrace_when_ut_mode_false
+
+  # An error reply is not an answer about the primary. NOAUTH/WRONGPASS mean
+  # SENTINEL_PASSWORD is missing or stale (for example while the sentinel
+  # credential reference has not resolved during an addon upgrade), not that
+  # the sentinel is down or monitors no primary.
+  local auth_error
+  if auth_error=$(sentinel_reply_auth_error "$output") || auth_error=$(sentinel_reply_auth_error "$stderr_output"); then
+    REDIS_SENTINEL_AUTH_FAILED="true"
+    echo "Authentication failed on sentinel: $sentinel_pod_fqdn ($auth_error); SENTINEL_PASSWORD $(sentinel_password_state)."
+    return 1
+  fi
 
   if [ $exit_code -eq 0 ]; then
     read -r -d '' -a REDIS_SENTINEL_PRIMARY_INFO <<< "$output"
@@ -676,6 +746,7 @@ retry_get_master_addr_by_name_from_sentinel() {
   local max_retry="$1"
   local retry_delay="$2"
   local sentinel_pod_fqdn="$3"
+  REDIS_SENTINEL_AUTH_FAILED="false"
   if call_func_with_retry "$max_retry" "$retry_delay" get_master_addr_by_name_from_sentinel "$sentinel_pod_fqdn"; then
     return 0
   else
