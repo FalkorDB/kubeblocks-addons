@@ -50,7 +50,16 @@ spec:
                 fdb_verify_keys "$NAMESPACE" "$replica" e2e-mixed 50
               # The replica must hold persisted data when it restarts: that is
               # the pod the issue saw refuse the default-primary fallback.
+              # BGREWRITEAOF only starts (or schedules) the rewrite, so wait for
+              # it to finish before anything restarts the pod.
               fdb_cli "$NAMESPACE" "$replica" BGREWRITEAOF >/dev/null
+              aof_rewritten() {
+                persistence="$(fdb_cli "$NAMESPACE" "$replica" INFO persistence | tr -d '\r')"
+                echo "$persistence" | grep -qx 'aof_rewrite_scheduled:0' &&
+                  echo "$persistence" | grep -qx 'aof_rewrite_in_progress:0' &&
+                  echo "$persistence" | grep -qx 'aof_last_bgrewrite_status:ok'
+              }
+              fdb_retry "the AOF rewrite on $replica to finish" aof_rewritten
       catch:
         - events: {}
         - podLogs:
