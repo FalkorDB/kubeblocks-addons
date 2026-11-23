@@ -199,21 +199,32 @@ another version, change the FalkorDB component's `componentDef` first, and the
 Sentinel's only once the FalkorDB component runs on its new definition:
 
 ```bash
+# A Component's RoleBinding names its definition's ClusterRole, and a roleRef
+# can't change: KubeBlocks can't update it to the new definition's and the
+# move stalls. Once the Component names the new definition, delete the
+# RoleBinding; KubeBlocks recreates it for the new one.
+move() { # <component> <index in spec.componentSpecs> <definition>
+  kubectl patch cluster falkordb-replication -n demo --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/componentSpecs/$2/componentDef\",\"value\":\"$3\"}]"
+  until [ "$(kubectl get component "falkordb-replication-$1" -n demo -o jsonpath='{.spec.compDef}')" = "$3" ]; do
+    sleep 2
+  done
+  kubectl delete rolebinding "kb-falkordb-replication-$1" -n demo --ignore-not-found
+}
+
 # 1. The FalkorDB component (index 0 in examples/falkordb/cluster.yaml)
-kubectl patch cluster falkordb-replication -n demo --type=json \
-  -p '[{"op":"replace","path":"/spec/componentSpecs/0/componentDef","value":"falkordb-4-1.8.3"}]'
-# 2. Wait until it runs on the new definition: the Component names it, its
-#    controller acted on that spec (generation = observedGeneration), and it
-#    is Running, which it is only once every pod was updated
+move falkordb 0 falkordb-4-1.8.3
+# 2. Wait until it runs on the new definition: its controller acted on that
+#    spec (generation = observedGeneration), and it is Running, which it is
+#    only once every pod was updated
 while :; do
   set -- $(kubectl get component falkordb-replication-falkordb -n demo \
-    -o jsonpath='{.spec.compDef} {.metadata.generation} {.status.observedGeneration} {.status.phase}')
-  [ "$1" = falkordb-4-1.8.3 ] && [ "$2" = "$3" ] && [ "$4" = Running ] && break
+    -o jsonpath='{.metadata.generation} {.status.observedGeneration} {.status.phase}')
+  [ "$1" = "$2" ] && [ "$3" = Running ] && break
   sleep 10
 done
-# 3. Then the Sentinel
-kubectl patch cluster falkordb-replication -n demo --type=json \
-  -p '[{"op":"replace","path":"/spec/componentSpecs/1/componentDef","value":"falkordb-sent-4-1.8.3"}]'
+# 3. Then the Sentinel (index 1)
+move falkordb-sent 1 falkordb-sent-4-1.8.3
 ```
 
 Changing both in one write moves the Sentinel first, by the update order

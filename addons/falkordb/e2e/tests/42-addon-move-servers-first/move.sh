@@ -28,6 +28,21 @@ move_component() {
   kubectl patch cluster fdb-move -n "$NAMESPACE" --type=json \
     -p "[{\"op\":\"replace\",\"path\":\"/spec/componentSpecs/$((index - 1))/componentDef\",\"value\":\"$2\"}]" || return 1
   fdb_retry "the $1 Component to name $2" component_on "$1" "$2"
+  release_role_binding "$1" "$2"
+}
+
+# release_role_binding <component> <definition>
+# The Component's RoleBinding names its definition's ClusterRole, and a
+# RoleBinding's roleRef can't change: KubeBlocks' update of it is refused, and
+# the Component never finishes the move. Delete it when it names another
+# definition's; KubeBlocks recreates it for the new one.
+release_role_binding() {
+  local ref
+  ref="$(kubectl get rolebinding -n "$NAMESPACE" "kb-fdb-move-$1" -o jsonpath='{.roleRef.name}' 2>/dev/null)" || return 0
+  case "$ref" in
+    "" | "kb-$2") return 0 ;;
+    kb-falkordb-*) kubectl delete rolebinding -n "$NAMESPACE" "kb-fdb-move-$1" ;;
+  esac
 }
 
 # component_on <component> <definition>
