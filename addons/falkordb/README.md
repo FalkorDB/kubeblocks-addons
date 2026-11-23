@@ -188,6 +188,53 @@ More details on how components for the `replication` topology are started, upgra
 kubectl get cd falkordb -oyaml | yq '.spec.topologies[] | select(.name=="replication") | .orders'
 ```
 
+The same order applies to updates, including starting a stopped cluster: a
+FalkorDB replica with data refuses to start while no Sentinel is up.
+
+#### Move a replication cluster to another addon version
+
+Each addon version installs its own ComponentDefinitions, such as
+`falkordb-4-1.8.3` and `falkordb-sent-4-1.8.3`. To move a replication cluster to
+another version, change the FalkorDB component's `componentDef` first, and the
+Sentinel's only once the FalkorDB component runs on its new definition:
+
+```bash
+# A Component's RoleBinding names its definition's ClusterRole, and a roleRef
+# can't change: KubeBlocks can't update it to the new definition's and the
+# move stalls. Once the Component names the new definition, delete the
+# RoleBinding; KubeBlocks recreates it for the new one.
+move() { # <component> <index in spec.componentSpecs> <definition>
+  kubectl patch cluster falkordb-replication -n demo --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/componentSpecs/$2/componentDef\",\"value\":\"$3\"}]"
+  until [ "$(kubectl get component "falkordb-replication-$1" -n demo -o jsonpath='{.spec.compDef}')" = "$3" ]; do
+    sleep 2
+  done
+  kubectl delete rolebinding "kb-falkordb-replication-$1" -n demo --ignore-not-found
+}
+
+# 1. The FalkorDB component (index 0 in examples/falkordb/cluster.yaml)
+move falkordb 0 falkordb-4-1.8.3
+# 2. Wait until it runs on the new definition: its controller acted on that
+#    spec (generation = observedGeneration), and it is Running, which it is
+#    only once every pod was updated
+while :; do
+  set -- $(kubectl get component falkordb-replication-falkordb -n demo \
+    -o jsonpath='{.metadata.generation} {.status.observedGeneration} {.status.phase}')
+  [ "$1" = "$2" ] && [ "$3" = Running ] && break
+  sleep 10
+done
+# 3. Then the Sentinel (index 1)
+move falkordb-sent 1 falkordb-sent-4-1.8.3
+```
+
+Changing both in one write moves the Sentinel first, by the update order
+above. A FalkorDB component on an addon version before `1.8.3` finds its
+Sentinel's password, pod list and port only on a Sentinel definition of its own
+version, so it is left without the password, and a replica with data then
+crash-loops on `NOAUTH`. From `1.8.3` the FalkorDB component finds a Sentinel
+of any version. A move to a version before `1.8.3` has the problem either way;
+move to `1.8.3` or later.
+
 ### Horizontal scaling
 
 #### Scale-out

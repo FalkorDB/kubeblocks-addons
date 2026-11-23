@@ -26,6 +26,14 @@ spec:
         terminate:
           - falkordb-sent
           - falkordb
+        # The sentinels before the servers, as at provisioning: starting a
+        # stopped cluster follows this order too, and a server with data
+        # refuses to start while no sentinel is up, so with the servers first
+        # neither would ever start. A move to another addon version is the
+        # one update that wants the servers first, while servers on a version
+        # before 1.8.3 pin their sentinel references to falkordb-sent-4-<their
+        # version>: make it in two writes, servers then sentinels (see "Move a
+        # replication cluster to another addon version" in the README).
         update:
           - falkordb-sent
           - falkordb
