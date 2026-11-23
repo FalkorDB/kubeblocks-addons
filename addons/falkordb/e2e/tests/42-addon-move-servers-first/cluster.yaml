@@ -1,0 +1,48 @@
+# Applied by the scenario's first step, which fills in the two copied
+# ComponentDefinitions' names (they depend on the namespace).
+apiVersion: apps.kubeblocks.io/v1
+kind: Cluster
+metadata:
+  name: fdb-move
+spec:
+  terminationPolicy: WipeOut
+  clusterDef: falkordb
+  topology: replication
+  componentSpecs:
+    - name: falkordb
+      componentDef: SERVERS_DEFINITION
+      disableExporter: true
+      replicas: 2
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 512Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+    - name: falkordb-sent
+      componentDef: SENTINELS_DEFINITION
+      replicas: 3
+      resources:
+        limits:
+          cpu: '0.5'
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 256Mi
+      volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
