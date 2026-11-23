@@ -82,3 +82,22 @@ assert_servers_reach_sentinels() {
     echo "$pod resolved every sentinel var, and its server never failed to start"
   done
 }
+
+# sentinels_name_primary <primary pod>
+# Every sentinel reports the same master address, and it is <primary pod>'s:
+# its hostname (a FQDN starting with the pod name) or its pod IP.
+sentinels_name_primary() {
+  local primary="$1" ip pod addr host want=""
+  ip="$(kubectl get pod -n "$NAMESPACE" "$primary" -o jsonpath='{.status.podIP}')"
+  for pod in $(fdb_pods "$NAMESPACE" fdb-move falkordb-sent); do
+    addr="$(fdb_sentinel_master_addr "$NAMESPACE" "$pod" fdb-move-falkordb)" || return 1
+    [ -z "$want" ] && want="$addr"
+    [ "$addr" = "$want" ] || { fdb_log "$pod names $addr, another sentinel $want"; return 1; }
+    host="${addr% *}"
+    case "$host" in
+      "$primary" | "$primary".*) ;;
+      *) [ -n "$ip" ] && [ "$host" = "$ip" ] || { fdb_log "$pod names $addr, not $primary ($ip)"; return 1; } ;;
+    esac
+  done
+  fdb_log "every sentinel names $want, the primary $primary"
+}

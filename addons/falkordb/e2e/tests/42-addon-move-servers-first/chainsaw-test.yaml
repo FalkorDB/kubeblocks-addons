@@ -97,9 +97,12 @@ spec:
                 jq --arg name "falkordb-pcr-$suffix" --arg def "$old_servers" "$metadata"' | .spec.componentDef = $def' |
                 kubectl apply -f -
               kubectl wait --for=jsonpath='{.status.phase}'=Available \
-                "paramconfigrenderers.parameters.kubeblocks.io/falkordb-pcr-$suffix" --timeout=2m ||
+                "paramconfigrenderers.parameters.kubeblocks.io/falkordb-pcr-$suffix" --timeout=2m || {
                 kubectl get paramconfigrenderers.parameters.kubeblocks.io "falkordb-pcr-$suffix" \
                   -o jsonpath='{.status}{"\n"}' >&2
+                fdb_fail "falkordb-pcr-$suffix did not become Available"
+                exit 1
+              }
 
               sed -e "s/SERVERS_DEFINITION/$old_servers/" \
                 -e "s/SENTINELS_DEFINITION/$old_sentinels/" cluster.yaml |
@@ -249,6 +252,11 @@ spec:
                 fdb_retry "$pod to monitor the primary" \
                   fdb_assert_sentinel_monitoring "$NAMESPACE" "$pod"
               done
+              # Monitoring a master isn't enough: every sentinel must name the
+              # pod that is the primary now, by hostname or pod IP, or failover
+              # would act on a stale one.
+              fdb_retry "every sentinel to name $primary as the master" \
+                sentinels_name_primary "$primary"
       catch:
         - events: {}
         - podLogs:
