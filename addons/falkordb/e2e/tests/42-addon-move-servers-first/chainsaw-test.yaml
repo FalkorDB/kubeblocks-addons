@@ -96,13 +96,21 @@ spec:
               kubectl get paramconfigrenderers.parameters.kubeblocks.io "$renderer" -o json |
                 jq --arg name "falkordb-pcr-$suffix" --arg def "$old_servers" "$metadata"' | .spec.componentDef = $def' |
                 kubectl apply -f -
-              kubectl wait --for=jsonpath='{.status.phase}'=Available \
-                "paramconfigrenderers.parameters.kubeblocks.io/falkordb-pcr-$suffix" --timeout=2m || {
-                kubectl get paramconfigrenderers.parameters.kubeblocks.io "falkordb-pcr-$suffix" \
-                  -o jsonpath='{.status}{"\n"}' >&2
-                fdb_fail "falkordb-pcr-$suffix did not become Available"
-                exit 1
-              }
+              # KubeBlocks 1.2 deprecates ParamConfigRenderer and may leave its
+              # status unset: wait for the phase the chart's own renderer has,
+              # if it has one.
+              phase="$(kubectl get paramconfigrenderers.parameters.kubeblocks.io "$renderer" -o jsonpath='{.status.phase}')"
+              if [ -n "$phase" ]; then
+                kubectl wait --for=jsonpath='{.status.phase}'="$phase" \
+                  "paramconfigrenderers.parameters.kubeblocks.io/falkordb-pcr-$suffix" --timeout=2m || {
+                  kubectl get paramconfigrenderers.parameters.kubeblocks.io "falkordb-pcr-$suffix" \
+                    -o jsonpath='{.status}{"\n"}' >&2
+                  fdb_fail "falkordb-pcr-$suffix did not reach $renderer's phase $phase"
+                  exit 1
+                }
+              else
+                echo "$renderer reports no phase; not waiting for the copy's"
+              fi
 
               sed -e "s/SERVERS_DEFINITION/$old_servers/" \
                 -e "s/SENTINELS_DEFINITION/$old_sentinels/" cluster.yaml |
