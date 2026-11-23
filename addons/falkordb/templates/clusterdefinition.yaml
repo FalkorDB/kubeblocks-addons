@@ -26,9 +26,21 @@ spec:
         terminate:
           - falkordb-sent
           - falkordb
+        # The servers before the sentinels. During an addon upgrade the
+        # components move to the new ComponentDefinitions in this order, and
+        # one left behind keeps the old definition's var references. Servers
+        # on an addon before 1.8.3 pin their sentinel references to
+        # falkordb-sent-4-<their own version>, so once the sentinels moved on
+        # they resolve to nothing: SENTINEL_PASSWORD comes out empty, the
+        # servers roll on it and a replica crash-loops on NOAUTH. Servers on
+        # 1.8.3 or later match any falkordb-sent-4 definition, and the
+        # sentinels reference nothing of the servers, so moving the servers
+        # first leaves every reference resolvable. This ClusterDefinition is
+        # shared by every installed addon version, so the newest one's order
+        # applies to an upgrade from any earlier version.
         update:
-          - falkordb-sent
           - falkordb
+          - falkordb-sent
     - name: cluster
       shardings:
         - name: shard
