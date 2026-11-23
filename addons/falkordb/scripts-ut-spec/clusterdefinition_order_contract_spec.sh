@@ -1,12 +1,11 @@
 # shellcheck shell=sh
 
-# During an addon upgrade the replication topology's components move to the new
-# ComponentDefinitions in the ClusterDefinition's update order. Servers on an
-# addon before 1.8.3 pin their sentinel var references to
-# falkordb-sent-4-<their own version>: moved after the sentinels, they resolve
-# SENTINEL_PASSWORD to empty and a replica crash-loops on NOAUTH. The servers
-# must be updated first. Provisioning still starts the sentinels first, since
-# the servers ask them for the primary.
+# The replication topology starts and updates the sentinels before the servers.
+# A server with data asks the sentinels for the primary on startup and refuses
+# to start while none is up, and KubeBlocks also follows the update order when
+# it starts a stopped cluster: with the servers first, the sentinels would wait
+# for servers that never start. A move to another addon version, which wants
+# the servers first, is made in two writes instead (see the README).
 Describe "FalkorDB ClusterDefinition order contract"
   chart_path() {
     printf "%s/addons/falkordb" "${SHELLSPEC_CWD:?}"
@@ -27,11 +26,11 @@ Describe "FalkorDB ClusterDefinition order contract"
       '
   }
 
-  It "updates the servers before the sentinels"
+  It "updates, and so starts a stopped cluster, sentinels first"
     When call replication_order update
     The status should be success
-    The output should equal "falkordb
-falkordb-sent"
+    The output should equal "falkordb-sent
+falkordb"
   End
 
   It "provisions the sentinels before the servers"

@@ -188,6 +188,36 @@ More details on how components for the `replication` topology are started, upgra
 kubectl get cd falkordb -oyaml | yq '.spec.topologies[] | select(.name=="replication") | .orders'
 ```
 
+The same order applies to updates, including starting a stopped cluster: a
+FalkorDB replica with data refuses to start while no Sentinel is up.
+
+#### Move a replication cluster to another addon version
+
+Each addon version installs its own ComponentDefinitions, such as
+`falkordb-4-1.8.3` and `falkordb-sent-4-1.8.3`. To move a replication cluster to
+another version, change the FalkorDB component's `componentDef` first, and the
+Sentinel's only once the FalkorDB component runs on its new definition:
+
+```bash
+# 1. The FalkorDB component (index 0 in examples/falkordb/cluster.yaml)
+kubectl patch cluster falkordb-replication -n demo --type=json \
+  -p '[{"op":"replace","path":"/spec/componentSpecs/0/componentDef","value":"falkordb-4-1.8.3"}]'
+# 2. Wait until it is Running on the new definition
+kubectl get component falkordb-replication-falkordb -n demo \
+  -o jsonpath='{.spec.compDef} {.status.phase}{"\n"}'
+# 3. Then the Sentinel
+kubectl patch cluster falkordb-replication -n demo --type=json \
+  -p '[{"op":"replace","path":"/spec/componentSpecs/1/componentDef","value":"falkordb-sent-4-1.8.3"}]'
+```
+
+Changing both in one write moves the Sentinel first, by the update order
+above. A FalkorDB component on an addon version before `1.8.3` finds its
+Sentinel's password, pod list and port only on a Sentinel definition of its own
+version, so it is left without the password, and a replica with data then
+crash-loops on `NOAUTH`. From `1.8.3` the FalkorDB component finds a Sentinel
+of any version. A move to a version before `1.8.3` has the problem either way;
+move to `1.8.3` or later.
+
 ### Horizontal scaling
 
 #### Scale-out

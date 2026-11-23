@@ -4,23 +4,23 @@ metadata:
   name: addon-move-servers-first
 spec:
   description: >-
-    Move a replication cluster from an addon version whose servers pin their
-    sentinel var references to that version's exact sentinel definition (as
-    every release before 1.8.3 does) to the installed one, by changing both
-    components' ComponentDefinitions at once, as an addon upgrade does.
+    Move a replication cluster to the installed addon version from one whose
+    servers pin their sentinel var references to that version's exact sentinel
+    definition, as every version before 1.8.3 does, in two writes: the servers
+    first, the sentinels once the servers run on their new definition.
 
-    KubeBlocks moves the components in the ClusterDefinition's update order.
-    With the sentinels first, the servers are left on the old definition while
-    the sentinels run on the new one: their pinned references match nothing,
-    SENTINEL_PASSWORD resolves to empty, the servers roll on it, and a replica
-    with data crash-loops on NOAUTH. 41-mixed-addon-version-sentinel covers the
-    opposite window (servers on the new definition, sentinels on the old).
+    In one write KubeBlocks moves the sentinels first (the ClusterDefinition's
+    update order, which starting a stopped cluster also needs). The servers
+    left on the old definition then match no sentinel, SENTINEL_PASSWORD
+    resolves to empty, they roll on it, and a replica with data crash-loops on
+    NOAUTH. Moving the servers first works because the installed servers match
+    any falkordb-sent-4 definition, the old sentinels' included.
 
-    Without publishing an old chart, the installed definitions are copied under
-    another addon version, and the server copy's sentinel references are pinned
-    to the sentinel copy's exact name. The cluster starts on the copies and is
-    then moved to the installed definitions. The scenario fails as soon as the
-    sentinels move while the servers are still on the copy.
+    Without publishing an old chart, the installed definitions (and the
+    servers' ParamConfigRenderer, which names its definition exactly) are
+    copied under another addon version, and the server copy's sentinel
+    references are pinned to the sentinel copy's exact name. The cluster starts
+    on the copies, then moves.
   steps:
     - name: create the cluster on copies of an older addon version
       try:
@@ -50,25 +50,23 @@ spec:
 
               # Keep the annotations, KubeBlocks only reconciles a definition
               # that carries kubeblocks.io/crd-api-version, but drop Helm's so
-              # the copy is not taken for part of the release. In the server
-              # copy, the references that match the sentinel definition by
-              # pattern (^falkordb-sent-4-) name the sentinel copy exactly, as
-              # an addon before 1.8.3 names its own version's; the bare
-              # falkordb-sent-4 prefix those releases also used stays.
+              # the copy is not taken for part of the release.
+              metadata='.metadata = {
+                  name: $name,
+                  labels: {"e2e.falkordb.com/copy-of": .metadata.name},
+                  annotations: ((.metadata.annotations // {})
+                    | with_entries(select(.key | test("^(meta\\.)?helm\\.sh/") | not)))
+                } | del(.status)'
+              # In the server copy, the references that match the sentinel
+              # definition by pattern (^falkordb-sent-4-) name the sentinel
+              # copy exactly, as a version before 1.8.3 names its own; the
+              # bare falkordb-sent-4 prefix those versions also used stays.
               copy() {
                 kubectl get componentdefinition "$1" -o json |
-                  jq --arg name "$2" --arg sentinels "$old_sentinels" '
-                    .metadata = {
-                      name: $name,
-                      labels: {"e2e.falkordb.com/copy-of": .metadata.name},
-                      annotations: ((.metadata.annotations // {})
-                        | with_entries(select(.key | test("^(meta\\.)?helm\\.sh/") | not)))
-                    }
-                    | del(.status)
-                    | .spec |= walk(
-                        if type == "object" and ((.compDef? | type) == "string")
-                          and (.compDef | startswith("^falkordb-sent-"))
-                        then .compDef = $sentinels else . end)' |
+                  jq --arg name "$2" --arg sentinels "$old_sentinels" "$metadata"' | .spec |= walk(
+                      if type == "object" and ((.compDef? | type) == "string")
+                        and (.compDef | startswith("^falkordb-sent-"))
+                      then .compDef = $sentinels else . end)' |
                   kubectl apply -f -
                 kubectl wait --for=jsonpath='{.status.phase}'=Available \
                   "componentdefinition/$2" --timeout=2m || {
@@ -89,6 +87,20 @@ spec:
                 { fdb_fail "the server copy's sentinel references are not pinned to $old_sentinels ($refs)"; exit 1; }
               echo "$old_servers references the sentinels as $old_sentinels"
 
+              # The servers' redis.conf comes from a ParamConfigRenderer that
+              # names their definition exactly: without one for the copy, the
+              # servers never get a config and never start.
+              renderer="$(kubectl get paramconfigrenderers.parameters.kubeblocks.io -o json |
+                jq -r --arg def "$servers" '.items[] | select(.spec.componentDef == $def) | .metadata.name' | head -n 1)"
+              [ -n "$renderer" ] || { fdb_fail "no ParamConfigRenderer names $servers"; exit 1; }
+              kubectl get paramconfigrenderers.parameters.kubeblocks.io "$renderer" -o json |
+                jq --arg name "falkordb-pcr-$suffix" --arg def "$old_servers" "$metadata"' | .spec.componentDef = $def' |
+                kubectl apply -f -
+              kubectl wait --for=jsonpath='{.status.phase}'=Available \
+                "paramconfigrenderers.parameters.kubeblocks.io/falkordb-pcr-$suffix" --timeout=2m ||
+                kubectl get paramconfigrenderers.parameters.kubeblocks.io "falkordb-pcr-$suffix" \
+                  -o jsonpath='{.status}{"\n"}' >&2
+
               sed -e "s/SERVERS_DEFINITION/$old_servers/" \
                 -e "s/SENTINELS_DEFINITION/$old_sentinels/" cluster.yaml |
                 kubectl apply -n "$NAMESPACE" -f -
@@ -96,6 +108,10 @@ spec:
             file: assert-running.yaml
       catch:
         - events: {}
+        - describe:
+            apiVersion: apps.kubeblocks.io/v1
+            kind: Component
+            name: fdb-move-falkordb
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-move
             tail: 100
@@ -107,6 +123,8 @@ spec:
               kubectl delete cluster fdb-move -n "$NAMESPACE" \
                 --ignore-not-found --wait=true --timeout=5m
               suffix="0.0.0-e2e-$(printf '%s' "$NAMESPACE" | cksum | cut -d' ' -f1)"
+              kubectl delete paramconfigrenderers.parameters.kubeblocks.io "falkordb-pcr-$suffix" \
+                --ignore-not-found --wait=false
               kubectl delete componentdefinition "falkordb-4-$suffix" "falkordb-sent-4-$suffix" \
                 --ignore-not-found --wait=false
 
@@ -117,7 +135,7 @@ spec:
               . "$E2E_LIB_DIR/falkordb.sh"
 
               # The pinned references resolve while both components run on
-              # the copies: the setup matches a working older release.
+              # the copies: the setup matches a working older version.
               for pod in $(fdb_pods "$NAMESPACE" fdb-move falkordb); do
                 kubectl exec -n "$NAMESPACE" "$pod" -c falkordb -- \
                   sh -c '[ -n "${SENTINEL_PASSWORD:-}" ]' ||
@@ -151,86 +169,23 @@ spec:
             selector: app.kubernetes.io/instance=fdb-move
             tail: 200
 
-    - name: move both components to the installed version
+    - name: move the servers first
       try:
         - script:
             content: |
               . "$E2E_LIB_DIR/falkordb.sh"
+              . ./move.sh
 
-              installed() {
-                kubectl get componentdefinition -l app.kubernetes.io/name=falkordb \
-                  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
-                  grep -E "^$1-[0-9]+\.[0-9]+\.[0-9]+" | sort -V | tail -n 1
-              }
+              suffix="0.0.0-e2e-$(printf '%s' "$NAMESPACE" | cksum | cut -d' ' -f1)"
               servers="$(installed falkordb-4)"
-              sentinels="$(installed falkordb-sent-4)"
-              comp_def() {
-                kubectl get component -n "$NAMESPACE" "fdb-move-$1" -o jsonpath='{.spec.compDef}'
-              }
+              move_component falkordb "$servers"
+              fdb_retry "the servers to roll out onto $servers" component_rolled_out falkordb 2
+              [ "$(comp_def falkordb-sent)" = "falkordb-sent-4-$suffix" ] ||
+                { fdb_fail "the sentinels moved with the servers: $(comp_def falkordb-sent)"; exit 1; }
+              echo "the servers run on $servers, the sentinels still on falkordb-sent-4-$suffix"
 
-              # One write for both components, as an addon upgrade makes it.
-              patch="$(kubectl get cluster -n "$NAMESPACE" fdb-move \
-                -o jsonpath='{range .spec.componentSpecs[*]}{.name}{"\n"}{end}' |
-                awk -v servers="$servers" -v sentinels="$sentinels" '
-                  { def = ($1 == "falkordb-sent") ? sentinels : servers
-                    ops = ops (ops ? "," : "") "{\"op\":\"replace\",\"path\":\"/spec/componentSpecs/" NR - 1 "/componentDef\",\"value\":\"" def "\"}" }
-                  END { print "[" ops "]" }')"
-              kubectl patch cluster fdb-move -n "$NAMESPACE" --type=json -p "$patch"
-
-              # Watch the components' definitions until both moved. The
-              # sentinels must not move while the servers are still on the
-              # copy: that is the window in which the servers' pinned
-              # references resolve to nothing. The sentinels are read first:
-              # both only move forward, so servers read afterwards are at
-              # least as far along, and a correct servers-first move can't be
-              # seen as sentinels new, servers old.
-              deadline=$(( $(date +%s) + 15 * 60 ))
-              servers_moved=""
-              while :; do
-                on_sentinels="$(comp_def falkordb-sent)"
-                on_servers="$(comp_def falkordb)"
-                if [ "$on_sentinels" = "$sentinels" ] && [ "$on_servers" != "$servers" ]; then
-                  fdb_fail "the sentinels moved to $on_sentinels while the servers were still on $on_servers"
-                  exit 1
-                fi
-                if [ -z "$servers_moved" ] && [ "$on_servers" = "$servers" ]; then
-                  servers_moved=1
-                  echo "the servers moved to $servers; the sentinels are on $on_sentinels"
-                fi
-                if [ "$on_servers" = "$servers" ] && [ "$on_sentinels" = "$sentinels" ]; then
-                  echo "the sentinels moved to $sentinels after the servers"
-                  break
-                fi
-                if [ "$(date +%s)" -ge "$deadline" ]; then
-                  fdb_fail "the components did not move: servers on $on_servers, sentinels on $on_sentinels"
-                  exit 1
-                fi
-                sleep 1
-              done
-
-              # Then wait for both rollouts to finish: every object caught up
-              # with its spec and every pod updated.
-              caught_up() {
-                set -- $(kubectl get "$1" -n "$NAMESPACE" "$2" \
-                  -o jsonpath='{.metadata.generation} {.status.observedGeneration}')
-                [ "$#" -eq 2 ] && [ "$1" = "$2" ]
-              }
-              component_rolled_out() {
-                caught_up instanceset "fdb-move-$1" &&
-                  [ "$(kubectl get instanceset -n "$NAMESPACE" "fdb-move-$1" \
-                    -o jsonpath='{.status.updatedReplicas}/{.status.replicas}')" = "$2/$2" ] &&
-                  caught_up component "fdb-move-$1" &&
-                  [ "$(kubectl get component -n "$NAMESPACE" "fdb-move-$1" \
-                    -o jsonpath='{.status.phase}')" = Running ]
-              }
-              rolled_out() {
-                component_rolled_out falkordb 2 &&
-                  component_rolled_out falkordb-sent 3 &&
-                  caught_up cluster fdb-move &&
-                  [ "$(kubectl get cluster -n "$NAMESPACE" fdb-move \
-                    -o jsonpath='{.status.phase}')" = Running ]
-              }
-              fdb_retry "both components to roll out onto the installed version" rolled_out
+              # The installed servers match the old sentinels by pattern.
+              assert_servers_reach_sentinels
         - assert:
             file: assert-running.yaml
       catch:
@@ -240,13 +195,32 @@ spec:
             kind: Component
             name: fdb-move-falkordb
         - describe:
-            apiVersion: apps.kubeblocks.io/v1
-            kind: Component
-            name: fdb-move-falkordb-sent
-        - describe:
             apiVersion: workloads.kubeblocks.io/v1
             kind: InstanceSet
             name: fdb-move-falkordb
+        - podLogs:
+            selector: app.kubernetes.io/instance=fdb-move
+            tail: 200
+
+    - name: then the sentinels
+      try:
+        - script:
+            content: |
+              . "$E2E_LIB_DIR/falkordb.sh"
+              . ./move.sh
+
+              sentinels="$(installed falkordb-sent-4)"
+              move_component falkordb-sent "$sentinels"
+              fdb_retry "the sentinels to roll out onto $sentinels" component_rolled_out falkordb-sent 3
+              fdb_retry "the cluster to settle" cluster_settled
+        - assert:
+            file: assert-running.yaml
+      catch:
+        - events: {}
+        - describe:
+            apiVersion: apps.kubeblocks.io/v1
+            kind: Component
+            name: fdb-move-falkordb-sent
         - podLogs:
             selector: app.kubernetes.io/instance=fdb-move
             tail: 200
@@ -256,27 +230,9 @@ spec:
         - script:
             content: |
               . "$E2E_LIB_DIR/falkordb.sh"
+              . ./move.sh
 
-              # Check the sentinel vars are set without printing the password,
-              # and that no server's start script failed on its way through the
-              # move: a replica without the password exits 1 and restarts in a
-              # loop. A restart KubeBlocks makes in place ends in a signal, so
-              # only a container that last exited 1 counts.
-              for pod in $(fdb_pods "$NAMESPACE" fdb-move falkordb); do
-                kubectl exec -n "$NAMESPACE" "$pod" -c falkordb -- sh -c '
-                  missing=""
-                  for var in SENTINEL_PASSWORD SENTINEL_USER SENTINEL_COMPONENT_NAME SENTINEL_POD_FQDN_LIST; do
-                    eval "value=\${$var:-}"
-                    [ -n "$value" ] || missing="$missing $var"
-                  done
-                  [ -z "$missing" ] || { echo "empty:$missing" >&2; exit 1; }' ||
-                  { fdb_fail "$pod resolved empty sentinel vars"; exit 1; }
-                last_exit="$(kubectl get pod -n "$NAMESPACE" "$pod" \
-                  -o jsonpath='{.status.containerStatuses[?(@.name=="falkordb")].lastState.terminated.exitCode}')"
-                [ "$last_exit" != 1 ] ||
-                  { fdb_fail "$pod's falkordb container exited 1 during the move"; exit 1; }
-                echo "$pod resolved every sentinel var, and its server never failed to start"
-              done
+              assert_servers_reach_sentinels
 
               fdb_retry "the roles to settle after the move" \
                 fdb_assert_role_counts "$NAMESPACE" fdb-move falkordb 1 1
