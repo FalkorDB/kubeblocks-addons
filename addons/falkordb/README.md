@@ -202,9 +202,15 @@ Sentinel's only once the FalkorDB component runs on its new definition:
 # 1. The FalkorDB component (index 0 in examples/falkordb/cluster.yaml)
 kubectl patch cluster falkordb-replication -n demo --type=json \
   -p '[{"op":"replace","path":"/spec/componentSpecs/0/componentDef","value":"falkordb-4-1.8.3"}]'
-# 2. Wait until it is Running on the new definition
-kubectl get component falkordb-replication-falkordb -n demo \
-  -o jsonpath='{.spec.compDef} {.status.phase}{"\n"}'
+# 2. Wait until it runs on the new definition: the Component names it, its
+#    controller acted on that spec (generation = observedGeneration), and it
+#    is Running, which it is only once every pod was updated
+while :; do
+  set -- $(kubectl get component falkordb-replication-falkordb -n demo \
+    -o jsonpath='{.spec.compDef} {.metadata.generation} {.status.observedGeneration} {.status.phase}')
+  [ "$1" = falkordb-4-1.8.3 ] && [ "$2" = "$3" ] && [ "$4" = Running ] && break
+  sleep 10
+done
 # 3. Then the Sentinel
 kubectl patch cluster falkordb-replication -n demo --type=json \
   -p '[{"op":"replace","path":"/spec/componentSpecs/1/componentDef","value":"falkordb-sent-4-1.8.3"}]'

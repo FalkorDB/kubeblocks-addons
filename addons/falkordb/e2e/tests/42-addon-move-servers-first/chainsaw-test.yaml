@@ -179,7 +179,7 @@ spec:
               suffix="0.0.0-e2e-$(printf '%s' "$NAMESPACE" | cksum | cut -d' ' -f1)"
               servers="$(installed falkordb-4)"
               move_component falkordb "$servers"
-              fdb_retry "the servers to roll out onto $servers" component_rolled_out falkordb 2
+              fdb_retry "the servers to roll out onto $servers" component_rolled_out falkordb 2 "$servers"
               [ "$(comp_def falkordb-sent)" = "falkordb-sent-4-$suffix" ] ||
                 { fdb_fail "the sentinels moved with the servers: $(comp_def falkordb-sent)"; exit 1; }
               echo "the servers run on $servers, the sentinels still on falkordb-sent-4-$suffix"
@@ -211,7 +211,7 @@ spec:
 
               sentinels="$(installed falkordb-sent-4)"
               move_component falkordb-sent "$sentinels"
-              fdb_retry "the sentinels to roll out onto $sentinels" component_rolled_out falkordb-sent 3
+              fdb_retry "the sentinels to roll out onto $sentinels" component_rolled_out falkordb-sent 3 "$sentinels"
               fdb_retry "the cluster to settle" cluster_settled
         - assert:
             file: assert-running.yaml
