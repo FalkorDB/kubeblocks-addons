@@ -180,12 +180,15 @@ spec:
               # Watch the components' definitions until both moved. The
               # sentinels must not move while the servers are still on the
               # copy: that is the window in which the servers' pinned
-              # references resolve to nothing.
+              # references resolve to nothing. The sentinels are read first:
+              # both only move forward, so servers read afterwards are at
+              # least as far along, and a correct servers-first move can't be
+              # seen as sentinels new, servers old.
               deadline=$(( $(date +%s) + 15 * 60 ))
               servers_moved=""
               while :; do
-                on_servers="$(comp_def falkordb)"
                 on_sentinels="$(comp_def falkordb-sent)"
+                on_servers="$(comp_def falkordb)"
                 if [ "$on_sentinels" = "$sentinels" ] && [ "$on_servers" != "$servers" ]; then
                   fdb_fail "the sentinels moved to $on_sentinels while the servers were still on $on_servers"
                   exit 1
